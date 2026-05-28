@@ -12,11 +12,13 @@ Use Anvics as the source-control interface. Treat the filesystem as a compatibil
 1. Create or join a `thread` for the task.
 2. Inspect the current `snapshot`.
 3. Create or select an isolated `workspace`.
-4. Edit through Anvics APIs when available, or through the workspace path when tools need files.
-5. Create a new `snapshot` at meaningful checkpoints.
-6. Attach compact `evidence`.
-7. Request `review` when the work is ready.
-8. `publish` after acceptance; export to Git only when a legacy system needs it.
+4. Run `agent enter` for the workspace before editing.
+5. Edit through Anvics APIs when available, or through the workspace path when tools need files.
+6. Run `coordination status` before finishing.
+7. Create a new `snapshot` at meaningful checkpoints.
+8. Attach compact `evidence`.
+9. Request `review` when the work is ready.
+10. `publish` after acceptance; export to Git only when a legacy system needs it.
 
 ## Source Access
 
@@ -33,10 +35,12 @@ Use a filesystem workspace only when a compiler, test runner, formatter, languag
 
 Every write belongs to the current thread and workspace.
 
+- Start by running the packet's `agent enter` command.
 - Use structured patch/write APIs when possible.
 - Keep generated-file edits explicit.
 - If the base is stale, refresh or fork the workspace instead of forcing the edit.
 - If another thread touches the same path or hunk, record the overlap before continuing.
+- Before finishing, run `coordination status` and summarize any potential clashes in evidence or review notes.
 
 Do not use commits as scratchpad history. Keep failed or abandoned attempts attached to the thread as summarized evidence.
 

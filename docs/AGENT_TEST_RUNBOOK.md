@@ -10,6 +10,7 @@ From the Anvics repo:
 scripts/agent_smoke.sh
 scripts/live_agent_packet_smoke.sh
 scripts/daemon_agent_smoke.sh
+scripts/coordination_smoke.sh
 scripts/live_agent_trial_prepare.sh
 ```
 
@@ -20,6 +21,8 @@ scripts/live_agent_trial_prepare.sh
 `live_agent_trial_prepare.sh` creates a temporary toy repo and prints two paste-ready external-agent prompts. Use it for the first real Codex/Claude/Cursor trial.
 
 `daemon_agent_smoke.sh` runs the same accept/export loop through `anvicsd` with `--use-daemon`, proving the local socket API can drive the MVP flow.
+
+`coordination_smoke.sh` prepares two agent workspaces, enters both sessions, records one known change, and shows the other agent the related active work before it edits.
 
 ## Daemon Check
 
@@ -73,6 +76,8 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    <packet-path>
 
    Follow it exactly. Work only inside the workspace path listed in the packet.
+   Run the packet's agent enter command before editing.
+   Run coordination status before finishing and report any potential clashes.
    Do not create a Git branch, Git worktree, or Git commit.
    When done, tell me a short command label, its exit code, a one-sentence summary, and optionally a command/evidence file path.
    ```

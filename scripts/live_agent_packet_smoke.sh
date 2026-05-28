@@ -37,12 +37,14 @@ echo "Prepared workspace: $workspace"
 echo "Agent packet: $packet"
 anvics agent packet --thread "$thread"
 anvics agent status --thread "$thread"
+anvics agent enter --workspace "$workspace" --name "scripted-live-agent"
 
 printf 'after\n' > "$workspace_path/modified.txt"
 rm "$workspace_path/deleted.txt"
 printf 'new\n' > "$workspace_path/added.txt"
 printf 'check modified.txt\ncheck added.txt\ncheck deleted.txt absent\n' > "$target_repo/verify-command.txt"
 printf 'compact scripted evidence\n' > "$target_repo/agent-summary.txt"
+anvics coordination status --workspace "$workspace"
 
 accept_output="$(
   anvics agent accept \

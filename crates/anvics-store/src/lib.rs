@@ -1,10 +1,11 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentPreparation, AgentStatus, ChangeStatus, ChangedPath,
-    EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
-    ObjectId, OverlayEntry, RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId,
-    RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot, SourceSnapshotId,
-    Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay,
-    WorkspaceView, WorkspaceViewId,
+    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
+    AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CoordinationStatus, EvidenceRecord,
+    EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId, ObjectId,
+    OverlayEntry, RelatedWork, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
+    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot,
+    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
+    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -34,6 +35,8 @@ pub enum StoreError {
     ReviewNotFound(String),
     #[error("publication does not exist: {0}")]
     PublicationNotFound(String),
+    #[error("agent session does not exist: {0}")]
+    AgentSessionNotFound(String),
     #[error("agent packet does not exist for thread: {0}")]
     AgentPacketNotFound(String),
     #[error("repository has no current snapshot")]
@@ -44,6 +47,8 @@ pub enum StoreError {
     EmptyEvidenceSummary,
     #[error("evidence command must not be empty")]
     EmptyEvidenceCommand,
+    #[error("agent name must not be empty")]
+    EmptyAgentName,
     #[error("review {review_id} does not belong to thread {thread_id}")]
     ReviewThreadMismatch {
         review_id: String,
@@ -99,6 +104,7 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("publications"))?;
         fs::create_dir_all(anvics_dir.join("agent-packets"))?;
         fs::create_dir_all(anvics_dir.join("events"))?;
+        fs::create_dir_all(anvics_dir.join("sessions"))?;
 
         let manifest = RepositoryManifest {
             id: RepositoryId::new(),
@@ -497,6 +503,7 @@ impl AnvicsStore {
             .review_markdown_path(review.id.as_str())
             .to_string_lossy()
             .to_string();
+        self.finish_workspace_sessions(workspace_id)?;
 
         Ok(AgentFinish {
             evidence,
@@ -637,6 +644,100 @@ impl AnvicsStore {
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         Ok(events)
+    }
+
+    pub fn enter_agent_session(
+        &self,
+        workspace_id: &str,
+        agent_name: String,
+    ) -> Result<CoordinationStatus> {
+        let agent_name = agent_name.trim().to_owned();
+        if agent_name.is_empty() {
+            return Err(StoreError::EmptyAgentName);
+        }
+        let workspace = self.show_workspace(workspace_id)?;
+        let now = now_rfc3339()?;
+
+        let mut matching: Vec<AgentSession> = self
+            .list_sessions()?
+            .into_iter()
+            .filter(|session| {
+                session.workspace_id == workspace.id
+                    && session.agent_name == agent_name
+                    && session.status == AgentSessionStatus::Active
+            })
+            .collect();
+        matching.sort_by(|left, right| {
+            left.entered_at
+                .cmp(&right.entered_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+
+        let session = if let Some(mut session) = matching.pop() {
+            session.last_seen_at = now;
+            write_json_pretty(self.session_path(session.id.as_str()), &session)?;
+            self.append_event(
+                RepositoryEventKind::AgentSessionSeen,
+                Some(session.id.to_string()),
+            )?;
+            session
+        } else {
+            let session = AgentSession {
+                id: AgentSessionId::new(),
+                thread_id: workspace.thread_id.clone(),
+                workspace_id: workspace.id,
+                agent_name,
+                status: AgentSessionStatus::Active,
+                entered_at: now.clone(),
+                last_seen_at: now,
+                finished_at: None,
+            };
+            write_json_pretty(self.session_path(session.id.as_str()), &session)?;
+            self.append_event(
+                RepositoryEventKind::AgentSessionEntered,
+                Some(session.id.to_string()),
+            )?;
+            session
+        };
+
+        self.coordination_status_with_session(workspace_id, Some(session))
+    }
+
+    pub fn leave_agent_session(&self, session_id: &str) -> Result<AgentSession> {
+        let mut session = self.show_session(session_id)?;
+        self.finish_session(&mut session)
+    }
+
+    pub fn list_agent_sessions(
+        &self,
+        thread_id: Option<&str>,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<AgentSession>> {
+        let mut sessions = self.list_sessions()?;
+        if let Some(thread_id) = thread_id {
+            let thread = self.show_thread(thread_id)?;
+            sessions.retain(|session| session.thread_id == thread.id);
+        }
+        if let Some(workspace_id) = workspace_id {
+            let workspace = self.show_workspace(workspace_id)?;
+            sessions.retain(|session| session.workspace_id == workspace.id);
+        }
+        Ok(sessions)
+    }
+
+    pub fn coordination_status(&self, workspace_id: &str) -> Result<CoordinationStatus> {
+        let current_session = self.latest_active_workspace_session(workspace_id)?;
+        if let Some(mut session) = current_session {
+            session.last_seen_at = now_rfc3339()?;
+            write_json_pretty(self.session_path(session.id.as_str()), &session)?;
+            self.append_event(
+                RepositoryEventKind::AgentSessionSeen,
+                Some(session.id.to_string()),
+            )?;
+            self.coordination_status_with_session(workspace_id, Some(session))
+        } else {
+            self.coordination_status_with_session(workspace_id, None)
+        }
     }
 
     pub fn restore_snapshot_to_path(
@@ -789,6 +890,10 @@ impl AnvicsStore {
             .join(format!("{id}.json"))
     }
 
+    fn session_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir.join("sessions").join(format!("{id}.json"))
+    }
+
     fn agent_packet_path(&self, thread_id: &str) -> PathBuf {
         self.anvics_dir
             .join("agent-packets")
@@ -926,6 +1031,12 @@ impl AnvicsStore {
         ))
     }
 
+    fn overlay_changed_path_names(&self, workspace: &WorkspaceView) -> Result<Option<Vec<String>>> {
+        Ok(self
+            .overlay_changed_paths(workspace)?
+            .map(|paths| paths.into_iter().map(|path| path.path).collect::<Vec<_>>()))
+    }
+
     fn snapshot_file_map(
         &self,
         snapshot_id: &SourceSnapshotId,
@@ -942,6 +1053,178 @@ impl AnvicsStore {
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         Ok(workspaces)
+    }
+
+    fn show_session(&self, id: &str) -> Result<AgentSession> {
+        let path = self.session_path(id);
+        if !path.exists() {
+            return Err(StoreError::AgentSessionNotFound(id.to_owned()));
+        }
+        read_json(path)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<AgentSession>> {
+        let mut sessions: Vec<AgentSession> = read_json_dir(self.anvics_dir.join("sessions"))?;
+        sessions.sort_by(|left, right| {
+            left.entered_at
+                .cmp(&right.entered_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(sessions)
+    }
+
+    fn latest_active_workspace_session(&self, workspace_id: &str) -> Result<Option<AgentSession>> {
+        let workspace = self.show_workspace(workspace_id)?;
+        Ok(self.list_sessions()?.into_iter().rfind(|session| {
+            session.workspace_id == workspace.id && session.status == AgentSessionStatus::Active
+        }))
+    }
+
+    fn finish_session(&self, session: &mut AgentSession) -> Result<AgentSession> {
+        if session.status == AgentSessionStatus::Finished {
+            return Ok(session.clone());
+        }
+        let now = now_rfc3339()?;
+        session.status = AgentSessionStatus::Finished;
+        session.last_seen_at = now.clone();
+        session.finished_at = Some(now);
+        write_json_pretty(self.session_path(session.id.as_str()), session)?;
+        self.append_event(
+            RepositoryEventKind::AgentSessionFinished,
+            Some(session.id.to_string()),
+        )?;
+        Ok(session.clone())
+    }
+
+    fn finish_workspace_sessions(&self, workspace_id: &str) -> Result<()> {
+        let workspace = self.show_workspace(workspace_id)?;
+        for mut session in self.list_sessions()?.into_iter().filter(|session| {
+            session.workspace_id == workspace.id && session.status == AgentSessionStatus::Active
+        }) {
+            self.finish_session(&mut session)?;
+        }
+        Ok(())
+    }
+
+    fn coordination_status_with_session(
+        &self,
+        workspace_id: &str,
+        current_session: Option<AgentSession>,
+    ) -> Result<CoordinationStatus> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let thread = self.show_thread(workspace.thread_id.as_str())?;
+        let known_changed_paths = self
+            .overlay_changed_path_names(&workspace)?
+            .unwrap_or_default();
+        let changed_set: BTreeSet<String> = known_changed_paths.iter().cloned().collect();
+        let sessions = self.list_sessions()?;
+        let mut related_work = Vec::new();
+
+        for other_workspace in self.list_workspaces()? {
+            if other_workspace.id == workspace.id
+                || other_workspace.base_snapshot != workspace.base_snapshot
+            {
+                continue;
+            }
+            let other_thread = self.show_thread(other_workspace.thread_id.as_str())?;
+            if other_thread.status != WorkThreadStatus::Active {
+                continue;
+            }
+            let active_sessions: Vec<AgentSession> = sessions
+                .iter()
+                .filter(|session| {
+                    session.workspace_id == other_workspace.id
+                        && session.status == AgentSessionStatus::Active
+                })
+                .cloned()
+                .collect();
+
+            if active_sessions.is_empty() {
+                related_work.push(self.related_work_for_workspace(
+                    &other_workspace,
+                    &other_thread,
+                    None,
+                    &changed_set,
+                )?);
+            } else {
+                for session in active_sessions {
+                    related_work.push(self.related_work_for_workspace(
+                        &other_workspace,
+                        &other_thread,
+                        Some(session),
+                        &changed_set,
+                    )?);
+                }
+            }
+        }
+
+        related_work.sort_by(|left, right| {
+            left.thread_title
+                .cmp(&right.thread_title)
+                .then_with(|| left.workspace_id.as_str().cmp(right.workspace_id.as_str()))
+                .then_with(|| left.agent_name.cmp(&right.agent_name))
+        });
+
+        let mut potential_clash_notes = Vec::new();
+        for related in &related_work {
+            if !related.overlap_paths.is_empty() {
+                potential_clash_notes.push(format!(
+                    "Potential path overlap with {} on workspace {}: {}",
+                    related.thread_title,
+                    related.workspace_id,
+                    related.overlap_paths.join(", ")
+                ));
+            } else if related.known_changed_paths.is_empty()
+                && related.freshness_note == "unknown changes possible until snapshot/finish"
+            {
+                potential_clash_notes.push(format!(
+                    "Workspace {} ({}) has unknown changes possible until snapshot/finish",
+                    related.workspace_id, related.thread_title
+                ));
+            }
+        }
+
+        Ok(CoordinationStatus {
+            current_session,
+            workspace,
+            thread,
+            known_changed_paths,
+            related_work,
+            potential_clash_notes,
+        })
+    }
+
+    fn related_work_for_workspace(
+        &self,
+        workspace: &WorkspaceView,
+        thread: &WorkThread,
+        session: Option<AgentSession>,
+        changed_set: &BTreeSet<String>,
+    ) -> Result<RelatedWork> {
+        let maybe_paths = self.overlay_changed_path_names(workspace)?;
+        let known_changed_paths = maybe_paths.clone().unwrap_or_default();
+        let other_set: BTreeSet<String> = known_changed_paths.iter().cloned().collect();
+        let overlap_paths: Vec<String> = changed_set.intersection(&other_set).cloned().collect();
+        let freshness_note = match maybe_paths {
+            Some(paths) if paths.is_empty() => "known no changes from latest overlay".to_owned(),
+            Some(_) => "known changed paths from latest overlay".to_owned(),
+            None => "unknown changes possible until snapshot/finish".to_owned(),
+        };
+        let (session_id, agent_name) = match session {
+            Some(session) => (Some(session.id), session.agent_name),
+            None => (None, "unregistered agent or human".to_owned()),
+        };
+
+        Ok(RelatedWork {
+            session_id,
+            agent_name,
+            thread_id: thread.id.clone(),
+            thread_title: thread.title.clone(),
+            workspace_id: workspace.id.clone(),
+            known_changed_paths,
+            overlap_paths,
+            freshness_note,
+        })
     }
 
     fn latest_thread_workspace(&self, thread_id: &WorkThreadId) -> Result<Option<WorkspaceView>> {
@@ -1265,12 +1548,14 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- When finished, report a concise command label, exit code, short summary, and optional command/evidence file path.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nFor multi-command verification, write the commands to a small file and use `--command-file <path> --label \"<short label>\"` instead of a long inline command.\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- When finished, report a concise command label, exit code, short summary, and optional command/evidence file path.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nFor multi-command verification, write the commands to a small file and use `--command-file <path> --label \"<short label>\"` instead of a long inline command.\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
         thread.id,
         workspace.id,
         repo_root.display(),
         workspace.materialized_path,
         thread.task,
+        workspace.id,
+        workspace.id,
         workspace.id,
         workspace.id
     )
@@ -1462,6 +1747,7 @@ mod tests {
         assert!(dir.path().join(".anvics/snapshots").exists());
         assert!(dir.path().join(".anvics/agent-packets").exists());
         assert!(dir.path().join(".anvics/events").exists());
+        assert!(dir.path().join(".anvics/sessions").exists());
         assert_eq!(
             AnvicsStore::open(dir.path())
                 .unwrap()
@@ -1566,6 +1852,129 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event.sequence > 2));
+    }
+
+    #[test]
+    fn agent_enter_refreshes_existing_session_and_records_events() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Agent".to_owned(), "Edit app".to_owned())
+            .unwrap();
+
+        let first = store
+            .enter_agent_session(preparation.workspace.id.as_str(), "codex-cli".to_owned())
+            .unwrap();
+        let second = store
+            .enter_agent_session(preparation.workspace.id.as_str(), "codex-cli".to_owned())
+            .unwrap();
+
+        let first_session = first.current_session.unwrap();
+        let second_session = second.current_session.unwrap();
+        assert_eq!(first_session.id, second_session.id);
+        assert_eq!(
+            store
+                .list_agent_sessions(None, Some(preparation.workspace.id.as_str()))
+                .unwrap()
+                .len(),
+            1
+        );
+        let events = store.events_since(0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::AgentSessionEntered));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::AgentSessionSeen));
+    }
+
+    #[test]
+    fn coordination_status_reports_unknown_related_workspace() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let first = store
+            .prepare_agent("Agent A".to_owned(), "Change app".to_owned())
+            .unwrap();
+        let second = store
+            .prepare_agent("Agent B".to_owned(), "Also change app".to_owned())
+            .unwrap();
+        store
+            .enter_agent_session(first.workspace.id.as_str(), "codex-a".to_owned())
+            .unwrap();
+        store
+            .enter_agent_session(second.workspace.id.as_str(), "codex-b".to_owned())
+            .unwrap();
+
+        let status = store
+            .coordination_status(first.workspace.id.as_str())
+            .unwrap();
+
+        assert_eq!(status.related_work.len(), 1);
+        assert_eq!(
+            status.related_work[0].freshness_note,
+            "unknown changes possible until snapshot/finish"
+        );
+        assert!(status
+            .potential_clash_notes
+            .iter()
+            .any(|note| note.contains("unknown changes possible")));
+    }
+
+    #[test]
+    fn coordination_status_reports_known_path_overlap() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let first = store
+            .prepare_agent("Agent A".to_owned(), "Change app".to_owned())
+            .unwrap();
+        let second = store
+            .prepare_agent("Agent B".to_owned(), "Also change app".to_owned())
+            .unwrap();
+        store
+            .enter_agent_session(first.workspace.id.as_str(), "codex-a".to_owned())
+            .unwrap();
+        store
+            .enter_agent_session(second.workspace.id.as_str(), "codex-b".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("app.txt"),
+            "agent a\n",
+        )
+        .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("app.txt"),
+            "agent b\n",
+        )
+        .unwrap();
+        store
+            .workspace_snapshot(first.workspace.id.as_str(), Some("a".to_owned()))
+            .unwrap();
+        store
+            .workspace_snapshot(second.workspace.id.as_str(), Some("b".to_owned()))
+            .unwrap();
+
+        let status = store
+            .coordination_status(first.workspace.id.as_str())
+            .unwrap();
+
+        assert_eq!(status.known_changed_paths, vec!["app.txt".to_owned()]);
+        assert_eq!(
+            status.related_work[0].overlap_paths,
+            vec!["app.txt".to_owned()]
+        );
+        assert!(status
+            .potential_clash_notes
+            .iter()
+            .any(|note| note.contains("app.txt")));
     }
 
     #[test]
@@ -1819,6 +2228,8 @@ mod tests {
         assert!(packet.contains("Edit app.txt"));
         assert!(packet.contains("only editable area"));
         assert!(packet.contains("anvics --repo"));
+        assert!(packet.contains("agent enter"));
+        assert!(packet.contains("coordination status"));
         assert!(packet.contains("agent accept"));
         assert!(packet.contains("agent finish"));
     }
@@ -1920,6 +2331,11 @@ mod tests {
         let preparation = store
             .prepare_agent("Accept agent".to_owned(), "Edit app.txt".to_owned())
             .unwrap();
+        let session = store
+            .enter_agent_session(preparation.workspace.id.as_str(), "codex-cli".to_owned())
+            .unwrap()
+            .current_session
+            .unwrap();
         fs::write(
             Path::new(&preparation.workspace.materialized_path).join("app.txt"),
             "accepted\n",
@@ -1956,5 +2372,11 @@ mod tests {
                 .status,
             WorkThreadStatus::Published
         );
+        let sessions = store
+            .list_agent_sessions(None, Some(preparation.workspace.id.as_str()))
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, session.id);
+        assert_eq!(sessions[0].status, AgentSessionStatus::Finished);
     }
 }

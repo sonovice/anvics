@@ -68,6 +68,10 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    Coordination {
+        #[command(subcommand)]
+        command: CoordinationCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -189,6 +193,22 @@ enum AgentCommand {
         #[arg(long)]
         task: String,
     },
+    Enter {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        name: String,
+    },
+    Leave {
+        #[arg(long)]
+        session: String,
+    },
+    Sessions {
+        #[arg(long)]
+        thread: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
+    },
     Packet {
         #[arg(long)]
         thread: String,
@@ -268,6 +288,14 @@ enum DaemonCommand {
     Ping {
         #[arg(long)]
         socket: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CoordinationCommand {
+    Status {
+        #[arg(long)]
+        workspace: String,
     },
 }
 
@@ -474,6 +502,33 @@ fn main() -> Result<()> {
             }
         }
         Command::Agent {
+            command: AgentCommand::Enter { workspace, name },
+        } => {
+            if let Some(socket) = daemon {
+                enter_agent_via_daemon(root, socket, workspace, name)
+            } else {
+                enter_agent(root, &workspace, name)
+            }
+        }
+        Command::Agent {
+            command: AgentCommand::Leave { session },
+        } => {
+            if let Some(socket) = daemon {
+                leave_agent_via_daemon(root, socket, session)
+            } else {
+                leave_agent(root, &session)
+            }
+        }
+        Command::Agent {
+            command: AgentCommand::Sessions { thread, workspace },
+        } => {
+            if let Some(socket) = daemon {
+                list_agent_sessions_via_daemon(root, socket, thread, workspace)
+            } else {
+                list_agent_sessions(root, thread.as_deref(), workspace.as_deref())
+            }
+        }
+        Command::Agent {
             command: AgentCommand::Packet { thread },
         } => {
             if let Some(socket) = daemon {
@@ -576,6 +631,15 @@ fn main() -> Result<()> {
         Command::Daemon {
             command: DaemonCommand::Ping { socket },
         } => ping_daemon(socket.or(daemon)),
+        Command::Coordination {
+            command: CoordinationCommand::Status { workspace },
+        } => {
+            if let Some(socket) = daemon {
+                coordination_status_via_daemon(root, socket, workspace)
+            } else {
+                coordination_status(root, &workspace)
+            }
+        }
     }
 }
 
@@ -1172,6 +1236,195 @@ fn show_agent_packet_via_daemon(root: PathBuf, socket: PathBuf, thread: String) 
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn enter_agent(root: PathBuf, workspace_id: &str, name: String) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let status = store
+        .enter_agent_session(workspace_id, name)
+        .context("failed to enter agent workspace")?;
+
+    print_agent_enter(&status);
+    Ok(())
+}
+
+fn enter_agent_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    name: String,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::AgentEnter { workspace, name })? {
+        ApiResult::AgentEnter { status } => {
+            print_agent_enter(&status);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn leave_agent(root: PathBuf, session_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let session = store
+        .leave_agent_session(session_id)
+        .context("failed to leave agent session")?;
+
+    print_agent_session("Left agent session", &session);
+    Ok(())
+}
+
+fn leave_agent_via_daemon(root: PathBuf, socket: PathBuf, session: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::AgentLeave { session })? {
+        ApiResult::AgentLeave { session } => {
+            print_agent_session("Left agent session", &session);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn list_agent_sessions(root: PathBuf, thread: Option<&str>, workspace: Option<&str>) -> Result<()> {
+    if thread.is_none() && workspace.is_none() {
+        anyhow::bail!("agent sessions requires --thread or --workspace");
+    }
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let sessions = store
+        .list_agent_sessions(thread, workspace)
+        .context("failed to list agent sessions")?;
+
+    print_agent_sessions(sessions);
+    Ok(())
+}
+
+fn list_agent_sessions_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    thread: Option<String>,
+    workspace: Option<String>,
+) -> Result<()> {
+    if thread.is_none() && workspace.is_none() {
+        anyhow::bail!("agent sessions requires --thread or --workspace");
+    }
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentSessions { thread, workspace },
+    )? {
+        ApiResult::AgentSessions { sessions } => {
+            print_agent_sessions(sessions);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn coordination_status(root: PathBuf, workspace_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let status = store
+        .coordination_status(workspace_id)
+        .context("failed to compute coordination status")?;
+
+    print_coordination_status(&status);
+    Ok(())
+}
+
+fn coordination_status_via_daemon(root: PathBuf, socket: PathBuf, workspace: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::CoordinationStatus { workspace })? {
+        ApiResult::CoordinationStatus { status } => {
+            print_coordination_status(&status);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_enter(status: &anvics_core::CoordinationStatus) {
+    if let Some(session) = &status.current_session {
+        print_agent_session("Entered agent session", session);
+    }
+    print_coordination_status(status);
+}
+
+fn print_agent_session(prefix: &str, session: &anvics_core::AgentSession) {
+    println!("{prefix} {}", session.id);
+    println!("agent: {}", session.agent_name);
+    println!("thread: {}", session.thread_id);
+    println!("workspace: {}", session.workspace_id);
+    println!("status: {:?}", session.status);
+    println!("last_seen_at: {}", session.last_seen_at);
+    if let Some(finished_at) = &session.finished_at {
+        println!("finished_at: {finished_at}");
+    }
+}
+
+fn print_agent_sessions(sessions: Vec<anvics_core::AgentSession>) {
+    if sessions.is_empty() {
+        println!("No agent sessions");
+        return;
+    }
+    for session in sessions {
+        println!(
+            "{}  {:?}  {}  thread={}  workspace={}  last_seen={}",
+            session.id,
+            session.status,
+            session.agent_name,
+            session.thread_id,
+            session.workspace_id,
+            session.last_seen_at
+        );
+    }
+}
+
+fn print_coordination_status(status: &anvics_core::CoordinationStatus) {
+    println!("coordination_workspace: {}", status.workspace.id);
+    println!("thread: {}", status.thread.id);
+    println!("title: {}", status.thread.title);
+    if status.known_changed_paths.is_empty() {
+        println!("known_changed_paths: none");
+    } else {
+        println!(
+            "known_changed_paths: {}",
+            status.known_changed_paths.join(", ")
+        );
+    }
+
+    if status.related_work.is_empty() {
+        println!("related_work: none");
+    } else {
+        println!("related_work:");
+        for related in &status.related_work {
+            println!(
+                "- agent={} thread=\"{}\" workspace={}",
+                related.agent_name, related.thread_title, related.workspace_id
+            );
+            if let Some(session_id) = &related.session_id {
+                println!("  session: {session_id}");
+            }
+            if related.known_changed_paths.is_empty() {
+                println!("  known_changed_paths: none");
+            } else {
+                println!(
+                    "  known_changed_paths: {}",
+                    related.known_changed_paths.join(", ")
+                );
+            }
+            if related.overlap_paths.is_empty() {
+                println!("  overlap_paths: none");
+            } else {
+                println!("  overlap_paths: {}", related.overlap_paths.join(", "));
+            }
+            println!("  freshness: {}", related.freshness_note);
+        }
+    }
+
+    if status.potential_clash_notes.is_empty() {
+        println!("potential_clashes: none");
+    } else {
+        println!("potential_clashes:");
+        for note in &status.potential_clash_notes {
+            println!("- {note}");
+        }
     }
 }
 

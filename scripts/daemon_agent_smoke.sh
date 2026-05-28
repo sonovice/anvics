@@ -37,12 +37,14 @@ printf '%s\n' "$prepare_output"
 thread="$(printf '%s\n' "$prepare_output" | sed -n 's/^thread: //p')"
 workspace="$(printf '%s\n' "$prepare_output" | sed -n 's/^workspace: //p')"
 workspace_path="$(printf '%s\n' "$prepare_output" | sed -n 's/^workspace_path: //p')"
+anvics agent enter --workspace "$workspace" --name "daemon-smoke-agent"
 
 printf 'after\n' > "$workspace_path/modified.txt"
 rm "$workspace_path/deleted.txt"
 printf 'new\n' > "$workspace_path/added.txt"
 command_file="$target_repo/verify-command.txt"
 printf 'cat modified.txt\ncat added.txt\n' > "$command_file"
+anvics coordination status --workspace "$workspace"
 
 accept_output="$(
   anvics agent accept \

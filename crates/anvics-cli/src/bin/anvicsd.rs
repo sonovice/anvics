@@ -195,6 +195,21 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 preparation: Box::new(preparation),
             })
         }
+        ApiMethod::AgentEnter { workspace, name } => {
+            let status = AnvicsStore::open(&repo)?.enter_agent_session(&workspace, name)?;
+            Ok(ApiResult::AgentEnter {
+                status: Box::new(status),
+            })
+        }
+        ApiMethod::AgentLeave { session } => {
+            let session = AnvicsStore::open(&repo)?.leave_agent_session(&session)?;
+            Ok(ApiResult::AgentLeave { session })
+        }
+        ApiMethod::AgentSessions { thread, workspace } => {
+            let sessions = AnvicsStore::open(&repo)?
+                .list_agent_sessions(thread.as_deref(), workspace.as_deref())?;
+            Ok(ApiResult::AgentSessions { sessions })
+        }
         ApiMethod::AgentStatus { thread } => {
             let status = AnvicsStore::open(&repo)?.agent_status(&thread)?;
             Ok(ApiResult::AgentStatus {
@@ -297,6 +312,12 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
         ApiMethod::EventsSince { sequence } => {
             let events = AnvicsStore::open(&repo)?.events_since(sequence)?;
             Ok(ApiResult::EventsSince { events })
+        }
+        ApiMethod::CoordinationStatus { workspace } => {
+            let status = AnvicsStore::open(&repo)?.coordination_status(&workspace)?;
+            Ok(ApiResult::CoordinationStatus {
+                status: Box::new(status),
+            })
         }
     }
 }

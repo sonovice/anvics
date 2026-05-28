@@ -281,6 +281,8 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains("Modify, add, and delete files"));
     assert!(packet_text.contains("anvics --repo"));
     assert!(packet_text.contains("only editable area"));
+    assert!(packet_text.contains("agent enter"));
+    assert!(packet_text.contains("coordination status"));
     anvics(dir.path(), &["agent", "packet", "--thread", &thread])
         .assert()
         .success()
@@ -445,6 +447,19 @@ fn agent_accept_publishes_and_exports_patch() {
     let thread = value_after_prefix(&prepare_output, "thread: ");
     let workspace = value_after_prefix(&prepare_output, "workspace: ");
     let workspace_path = value_after_prefix(&prepare_output, "workspace_path: ");
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &workspace,
+            "--name",
+            "codex-cli",
+        ],
+    )
+    .assert()
+    .success();
     fs::write(format!("{workspace_path}/app.txt"), "accepted\n").unwrap();
     let artifact = dir.path().join("accept-artifact.txt");
     fs::write(&artifact, "compact accept artifact\n").unwrap();
@@ -506,6 +521,14 @@ fn agent_accept_publishes_and_exports_patch() {
         .success()
         .stdout(predicate::str::contains("publication_status: published"))
         .stdout(predicate::str::contains(&publication));
+    anvics(
+        dir.path(),
+        &["agent", "sessions", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Finished"))
+    .stdout(predicate::str::contains("codex-cli"));
 
     let clean = tempdir().unwrap();
     fs::write(clean.path().join("app.txt"), "base\n").unwrap();
@@ -581,6 +604,128 @@ fn evidence_command_attaches_file_backed_evidence() {
     .assert()
     .success()
     .stdout(predicate::str::contains("Attached command evidence"));
+}
+
+#[test]
+fn agent_enter_and_coordination_status_report_related_work() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let first = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Agent A",
+            "--task",
+            "Change app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let second = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Agent B",
+            "--task",
+            "Also change app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let first_workspace = value_after_prefix(&first, "workspace: ");
+    let first_path = value_after_prefix(&first, "workspace_path: ");
+    let second_workspace = value_after_prefix(&second, "workspace: ");
+
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &first_workspace,
+            "--name",
+            "codex-a",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Entered agent session"))
+    .stdout(predicate::str::contains("unknown changes possible"));
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &second_workspace,
+            "--name",
+            "codex-b",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("unknown changes possible"));
+
+    fs::write(format!("{first_path}/app.txt"), "agent a\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "workspace",
+            "snapshot",
+            &first_workspace,
+            "--message",
+            "agent a",
+        ],
+    )
+    .assert()
+    .success();
+    anvics(
+        dir.path(),
+        &["coordination", "status", "--workspace", &second_workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("known_changed_paths: app.txt"))
+    .stdout(predicate::str::contains("codex-a"));
+
+    let sessions = anvics(
+        dir.path(),
+        &["agent", "sessions", "--workspace", &first_workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("codex-a"))
+    .get_output()
+    .stdout
+    .clone();
+    let session = String::from_utf8(sessions)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    anvics(dir.path(), &["agent", "leave", "--session", &session])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Left agent session"));
 }
 
 #[test]
@@ -667,6 +812,21 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     let thread = value_after_prefix(&prepare, "thread: ");
     let workspace = value_after_prefix(&prepare, "workspace: ");
     let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &workspace,
+            "--name",
+            "codex-daemon",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Entered agent session"));
 
     fs::write(format!("{workspace_path}/modified.txt"), "after\n").unwrap();
     fs::remove_file(format!("{workspace_path}/deleted.txt")).unwrap();
@@ -720,6 +880,15 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     .assert()
     .success()
     .stdout(predicate::str::contains("publication_status: published"));
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "sessions", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Finished"))
+    .stdout(predicate::str::contains("codex-daemon"));
     daemon_anvics(dir.path(), &socket, &["events", "list", "--since", "0"])
         .assert()
         .success()
@@ -811,8 +980,71 @@ fn daemon_backed_two_agent_overlap_and_error_output() {
     let second_workspace = value_after_prefix(&second, "workspace: ");
     let second_path = value_after_prefix(&second, "workspace_path: ");
 
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &first_workspace,
+            "--name",
+            "codex-a",
+        ],
+    )
+    .assert()
+    .success();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &second_workspace,
+            "--name",
+            "codex-b",
+        ],
+    )
+    .assert()
+    .success();
     fs::write(format!("{first_path}/app.txt"), "agent a\n").unwrap();
     fs::write(format!("{second_path}/app.txt"), "agent b\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "workspace",
+            "snapshot",
+            &first_workspace,
+            "--message",
+            "Agent A checkpoint",
+        ],
+    )
+    .assert()
+    .success();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "workspace",
+            "snapshot",
+            &second_workspace,
+            "--message",
+            "Agent B checkpoint",
+        ],
+    )
+    .assert()
+    .success();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["coordination", "status", "--workspace", &first_workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("overlap_paths: app.txt"))
+    .stdout(predicate::str::contains("Potential path overlap"));
     daemon_anvics(
         dir.path(),
         &socket,
@@ -915,8 +1147,66 @@ fn two_prepared_agents_report_overlap_notes() {
     let second_workspace = value_after_prefix(&second_prepare, "workspace: ");
     let second_path = value_after_prefix(&second_prepare, "workspace_path: ");
 
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &first_workspace,
+            "--name",
+            "codex-a",
+        ],
+    )
+    .assert()
+    .success();
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &second_workspace,
+            "--name",
+            "codex-b",
+        ],
+    )
+    .assert()
+    .success();
     fs::write(format!("{first_path}/app.txt"), "agent a\n").unwrap();
     fs::write(format!("{second_path}/app.txt"), "agent b\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "workspace",
+            "snapshot",
+            &first_workspace,
+            "--message",
+            "Agent A checkpoint",
+        ],
+    )
+    .assert()
+    .success();
+    anvics(
+        dir.path(),
+        &[
+            "workspace",
+            "snapshot",
+            &second_workspace,
+            "--message",
+            "Agent B checkpoint",
+        ],
+    )
+    .assert()
+    .success();
+    anvics(
+        dir.path(),
+        &["coordination", "status", "--workspace", &first_workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("overlap_paths: app.txt"))
+    .stdout(predicate::str::contains("Potential path overlap"));
 
     anvics(
         dir.path(),

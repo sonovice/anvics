@@ -60,6 +60,7 @@ opaque_id!(EvidenceRecordId);
 opaque_id!(ReviewProjectionId);
 opaque_id!(NativePublicationId);
 opaque_id!(RepositoryEventId);
+opaque_id!(AgentSessionId);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -273,6 +274,53 @@ pub enum RepositoryEventKind {
     ReviewCreated,
     PublicationCreated,
     LegacyPatchExported,
+    AgentSessionEntered,
+    AgentSessionSeen,
+    AgentSessionFinished,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentSession {
+    pub id: AgentSessionId,
+    pub thread_id: WorkThreadId,
+    pub workspace_id: WorkspaceViewId,
+    pub agent_name: String,
+    pub status: AgentSessionStatus,
+    pub entered_at: String,
+    pub last_seen_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionStatus {
+    Active,
+    Finished,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CoordinationStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_session: Option<AgentSession>,
+    pub workspace: WorkspaceView,
+    pub thread: WorkThread,
+    pub known_changed_paths: Vec<String>,
+    pub related_work: Vec<RelatedWork>,
+    pub potential_clash_notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RelatedWork {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<AgentSessionId>,
+    pub agent_name: String,
+    pub thread_id: WorkThreadId,
+    pub thread_title: String,
+    pub workspace_id: WorkspaceViewId,
+    pub known_changed_paths: Vec<String>,
+    pub overlap_paths: Vec<String>,
+    pub freshness_note: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -412,6 +460,33 @@ mod tests {
             subject_id: Some(publication.id.to_string()),
             created_at: "2026-05-28T00:00:05Z".to_owned(),
         };
+        let session = AgentSession {
+            id: AgentSessionId::new(),
+            thread_id: thread_id.clone(),
+            workspace_id: workspace.id.clone(),
+            agent_name: "codex-cli".to_owned(),
+            status: AgentSessionStatus::Active,
+            entered_at: "2026-05-28T00:00:06Z".to_owned(),
+            last_seen_at: "2026-05-28T00:00:07Z".to_owned(),
+            finished_at: None,
+        };
+        let coordination = CoordinationStatus {
+            current_session: Some(session.clone()),
+            workspace: workspace.clone(),
+            thread: thread.clone(),
+            known_changed_paths: vec!["app.txt".to_owned()],
+            related_work: vec![RelatedWork {
+                session_id: Some(session.id.clone()),
+                agent_name: "codex-cli".to_owned(),
+                thread_id: thread_id.clone(),
+                thread_title: "Agent task".to_owned(),
+                workspace_id: workspace.id.clone(),
+                known_changed_paths: vec!["app.txt".to_owned()],
+                overlap_paths: vec!["app.txt".to_owned()],
+                freshness_note: "known changed paths from latest overlay".to_owned(),
+            }],
+            potential_clash_notes: vec!["Potential path overlap: app.txt".to_owned()],
+        };
         let acceptance = AgentAcceptance {
             evidence: evidence.clone(),
             workspace: workspace.clone(),
@@ -456,6 +531,18 @@ mod tests {
             serde_json::from_str::<RepositoryEvent>(&serde_json::to_string(&event).unwrap())
                 .unwrap(),
             event
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentSession>(&serde_json::to_string(&session).unwrap())
+                .unwrap(),
+            session
+        );
+        assert_eq!(
+            serde_json::from_str::<CoordinationStatus>(
+                &serde_json::to_string(&coordination).unwrap()
+            )
+            .unwrap(),
+            coordination
         );
         assert_eq!(
             serde_json::from_str::<AgentAcceptance>(&serde_json::to_string(&acceptance).unwrap())

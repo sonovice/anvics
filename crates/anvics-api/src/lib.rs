@@ -1,7 +1,7 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentPreparation, AgentStatus, EvidenceRecord, NativePublication,
-    RepositoryEvent, RepositoryManifest, ReviewProjection, SourceSnapshot, WorkThread,
-    WorkspaceView,
+    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, CoordinationStatus,
+    EvidenceRecord, NativePublication, RepositoryEvent, RepositoryManifest, ReviewProjection,
+    SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +66,17 @@ pub enum ApiMethod {
         title: String,
         task: String,
     },
+    AgentEnter {
+        workspace: String,
+        name: String,
+    },
+    AgentLeave {
+        session: String,
+    },
+    AgentSessions {
+        thread: Option<String>,
+        workspace: Option<String>,
+    },
     AgentStatus {
         thread: String,
     },
@@ -110,6 +121,9 @@ pub enum ApiMethod {
     },
     EventsSince {
         sequence: u64,
+    },
+    CoordinationStatus {
+        workspace: String,
     },
 }
 
@@ -190,6 +204,15 @@ pub enum ApiResult {
     AgentPrepare {
         preparation: Box<AgentPreparation>,
     },
+    AgentEnter {
+        status: Box<CoordinationStatus>,
+    },
+    AgentLeave {
+        session: AgentSession,
+    },
+    AgentSessions {
+        sessions: Vec<AgentSession>,
+    },
     AgentStatus {
         status: Box<AgentStatus>,
     },
@@ -219,6 +242,9 @@ pub enum ApiResult {
     },
     EventsSince {
         events: Vec<RepositoryEvent>,
+    },
+    CoordinationStatus {
+        status: Box<CoordinationStatus>,
     },
     Error {
         message: String,
@@ -293,6 +319,17 @@ mod tests {
                 title: "title".to_owned(),
                 task: "task".to_owned(),
             },
+            ApiMethod::AgentEnter {
+                workspace: "workspace-1".to_owned(),
+                name: "codex-cli".to_owned(),
+            },
+            ApiMethod::AgentLeave {
+                session: "session-1".to_owned(),
+            },
+            ApiMethod::AgentSessions {
+                thread: Some("thread-1".to_owned()),
+                workspace: None,
+            },
             ApiMethod::AgentStatus {
                 thread: "thread-1".to_owned(),
             },
@@ -325,6 +362,9 @@ mod tests {
                 output: "accepted.patch".to_owned(),
             },
             ApiMethod::EventsSince { sequence: 42 },
+            ApiMethod::CoordinationStatus {
+                workspace: "workspace-1".to_owned(),
+            },
         ];
 
         for method in requests {
@@ -438,6 +478,33 @@ mod tests {
             publication: publication.clone(),
             patch_path: "accepted.patch".to_owned(),
         };
+        let session = AgentSession {
+            id: AgentSessionId::new(),
+            thread_id: thread_id.clone(),
+            workspace_id: workspace.id.clone(),
+            agent_name: "codex-cli".to_owned(),
+            status: AgentSessionStatus::Active,
+            entered_at: "2026-05-28T00:00:07Z".to_owned(),
+            last_seen_at: "2026-05-28T00:00:08Z".to_owned(),
+            finished_at: None,
+        };
+        let coordination = CoordinationStatus {
+            current_session: Some(session.clone()),
+            workspace: workspace.clone(),
+            thread: thread.clone(),
+            known_changed_paths: vec!["app.txt".to_owned()],
+            related_work: vec![RelatedWork {
+                session_id: Some(session.id.clone()),
+                agent_name: "codex-cli".to_owned(),
+                thread_id: thread_id.clone(),
+                thread_title: "title".to_owned(),
+                workspace_id: workspace.id.clone(),
+                known_changed_paths: vec!["app.txt".to_owned()],
+                overlap_paths: vec!["app.txt".to_owned()],
+                freshness_note: "known changed paths from latest overlay".to_owned(),
+            }],
+            potential_clash_notes: vec!["Potential path overlap with title: app.txt".to_owned()],
+        };
         let results = vec![
             ApiResult::Pong,
             ApiResult::RepoInit {
@@ -478,6 +545,15 @@ mod tests {
             ApiResult::AgentPrepare {
                 preparation: Box::new(preparation),
             },
+            ApiResult::AgentEnter {
+                status: Box::new(coordination.clone()),
+            },
+            ApiResult::AgentLeave {
+                session: session.clone(),
+            },
+            ApiResult::AgentSessions {
+                sessions: vec![session],
+            },
             ApiResult::AgentStatus {
                 status: Box::new(AgentStatus {
                     thread: thread.clone(),
@@ -515,8 +591,11 @@ mod tests {
                     sequence: 1,
                     kind: RepositoryEventKind::RepositoryInitialized,
                     subject_id: None,
-                    created_at: "2026-05-28T00:00:07Z".to_owned(),
+                    created_at: "2026-05-28T00:00:09Z".to_owned(),
                 }],
+            },
+            ApiResult::CoordinationStatus {
+                status: Box::new(coordination),
             },
             ApiResult::Error {
                 message: "missing thread".to_owned(),
