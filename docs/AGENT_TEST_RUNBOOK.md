@@ -13,6 +13,7 @@ scripts/daemon_agent_smoke.sh
 scripts/coordination_smoke.sh
 scripts/command_worker_smoke.sh
 scripts/secret_risk_smoke.sh
+scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
 ```
 
@@ -29,6 +30,8 @@ scripts/live_agent_trial_prepare.sh
 `command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
+
+`dogfood_trial_prepare.sh` creates a disposable copy of the Anvics repo, prepares two realistic agent packets, and writes `.anvics/dogfood-trial-manifest.env` for a real dogfood run.
 
 ## Daemon Check
 
@@ -160,6 +163,18 @@ scripts/live_agent_trial_verify.sh "$target_repo" \
 Append an artifact path as the final argument when the accepted agent produced a compact artifact worth linking.
 
 Capture observations in `docs/trials/LIVE_AGENT_TRIAL_TEMPLATE.md`. Do not create a trial log until an actual live run has happened.
+
+## Dogfood Trial
+
+Use the dogfood harness before starting VFS work:
+
+```sh
+scripts/dogfood_trial_prepare.sh
+```
+
+Paste the two generated prompts into two external agents. Accept one completed workspace with `scripts/live_agent_trial_verify.sh` using the target repo, thread id, workspace id, verification command, exit code, and summary printed or reported by the agents.
+
+After the actual run, copy `docs/trials/0002-anvics-dogfood-template.md` to `docs/trials/0002-anvics-dogfood.md` and fill it with the observed friction, review quality, risk findings, and patch export result.
 
 ## What To Check
 

@@ -141,6 +141,15 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 workspace: Box::new(workspace),
             })
         }
+        ApiMethod::WorkspaceShow { id } => {
+            let store = AnvicsStore::open(&repo)?;
+            let workspace = store.show_workspace(&id)?;
+            let changed_paths = store.workspace_changed_paths(&id)?;
+            Ok(ApiResult::WorkspaceShow {
+                workspace: Box::new(workspace),
+                changed_paths,
+            })
+        }
         ApiMethod::WorkspaceSnapshot { id, message } => {
             let workspace = AnvicsStore::open(&repo)?.workspace_snapshot(&id, message)?;
             Ok(ApiResult::WorkspaceSnapshot {

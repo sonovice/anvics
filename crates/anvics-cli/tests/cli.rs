@@ -554,6 +554,77 @@ fn agent_accept_publishes_and_exports_patch() {
 }
 
 #[test]
+fn workspace_show_and_agent_status_by_workspace_report_overlay_state() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Workspace UX",
+            "--task",
+            "Edit app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare_output, "thread: ");
+    let workspace = value_after_prefix(&prepare_output, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare_output, "workspace_path: ");
+
+    anvics(dir.path(), &["workspace", "show", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&thread))
+        .stdout(predicate::str::contains(&workspace_path))
+        .stdout(predicate::str::contains("latest_snapshot: none"))
+        .stdout(predicate::str::contains("overlay_changed_paths: unknown"));
+    anvics(dir.path(), &["agent", "status", "--workspace", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&thread))
+        .stdout(predicate::str::contains("publication_status: unpublished"));
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "status",
+            "--thread",
+            &thread,
+            "--workspace",
+            &workspace,
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--thread or --workspace"));
+
+    fs::write(format!("{workspace_path}/app.txt"), "changed\n").unwrap();
+    anvics(
+        dir.path(),
+        &["workspace", "snapshot", &workspace, "--message", "changed"],
+    )
+    .assert()
+    .success();
+    anvics(dir.path(), &["workspace", "show", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("latest_snapshot: "))
+        .stdout(predicate::str::contains("overlay_changed_paths:"))
+        .stdout(predicate::str::contains("Modified: app.txt"));
+}
+
+#[test]
 fn evidence_command_attaches_file_backed_evidence() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -1123,7 +1194,11 @@ fn agent_accept_run_blocks_when_command_stdout_contains_secret() {
     )
     .assert()
     .failure()
-    .stderr(predicate::str::contains("publication blocked"));
+    .stderr(predicate::str::contains("publication blocked"))
+    .stderr(predicate::str::contains("Recovery hint"))
+    .stderr(predicate::str::contains("agent status --workspace"))
+    .stderr(predicate::str::contains("risk list --review"))
+    .stderr(predicate::str::contains("--allow-secret-risk"));
     let status = anvics(dir.path(), &["agent", "status", "--thread", &thread])
         .assert()
         .success()

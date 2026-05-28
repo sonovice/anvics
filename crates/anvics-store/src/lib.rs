@@ -337,6 +337,11 @@ impl AnvicsStore {
         read_json(path)
     }
 
+    pub fn workspace_changed_paths(&self, id: &str) -> Result<Option<Vec<ChangedPath>>> {
+        let workspace = self.show_workspace(id)?;
+        self.overlay_changed_paths(&workspace)
+    }
+
     pub fn workspace_snapshot(&self, id: &str, message: Option<String>) -> Result<WorkspaceView> {
         let mut workspace = self.show_workspace(id)?;
         let snapshot =

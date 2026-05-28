@@ -1,7 +1,8 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, CommandEvent,
-    CoordinationStatus, EvidenceRecord, NativePublication, RepositoryEvent, RepositoryManifest,
-    ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
+    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, ChangedPath,
+    CommandEvent, CoordinationStatus, EvidenceRecord, NativePublication, RepositoryEvent,
+    RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread,
+    WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +38,9 @@ pub enum ApiMethod {
     },
     WorkspaceCreate {
         thread: String,
+    },
+    WorkspaceShow {
+        id: String,
     },
     WorkspaceSnapshot {
         id: String,
@@ -231,6 +235,10 @@ pub enum ApiResult {
     WorkspaceCreate {
         workspace: Box<WorkspaceView>,
     },
+    WorkspaceShow {
+        workspace: Box<WorkspaceView>,
+        changed_paths: Option<Vec<ChangedPath>>,
+    },
     WorkspaceSnapshot {
         workspace: Box<WorkspaceView>,
     },
@@ -334,6 +342,9 @@ mod tests {
             },
             ApiMethod::WorkspaceCreate {
                 thread: "thread-1".to_owned(),
+            },
+            ApiMethod::WorkspaceShow {
+                id: "workspace-1".to_owned(),
             },
             ApiMethod::WorkspaceSnapshot {
                 id: "workspace-1".to_owned(),
@@ -671,6 +682,13 @@ mod tests {
             },
             ApiResult::WorkspaceCreate {
                 workspace: Box::new(workspace.clone()),
+            },
+            ApiResult::WorkspaceShow {
+                workspace: Box::new(workspace.clone()),
+                changed_paths: Some(vec![ChangedPath {
+                    path: "app.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                }]),
             },
             ApiResult::WorkspaceSnapshot {
                 workspace: Box::new(workspace.clone()),

@@ -122,6 +122,9 @@ enum WorkspaceCommand {
         #[arg(long)]
         thread: String,
     },
+    Show {
+        id: String,
+    },
     Snapshot {
         id: String,
         #[arg(short, long)]
@@ -269,7 +272,9 @@ enum AgentCommand {
     },
     Status {
         #[arg(long)]
-        thread: String,
+        thread: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
     },
     Finish {
         #[arg(long)]
@@ -506,6 +511,15 @@ fn main() -> Result<()> {
             }
         }
         CliCommand::Workspace {
+            command: WorkspaceCommand::Show { id },
+        } => {
+            if let Some(socket) = daemon {
+                show_workspace_via_daemon(root, socket, id)
+            } else {
+                show_workspace(root, &id)
+            }
+        }
+        CliCommand::Workspace {
             command: WorkspaceCommand::Snapshot { id, message },
         } => {
             if let Some(socket) = daemon {
@@ -717,12 +731,12 @@ fn main() -> Result<()> {
             }
         }
         CliCommand::Agent {
-            command: AgentCommand::Status { thread },
+            command: AgentCommand::Status { thread, workspace },
         } => {
             if let Some(socket) = daemon {
-                show_agent_status_via_daemon(root, socket, thread)
+                show_agent_status_via_daemon(root, socket, thread, workspace)
             } else {
-                show_agent_status(root, &thread)
+                show_agent_status(root, thread.as_deref(), workspace.as_deref())
             }
         }
         CliCommand::Agent {
@@ -1099,6 +1113,56 @@ fn print_workspace_created(workspace: anvics_core::WorkspaceView) {
     println!("Created workspace {}", workspace.id);
     println!("thread: {}", workspace.thread_id);
     println!("path: {}", workspace.materialized_path);
+}
+
+fn show_workspace(root: PathBuf, workspace_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let workspace = store
+        .show_workspace(workspace_id)
+        .with_context(|| format!("failed to show workspace {workspace_id}"))?;
+    let changed_paths = store
+        .workspace_changed_paths(workspace_id)
+        .with_context(|| format!("failed to read overlay for workspace {workspace_id}"))?;
+
+    print_workspace_show(&workspace, changed_paths.as_deref());
+    Ok(())
+}
+
+fn show_workspace_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::WorkspaceShow { id })? {
+        ApiResult::WorkspaceShow {
+            workspace,
+            changed_paths,
+        } => {
+            print_workspace_show(&workspace, changed_paths.as_deref());
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_workspace_show(
+    workspace: &anvics_core::WorkspaceView,
+    changed_paths: Option<&[anvics_core::ChangedPath]>,
+) {
+    println!("workspace: {}", workspace.id);
+    println!("thread: {}", workspace.thread_id);
+    println!("base_snapshot: {}", workspace.base_snapshot);
+    println!("workspace_path: {}", workspace.materialized_path);
+    match &workspace.latest_snapshot {
+        Some(snapshot) => println!("latest_snapshot: {snapshot}"),
+        None => println!("latest_snapshot: none"),
+    }
+    match changed_paths {
+        Some([]) => println!("overlay_changed_paths: none"),
+        Some(paths) => {
+            println!("overlay_changed_paths:");
+            for path in paths {
+                println!("- {:?}: {}", path.status, path.path);
+            }
+        }
+        None => println!("overlay_changed_paths: unknown"),
+    }
 }
 
 fn snapshot_workspace(root: PathBuf, workspace_id: &str, message: Option<String>) -> Result<()> {
@@ -1809,23 +1873,66 @@ fn print_coordination_status(status: &anvics_core::CoordinationStatus) {
     }
 }
 
-fn show_agent_status(root: PathBuf, thread_id: &str) -> Result<()> {
+fn show_agent_status(
+    root: PathBuf,
+    thread_id: Option<&str>,
+    workspace_id: Option<&str>,
+) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let thread_id = resolve_status_thread(&store, thread_id, workspace_id)?;
     let status = store
-        .agent_status(thread_id)
+        .agent_status(&thread_id)
         .with_context(|| format!("failed to show agent status for thread {thread_id}"))?;
 
     print_agent_status(status);
     Ok(())
 }
 
-fn show_agent_status_via_daemon(root: PathBuf, socket: PathBuf, thread: String) -> Result<()> {
+fn show_agent_status_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    thread: Option<String>,
+    workspace: Option<String>,
+) -> Result<()> {
+    let thread = if let Some(thread) = thread {
+        thread
+    } else if let Some(workspace) = workspace {
+        match daemon_request(
+            &socket,
+            root.clone(),
+            ApiMethod::WorkspaceShow { id: workspace },
+        )? {
+            ApiResult::WorkspaceShow { workspace, .. } => workspace.thread_id.to_string(),
+            result => return unexpected_daemon_result(result),
+        }
+    } else {
+        anyhow::bail!("agent status requires --thread or --workspace");
+    };
     match daemon_request(&socket, root, ApiMethod::AgentStatus { thread })? {
         ApiResult::AgentStatus { status } => {
             print_agent_status(*status);
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn resolve_status_thread(
+    store: &AnvicsStore,
+    thread_id: Option<&str>,
+    workspace_id: Option<&str>,
+) -> Result<String> {
+    match (thread_id, workspace_id) {
+        (Some(thread), None) => Ok(thread.to_owned()),
+        (None, Some(workspace)) => Ok(store
+            .show_workspace(workspace)
+            .with_context(|| format!("failed to show workspace {workspace}"))?
+            .thread_id
+            .to_string()),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("agent status accepts --thread or --workspace, not both")
+        }
+        (None, None) => anyhow::bail!("agent status requires --thread or --workspace"),
     }
 }
 
@@ -1925,11 +2032,11 @@ fn accept_agent(
 ) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let publication_options = options.publication_options();
-    let acceptance = if options.run_label.is_some() || !options.argv.is_empty() {
+    let result = if options.run_label.is_some() || !options.argv.is_empty() {
         let input = agent_accept_run_input(workspace_id.to_owned(), options)?;
         store
             .accept_agent_with_command_run_and_options(input, output, publication_options)
-            .context("failed to accept agent workspace with command run")?
+            .map_err(|error| (error, "failed to accept agent workspace with command run"))
     } else {
         let input = accept_command_input(options)?;
         store
@@ -1939,10 +2046,58 @@ fn accept_agent(
                 output,
                 publication_options,
             )
-            .context("failed to accept agent workspace")?
+            .map_err(|error| (error, "failed to accept agent workspace"))
+    };
+    let acceptance = match result {
+        Ok(acceptance) => acceptance,
+        Err((error @ StoreError::PublicationBlockedSecretRisk { .. }, context)) => {
+            if let Err(hint_error) = print_accept_recovery_hint(&root, &store, workspace_id) {
+                eprintln!("Recovery hint unavailable: {hint_error:#}");
+            }
+            return Err(error).context(context);
+        }
+        Err((error, context)) => return Err(error).context(context),
     };
 
     print_agent_acceptance(acceptance);
+    Ok(())
+}
+
+fn print_accept_recovery_hint(
+    root: &std::path::Path,
+    store: &AnvicsStore,
+    workspace_id: &str,
+) -> Result<()> {
+    let workspace = store
+        .show_workspace(workspace_id)
+        .with_context(|| format!("failed to show workspace {workspace_id}"))?;
+    let status = store
+        .agent_status(workspace.thread_id.as_str())
+        .with_context(|| {
+            format!(
+                "failed to show agent status for thread {}",
+                workspace.thread_id
+            )
+        })?;
+    eprintln!("Recovery hint: Anvics preserved the evidence, snapshot, and review.");
+    eprintln!(
+        "  anvics --repo {} agent status --workspace {}",
+        shell_quote(&display_path(root)),
+        workspace.id
+    );
+    if let Some(review_id) = status.review_ids.last() {
+        eprintln!(
+            "  anvics --repo {} risk list --review {}",
+            shell_quote(&display_path(root)),
+            review_id
+        );
+        eprintln!(
+            "  anvics --repo {} publish create --thread {} --review {} --allow-secret-risk --override-reason \"<audited reason>\"",
+            shell_quote(&display_path(root)),
+            workspace.thread_id,
+            review_id
+        );
+    }
     Ok(())
 }
 
