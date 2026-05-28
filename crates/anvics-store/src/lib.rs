@@ -1,9 +1,9 @@
 use anvics_core::{
-    AgentFinish, AgentPreparation, ChangeStatus, ChangedPath, EvidenceRecord, EvidenceRecordId,
-    EvidenceSummary, NativePublication, NativePublicationId, ObjectId, RepositoryId,
-    RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot, SourceSnapshotId,
-    Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceView,
-    WorkspaceViewId,
+    AgentFinish, AgentPreparation, AgentStatus, ChangeStatus, ChangedPath, EvidenceRecord,
+    EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId, ObjectId,
+    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot,
+    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
+    WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -33,6 +33,8 @@ pub enum StoreError {
     ReviewNotFound(String),
     #[error("publication does not exist: {0}")]
     PublicationNotFound(String),
+    #[error("agent packet does not exist for thread: {0}")]
+    AgentPacketNotFound(String),
     #[error("repository has no current snapshot")]
     NoHeadSnapshot,
     #[error("thread has no workspace snapshot yet: {0}")]
@@ -302,7 +304,7 @@ impl AnvicsStore {
         write_json_pretty(self.review_path(review.id.as_str()), &review)?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
-            render_review(&review, &thread),
+            render_review(&self.root, &review, &thread),
         )?;
         Ok(review)
     }
@@ -359,7 +361,10 @@ impl AnvicsStore {
         if let Some(parent) = packet_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&packet_path, render_agent_packet(&thread, &workspace))?;
+        fs::write(
+            &packet_path,
+            render_agent_packet(&self.root, &thread, &workspace),
+        )?;
 
         Ok(AgentPreparation {
             thread,
@@ -374,6 +379,7 @@ impl AnvicsStore {
         command: String,
         exit_code: i32,
         summary: String,
+        artifact_path: Option<String>,
     ) -> Result<AgentFinish> {
         let workspace = self.show_workspace(workspace_id)?;
         let evidence = self.attach_evidence(
@@ -381,7 +387,7 @@ impl AnvicsStore {
             command,
             exit_code,
             summary,
-            None,
+            artifact_path,
         )?;
         let workspace =
             self.workspace_snapshot(workspace_id, Some("agent finish result".to_owned()))?;
@@ -396,6 +402,43 @@ impl AnvicsStore {
             workspace,
             review,
             review_markdown_path,
+        })
+    }
+
+    pub fn agent_packet_file_path(&self, thread_id: &str) -> Result<PathBuf> {
+        self.show_thread(thread_id)?;
+        let path = self.agent_packet_path(thread_id);
+        if !path.exists() {
+            return Err(StoreError::AgentPacketNotFound(thread_id.to_owned()));
+        }
+        Ok(path)
+    }
+
+    pub fn agent_status(&self, thread_id: &str) -> Result<AgentStatus> {
+        let thread = self.show_thread(thread_id)?;
+        let workspaces: Vec<WorkspaceView> = self
+            .list_workspaces()?
+            .into_iter()
+            .filter(|workspace| workspace.thread_id == thread.id)
+            .collect();
+        let evidence_count = self.thread_evidence(&thread.id)?.len();
+        let review_ids = self
+            .thread_reviews(&thread.id)?
+            .into_iter()
+            .map(|review| review.id)
+            .collect();
+        let publication_ids = self
+            .thread_publications(&thread.id)?
+            .into_iter()
+            .map(|publication| publication.id)
+            .collect();
+
+        Ok(AgentStatus {
+            thread,
+            workspaces,
+            evidence_count,
+            review_ids,
+            publication_ids,
         })
     }
 
@@ -646,6 +689,29 @@ impl AnvicsStore {
             .collect())
     }
 
+    fn thread_reviews(&self, thread_id: &WorkThreadId) -> Result<Vec<ReviewProjection>> {
+        let mut reviews: Vec<ReviewProjection> = read_json_dir(self.anvics_dir.join("reviews"))?;
+        reviews.retain(|review| &review.thread_id == thread_id);
+        reviews.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(reviews)
+    }
+
+    fn thread_publications(&self, thread_id: &WorkThreadId) -> Result<Vec<NativePublication>> {
+        let mut publications: Vec<NativePublication> =
+            read_json_dir(self.anvics_dir.join("publications"))?;
+        publications.retain(|publication| &publication.thread_id == thread_id);
+        publications.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(publications)
+    }
+
     fn overlap_notes(
         &self,
         thread: &WorkThread,
@@ -872,14 +938,22 @@ fn diff_file_maps(
         .collect()
 }
 
-fn render_agent_packet(thread: &WorkThread, workspace: &WorkspaceView) -> String {
+fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &WorkspaceView) -> String {
+    let repo = shell_quote(&display_path(repo_root));
+    let workspace_path = shell_quote(&workspace.materialized_path);
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above.\n- Do not create a Git branch, Git worktree, or Git commit.\n- Keep command output compact.\n- When finished, report the command you ran, exit code, and a short summary.\n\n## Finish Command Template\n\n```sh\nanvics agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n",
-        thread.id, workspace.id, workspace.materialized_path, thread.task, workspace.id
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- When finished, report the command you ran, exit code, and a short summary.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        thread.id,
+        workspace.id,
+        repo_root.display(),
+        workspace.materialized_path,
+        thread.task,
+        workspace.id
     )
 }
 
-fn render_review(review: &ReviewProjection, thread: &WorkThread) -> String {
+fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThread) -> String {
+    let repo = shell_quote(&display_path(repo_root));
     let mut markdown = format!(
         "# Review {}\n\n- Thread: {}\n- Title: {}\n- Base snapshot: {}\n- Final snapshot: {}\n\n## Task\n\n{}\n\n",
         review.id,
@@ -922,11 +996,23 @@ fn render_review(review: &ReviewProjection, thread: &WorkThread) -> String {
 
     markdown.push_str("\n## Next Commands\n\n");
     markdown.push_str(&format!(
-        "```sh\nanvics publish create --thread {} --review {}\nanvics legacy git export --publication <publication-id> --output accepted.patch\n```\n",
+        "```sh\nanvics --repo {repo} review show {} --format markdown\nanvics --repo {repo} publish create --thread {} --review {}\nanvics --repo {repo} legacy git export --publication <publication-id> --output accepted.patch\n```\n",
+        review.id,
         review.thread_id, review.id
     ));
 
     markdown
+}
+
+fn display_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn render_unified_file_patch(
@@ -1244,7 +1330,9 @@ mod tests {
         assert!(packet.contains(preparation.workspace.id.as_str()));
         assert!(packet.contains(&preparation.workspace.materialized_path));
         assert!(packet.contains("Edit app.txt"));
-        assert!(packet.contains("anvics agent finish"));
+        assert!(packet.contains("only editable area"));
+        assert!(packet.contains("anvics --repo"));
+        assert!(packet.contains("agent finish"));
     }
 
     #[test]
@@ -1269,17 +1357,28 @@ mod tests {
                 "manual agent".to_owned(),
                 0,
                 "Edited app.txt".to_owned(),
+                Some("artifacts/test.log".to_owned()),
             )
             .unwrap();
 
         assert_eq!(finish.evidence.thread_id, preparation.thread.id);
+        assert_eq!(
+            finish.evidence.artifact_path,
+            Some("artifacts/test.log".to_owned())
+        );
         assert_eq!(finish.review.thread_id, preparation.thread.id);
         assert!(finish.workspace.latest_snapshot.is_some());
         let markdown = fs::read_to_string(finish.review_markdown_path).unwrap();
         assert!(markdown.contains("Live agent"));
         assert!(markdown.contains("Edit app.txt"));
         assert!(markdown.contains("Edited app.txt"));
-        assert!(markdown.contains("anvics publish create"));
+        assert!(markdown.contains("anvics --repo"));
+        assert!(markdown.contains("publish create"));
+
+        let status = store.agent_status(preparation.thread.id.as_str()).unwrap();
+        assert_eq!(status.evidence_count, 1);
+        assert_eq!(status.review_ids, vec![finish.review.id]);
+        assert!(status.publication_ids.is_empty());
     }
 
     #[test]
@@ -1303,6 +1402,7 @@ mod tests {
                 "script".to_owned(),
                 0,
                 "Changed three files".to_owned(),
+                None,
             )
             .unwrap();
         let publication = store

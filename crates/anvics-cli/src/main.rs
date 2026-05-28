@@ -154,6 +154,14 @@ enum AgentCommand {
         #[arg(long)]
         task: String,
     },
+    Packet {
+        #[arg(long)]
+        thread: String,
+    },
+    Status {
+        #[arg(long)]
+        thread: String,
+    },
     Finish {
         #[arg(long)]
         workspace: String,
@@ -163,6 +171,8 @@ enum AgentCommand {
         exit_code: i32,
         #[arg(long)]
         summary: String,
+        #[arg(long)]
+        artifact: Option<String>,
     },
 }
 
@@ -242,14 +252,21 @@ fn main() -> Result<()> {
             command: AgentCommand::Prepare { title, task },
         } => prepare_agent(root, title, task),
         Command::Agent {
+            command: AgentCommand::Packet { thread },
+        } => show_agent_packet(root, &thread),
+        Command::Agent {
+            command: AgentCommand::Status { thread },
+        } => show_agent_status(root, &thread),
+        Command::Agent {
             command:
                 AgentCommand::Finish {
                     workspace,
                     command,
                     exit_code,
                     summary,
+                    artifact,
                 },
-        } => finish_agent(root, &workspace, command, exit_code, summary),
+        } => finish_agent(root, &workspace, command, exit_code, summary, artifact),
         Command::Legacy {
             command:
                 LegacyCommand::Git {
@@ -469,6 +486,11 @@ fn create_publication(root: PathBuf, thread_id: &str, review_id: &str) -> Result
     println!("Created publication {}", publication.id);
     println!("thread: {}", publication.thread_id);
     println!("accepted_snapshot: {}", publication.accepted_snapshot);
+    println!(
+        "legacy_export: anvics --repo {} legacy git export --publication {} --output accepted.patch",
+        shell_quote(&display_path(&root)),
+        publication.id
+    );
     Ok(())
 }
 
@@ -487,9 +509,61 @@ fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
     );
     println!("packet: {}", preparation.packet_path);
     println!(
-        "finish: anvics agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        "finish: anvics --repo {} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        shell_quote(&display_path(&root)),
         preparation.workspace.id
     );
+    Ok(())
+}
+
+fn show_agent_packet(root: PathBuf, thread_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let path = store
+        .agent_packet_file_path(thread_id)
+        .with_context(|| format!("failed to find agent packet for thread {thread_id}"))?;
+
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn show_agent_status(root: PathBuf, thread_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let status = store
+        .agent_status(thread_id)
+        .with_context(|| format!("failed to show agent status for thread {thread_id}"))?;
+
+    println!("thread: {}", status.thread.id);
+    println!("title: {}", status.thread.title);
+    println!("status: {:?}", status.thread.status);
+    println!("base_snapshot: {}", status.thread.base_snapshot);
+    println!("evidence_count: {}", status.evidence_count);
+    if status.workspaces.is_empty() {
+        println!("workspaces: none");
+    } else {
+        for workspace in status.workspaces {
+            println!("workspace: {}", workspace.id);
+            println!("workspace_path: {}", workspace.materialized_path);
+            match workspace.latest_snapshot {
+                Some(snapshot) => println!("latest_snapshot: {snapshot}"),
+                None => println!("latest_snapshot: none"),
+            }
+        }
+    }
+    if status.review_ids.is_empty() {
+        println!("reviews: none");
+    } else {
+        for review_id in status.review_ids {
+            println!("review: {review_id}");
+        }
+    }
+    if status.publication_ids.is_empty() {
+        println!("publication_status: unpublished");
+    } else {
+        println!("publication_status: published");
+        for publication_id in status.publication_ids {
+            println!("publication: {publication_id}");
+        }
+    }
     Ok(())
 }
 
@@ -499,10 +573,11 @@ fn finish_agent(
     command: String,
     exit_code: i32,
     summary: String,
+    artifact: Option<String>,
 ) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let finish = store
-        .finish_agent(workspace_id, command, exit_code, summary)
+        .finish_agent(workspace_id, command, exit_code, summary, artifact)
         .context("failed to finish agent task")?;
 
     println!("Finished agent task");
@@ -526,4 +601,15 @@ fn export_legacy_git_patch(root: PathBuf, publication_id: &str, output: PathBuf)
     println!("Exported legacy Git patch");
     println!("path: {}", output.display());
     Ok(())
+}
+
+fn display_path(path: &std::path::Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

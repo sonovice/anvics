@@ -18,9 +18,10 @@ Anvics is a native source-control substrate for parallel AI-agent software devel
 The first Rust slice proves native local snapshots through the CLI:
 
 ```sh
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/agent_smoke.sh
 scripts/live_agent_packet_smoke.sh
+scripts/live_agent_trial_prepare.sh
 ```

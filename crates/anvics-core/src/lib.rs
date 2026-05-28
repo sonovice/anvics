@@ -232,6 +232,15 @@ pub struct AgentFinish {
     pub review_markdown_path: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentStatus {
+    pub thread: WorkThread,
+    pub workspaces: Vec<WorkspaceView>,
+    pub evidence_count: usize,
+    pub review_ids: Vec<ReviewProjectionId>,
+    pub publication_ids: Vec<NativePublicationId>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

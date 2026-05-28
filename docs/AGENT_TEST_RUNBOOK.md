@@ -9,11 +9,14 @@ From the Anvics repo:
 ```sh
 scripts/agent_smoke.sh
 scripts/live_agent_packet_smoke.sh
+scripts/live_agent_trial_prepare.sh
 ```
 
 `agent_smoke.sh` creates two threads and workspaces, applies scripted edits, attaches compact evidence, creates a review, and publishes one result.
 
 `live_agent_packet_smoke.sh` uses the same convenience flow intended for live agents: `agent prepare`, scripted workspace edits, `agent finish`, review markdown, native publication, and legacy Git patch export. It also verifies that the exported patch applies to a clean Git checkout.
+
+`live_agent_trial_prepare.sh` creates a temporary toy repo and prints two paste-ready external-agent prompts. Use it for the first real Codex/Claude/Cursor trial.
 
 ## Manual Live-Agent Test
 
@@ -34,7 +37,14 @@ scripts/live_agent_packet_smoke.sh
      --task "Edit app.txt so it clearly identifies the live agent run."
    ```
 
-3. Open the printed packet path, then paste this prompt into Codex, Claude, Cursor, or another agent CLI:
+3. Inspect the packet and current status:
+
+   ```sh
+   cargo run -q -p anvics-cli -- --repo "$target_repo" agent packet --thread "<thread-id>"
+   cargo run -q -p anvics-cli -- --repo "$target_repo" agent status --thread "<thread-id>"
+   ```
+
+4. Open the printed packet path, then paste this prompt into Codex, Claude, Cursor, or another agent CLI:
 
    ```text
    You are working inside an Anvics task packet.
@@ -47,7 +57,7 @@ scripts/live_agent_packet_smoke.sh
    When done, tell me the command you ran, its exit code, and a one-sentence summary.
    ```
 
-4. Finish the agent task from the Anvics repo, using the printed workspace id:
+5. Finish the agent task from the Anvics repo, using the printed workspace id:
 
    ```sh
    cargo run -q -p anvics-cli -- --repo "$target_repo" agent finish \
@@ -57,10 +67,13 @@ scripts/live_agent_packet_smoke.sh
      --summary "Live agent edited app.txt in the materialized workspace."
    ```
 
-5. Review, publish, and export a legacy Git patch:
+   Add `--artifact <path>` if the agent produced a compact result file worth linking.
+
+6. Review, publish, and export a legacy Git patch:
 
    ```sh
    cargo run -q -p anvics-cli -- --repo "$target_repo" review show "<review-id>" --format markdown
+   cargo run -q -p anvics-cli -- --repo "$target_repo" agent status --thread "<thread-id>"
 
    cargo run -q -p anvics-cli -- --repo "$target_repo" publish create \
      --thread "<thread-id>" \
@@ -70,6 +83,29 @@ scripts/live_agent_packet_smoke.sh
      --publication "<publication-id>" \
      --output "$target_repo/accepted.patch"
    ```
+
+## Two-Agent Trial
+
+Use the harness for the first real validation run:
+
+```sh
+scripts/live_agent_trial_prepare.sh
+```
+
+Paste the two generated prompts into two external agents. When an agent finishes, verify and publish the result you want to accept:
+
+```sh
+scripts/live_agent_trial_verify.sh "$target_repo" \
+  "<thread-id>" \
+  "<workspace-id>" \
+  "manual live-agent run" \
+  0 \
+  "Live agent completed the accepted task."
+```
+
+Append an artifact path as the final argument when the accepted agent produced a compact artifact worth linking.
+
+Capture observations in `docs/trials/LIVE_AGENT_TRIAL_TEMPLATE.md`. Do not create a trial log until an actual live run has happened.
 
 ## What To Check
 

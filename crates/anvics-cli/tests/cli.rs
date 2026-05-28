@@ -277,10 +277,24 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains(&thread));
     assert!(packet_text.contains(&workspace));
     assert!(packet_text.contains("Modify, add, and delete files"));
+    assert!(packet_text.contains("anvics --repo"));
+    assert!(packet_text.contains("only editable area"));
+    anvics(dir.path(), &["agent", "packet", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".anvics/agent-packets"));
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence_count: 0"))
+        .stdout(predicate::str::contains("publication_status: unpublished"))
+        .stdout(predicate::str::contains(&workspace));
 
     fs::write(format!("{workspace_path}/modified.txt"), "after\n").unwrap();
     fs::remove_file(format!("{workspace_path}/deleted.txt")).unwrap();
     fs::write(format!("{workspace_path}/added.txt"), "new\n").unwrap();
+    let artifact = dir.path().join("agent-summary.txt");
+    fs::write(&artifact, "compact result\n").unwrap();
 
     let finish_output = anvics(
         dir.path(),
@@ -295,6 +309,8 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
             "0",
             "--summary",
             "Scripted live agent changed three files",
+            "--artifact",
+            artifact.to_str().unwrap(),
         ],
     )
     .assert()
@@ -316,11 +332,18 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
         "Scripted live agent changed three files",
     ))
     .stdout(predicate::str::contains("Modify, add, and delete files"))
-    .stdout(predicate::str::contains("anvics publish create"));
+    .stdout(predicate::str::contains("anvics --repo"))
+    .stdout(predicate::str::contains("anvics --repo").count(3))
+    .stdout(predicate::str::contains("publish create"));
     anvics(dir.path(), &["review", "path", &review])
         .assert()
         .success()
         .stdout(predicate::str::contains(review_markdown));
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence_count: 1"))
+        .stdout(predicate::str::contains(&review));
 
     let publish_output = anvics(
         dir.path(),
@@ -331,6 +354,7 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     .assert()
     .success()
     .stdout(predicate::str::contains("Created publication"))
+    .stdout(predicate::str::contains("legacy_export: anvics --repo"))
     .get_output()
     .stdout
     .clone();
@@ -352,6 +376,12 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     .assert()
     .success()
     .stdout(predicate::str::contains("Exported legacy Git patch"));
+
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("publication_status: published"))
+        .stdout(predicate::str::contains(&publication));
 
     let clean = tempdir().unwrap();
     fs::write(clean.path().join("modified.txt"), "before\n").unwrap();

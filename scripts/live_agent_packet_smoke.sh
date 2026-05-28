@@ -35,17 +35,21 @@ packet="$(printf '%s\n' "$prepare_output" | value_after_prefix "packet: ")"
 echo "Prepared thread: $thread"
 echo "Prepared workspace: $workspace"
 echo "Agent packet: $packet"
+anvics agent packet --thread "$thread"
+anvics agent status --thread "$thread"
 
 printf 'after\n' > "$workspace_path/modified.txt"
 rm "$workspace_path/deleted.txt"
 printf 'new\n' > "$workspace_path/added.txt"
+printf 'compact scripted evidence\n' > "$target_repo/agent-summary.txt"
 
 finish_output="$(
   anvics agent finish \
     --workspace "$workspace" \
     --command "scripted-live-agent" \
     --exit-code 0 \
-    --summary "Scripted live agent modified, deleted, and added files"
+    --summary "Scripted live agent modified, deleted, and added files" \
+    --artifact "$target_repo/agent-summary.txt"
 )"
 
 review="$(printf '%s\n' "$finish_output" | value_after_prefix "review: ")"
@@ -54,6 +58,7 @@ review_markdown="$(printf '%s\n' "$finish_output" | value_after_prefix "review_m
 echo "Review: $review"
 echo "Review markdown: $review_markdown"
 anvics review show "$review" --format markdown
+anvics agent status --thread "$thread"
 
 publication="$(
   anvics publish create --thread "$thread" --review "$review" |
