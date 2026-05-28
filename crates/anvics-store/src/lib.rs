@@ -1,8 +1,9 @@
 use anvics_core::{
-    ChangeStatus, ChangedPath, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
-    NativePublication, NativePublicationId, ObjectId, RepositoryId, RepositoryManifest,
-    ReviewProjection, ReviewProjectionId, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry,
-    TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceView, WorkspaceViewId,
+    AgentFinish, AgentPreparation, ChangeStatus, ChangedPath, EvidenceRecord, EvidenceRecordId,
+    EvidenceSummary, NativePublication, NativePublicationId, ObjectId, RepositoryId,
+    RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot, SourceSnapshotId,
+    Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceView,
+    WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -30,6 +31,8 @@ pub enum StoreError {
     WorkspaceNotFound(String),
     #[error("review does not exist: {0}")]
     ReviewNotFound(String),
+    #[error("publication does not exist: {0}")]
+    PublicationNotFound(String),
     #[error("repository has no current snapshot")]
     NoHeadSnapshot,
     #[error("thread has no workspace snapshot yet: {0}")]
@@ -78,6 +81,7 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("evidence"))?;
         fs::create_dir_all(anvics_dir.join("reviews"))?;
         fs::create_dir_all(anvics_dir.join("publications"))?;
+        fs::create_dir_all(anvics_dir.join("agent-packets"))?;
 
         let manifest = RepositoryManifest {
             id: RepositoryId::new(),
@@ -223,8 +227,8 @@ impl AnvicsStore {
 
         let workspace = WorkspaceView {
             id,
-            thread_id: thread.id,
-            base_snapshot: thread.base_snapshot,
+            thread_id: thread.id.clone(),
+            base_snapshot: thread.base_snapshot.clone(),
             materialized_path: files_path.to_string_lossy().to_string(),
             latest_snapshot: None,
             created_at: now_rfc3339()?,
@@ -287,8 +291,8 @@ impl AnvicsStore {
 
         let review = ReviewProjection {
             id: ReviewProjectionId::new(),
-            thread_id: thread.id,
-            base_snapshot: thread.base_snapshot,
+            thread_id: thread.id.clone(),
+            base_snapshot: thread.base_snapshot.clone(),
             final_snapshot,
             changed_paths,
             overlap_notes,
@@ -298,7 +302,7 @@ impl AnvicsStore {
         write_json_pretty(self.review_path(review.id.as_str()), &review)?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
-            render_review(&review),
+            render_review(&review, &thread),
         )?;
         Ok(review)
     }
@@ -338,6 +342,94 @@ impl AnvicsStore {
         write_json_pretty(self.thread_path(thread.id.as_str()), &thread)?;
 
         Ok(publication)
+    }
+
+    pub fn show_publication(&self, id: &str) -> Result<NativePublication> {
+        let path = self.publication_path(id);
+        if !path.exists() {
+            return Err(StoreError::PublicationNotFound(id.to_owned()));
+        }
+        read_json(path)
+    }
+
+    pub fn prepare_agent(&self, title: String, task: String) -> Result<AgentPreparation> {
+        let thread = self.create_thread(title, task)?;
+        let workspace = self.create_workspace(thread.id.as_str())?;
+        let packet_path = self.agent_packet_path(thread.id.as_str());
+        if let Some(parent) = packet_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&packet_path, render_agent_packet(&thread, &workspace))?;
+
+        Ok(AgentPreparation {
+            thread,
+            workspace,
+            packet_path: packet_path.to_string_lossy().to_string(),
+        })
+    }
+
+    pub fn finish_agent(
+        &self,
+        workspace_id: &str,
+        command: String,
+        exit_code: i32,
+        summary: String,
+    ) -> Result<AgentFinish> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let evidence = self.attach_evidence(
+            workspace.thread_id.as_str(),
+            command,
+            exit_code,
+            summary,
+            None,
+        )?;
+        let workspace =
+            self.workspace_snapshot(workspace_id, Some("agent finish result".to_owned()))?;
+        let review = self.create_review(workspace.thread_id.as_str())?;
+        let review_markdown_path = self
+            .review_markdown_path(review.id.as_str())
+            .to_string_lossy()
+            .to_string();
+
+        Ok(AgentFinish {
+            evidence,
+            workspace,
+            review,
+            review_markdown_path,
+        })
+    }
+
+    pub fn review_markdown(&self, id: &str) -> Result<String> {
+        let path = self.review_markdown_path(id);
+        if !path.exists() {
+            return Err(StoreError::ReviewNotFound(id.to_owned()));
+        }
+        Ok(fs::read_to_string(path)?)
+    }
+
+    pub fn review_markdown_file_path(&self, id: &str) -> Result<PathBuf> {
+        let path = self.review_markdown_path(id);
+        if !path.exists() {
+            return Err(StoreError::ReviewNotFound(id.to_owned()));
+        }
+        Ok(path)
+    }
+
+    pub fn export_legacy_git_patch(
+        &self,
+        publication_id: &str,
+        output: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
+        let publication = self.show_publication(publication_id)?;
+        let review = self.show_review(publication.review_id.as_str())?;
+        let thread = self.show_thread(publication.thread_id.as_str())?;
+        let patch = self.render_legacy_git_patch(&publication, &review, &thread)?;
+        let output = output.as_ref();
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output, patch)?;
+        Ok(output.to_path_buf())
     }
 
     pub fn restore_snapshot_to_path(
@@ -459,6 +551,12 @@ impl AnvicsStore {
             .join(format!("{id}.json"))
     }
 
+    fn agent_packet_path(&self, thread_id: &str) -> PathBuf {
+        self.anvics_dir
+            .join("agent-packets")
+            .join(format!("{thread_id}.md"))
+    }
+
     fn restore_tree(&self, tree_id: &ObjectId, target: &Path) -> Result<()> {
         let tree: Tree = serde_json::from_slice(&self.read_object(tree_id)?)?;
         for entry in tree.entries {
@@ -500,6 +598,14 @@ impl AnvicsStore {
         }
 
         Ok(files)
+    }
+
+    fn snapshot_file_map(
+        &self,
+        snapshot_id: &SourceSnapshotId,
+    ) -> Result<BTreeMap<String, ObjectId>> {
+        let snapshot = self.show_snapshot(snapshot_id.as_str())?;
+        self.flatten_tree(&snapshot.root_tree, "")
     }
 
     fn list_workspaces(&self) -> Result<Vec<WorkspaceView>> {
@@ -576,6 +682,54 @@ impl AnvicsStore {
             }
         }
         Ok(notes)
+    }
+
+    fn render_legacy_git_patch(
+        &self,
+        publication: &NativePublication,
+        review: &ReviewProjection,
+        thread: &WorkThread,
+    ) -> Result<String> {
+        let base_files = self.snapshot_file_map(&review.base_snapshot)?;
+        let final_files = self.snapshot_file_map(&review.final_snapshot)?;
+        let mut patch = format!(
+            "From anvics {}\nSubject: [PATCH] {}\nAnvics-Publication: {}\nAnvics-Review: {}\nAnvics-Thread: {}\n\n---\n",
+            publication.id, thread.title, publication.id, review.id, thread.id
+        );
+
+        for changed in &review.changed_paths {
+            patch.push_str(&self.render_file_patch(
+                &changed.path,
+                &changed.status,
+                &base_files,
+                &final_files,
+            )?);
+        }
+
+        Ok(patch)
+    }
+
+    fn render_file_patch(
+        &self,
+        path: &str,
+        status: &ChangeStatus,
+        base_files: &BTreeMap<String, ObjectId>,
+        final_files: &BTreeMap<String, ObjectId>,
+    ) -> Result<String> {
+        let old_content = base_files
+            .get(path)
+            .map(|object| self.read_object(object))
+            .transpose()?;
+        let new_content = final_files
+            .get(path)
+            .map(|object| self.read_object(object))
+            .transpose()?;
+        Ok(render_unified_file_patch(
+            path,
+            status,
+            old_content.as_deref().unwrap_or_default(),
+            new_content.as_deref().unwrap_or_default(),
+        ))
     }
 }
 
@@ -718,10 +872,22 @@ fn diff_file_maps(
         .collect()
 }
 
-fn render_review(review: &ReviewProjection) -> String {
+fn render_agent_packet(thread: &WorkThread, workspace: &WorkspaceView) -> String {
+    format!(
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above.\n- Do not create a Git branch, Git worktree, or Git commit.\n- Keep command output compact.\n- When finished, report the command you ran, exit code, and a short summary.\n\n## Finish Command Template\n\n```sh\nanvics agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n",
+        thread.id, workspace.id, workspace.materialized_path, thread.task, workspace.id
+    )
+}
+
+fn render_review(review: &ReviewProjection, thread: &WorkThread) -> String {
     let mut markdown = format!(
-        "# Review {}\n\n- Thread: {}\n- Base snapshot: {}\n- Final snapshot: {}\n\n",
-        review.id, review.thread_id, review.base_snapshot, review.final_snapshot
+        "# Review {}\n\n- Thread: {}\n- Title: {}\n- Base snapshot: {}\n- Final snapshot: {}\n\n## Task\n\n{}\n\n",
+        review.id,
+        review.thread_id,
+        thread.title,
+        review.base_snapshot,
+        review.final_snapshot,
+        thread.task
     );
 
     markdown.push_str("## Changed Paths\n\n");
@@ -754,7 +920,77 @@ fn render_review(review: &ReviewProjection) -> String {
         }
     }
 
+    markdown.push_str("\n## Next Commands\n\n");
+    markdown.push_str(&format!(
+        "```sh\nanvics publish create --thread {} --review {}\nanvics legacy git export --publication <publication-id> --output accepted.patch\n```\n",
+        review.thread_id, review.id
+    ));
+
     markdown
+}
+
+fn render_unified_file_patch(
+    path: &str,
+    status: &ChangeStatus,
+    old_content: &[u8],
+    new_content: &[u8],
+) -> String {
+    let old_text = String::from_utf8_lossy(old_content);
+    let new_text = String::from_utf8_lossy(new_content);
+    let old_lines = split_patch_lines(&old_text);
+    let new_lines = split_patch_lines(&new_text);
+    let old_count = old_lines.len();
+    let new_count = new_lines.len();
+    let old_range = if old_count == 0 {
+        "0,0".to_owned()
+    } else {
+        format!("1,{old_count}")
+    };
+    let new_range = if new_count == 0 {
+        "0,0".to_owned()
+    } else {
+        format!("1,{new_count}")
+    };
+    let old_header = match status {
+        ChangeStatus::Added => "/dev/null".to_owned(),
+        ChangeStatus::Modified | ChangeStatus::Deleted => format!("a/{path}"),
+    };
+    let new_header = match status {
+        ChangeStatus::Deleted => "/dev/null".to_owned(),
+        ChangeStatus::Added | ChangeStatus::Modified => format!("b/{path}"),
+    };
+    let mut patch = format!("diff --git a/{path} b/{path}\n");
+    match status {
+        ChangeStatus::Added => patch.push_str("new file mode 100644\n"),
+        ChangeStatus::Deleted => patch.push_str("deleted file mode 100644\n"),
+        ChangeStatus::Modified => {}
+    }
+    patch.push_str(&format!(
+        "--- {old_header}\n+++ {new_header}\n@@ -{old_range} +{new_range} @@\n"
+    ));
+
+    for line in old_lines {
+        patch.push('-');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    for line in new_lines {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    patch
+}
+
+fn split_patch_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -773,6 +1009,7 @@ mod tests {
         assert!(dir.path().join(".anvics/repo.json").exists());
         assert!(dir.path().join(".anvics/objects/blake3").exists());
         assert!(dir.path().join(".anvics/snapshots").exists());
+        assert!(dir.path().join(".anvics/agent-packets").exists());
     }
 
     #[test]
@@ -988,5 +1225,99 @@ mod tests {
             store.show_thread(thread.id.as_str()).unwrap().status,
             WorkThreadStatus::Published
         );
+    }
+
+    #[test]
+    fn agent_prepare_writes_task_packet() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+
+        let preparation = store
+            .prepare_agent("Live agent".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+
+        let packet = fs::read_to_string(&preparation.packet_path).unwrap();
+        assert!(packet.contains(preparation.thread.id.as_str()));
+        assert!(packet.contains(preparation.workspace.id.as_str()));
+        assert!(packet.contains(&preparation.workspace.materialized_path));
+        assert!(packet.contains("Edit app.txt"));
+        assert!(packet.contains("anvics agent finish"));
+    }
+
+    #[test]
+    fn agent_finish_attaches_evidence_snapshots_and_reviews() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Live agent".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "live agent\n",
+        )
+        .unwrap();
+
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "manual agent".to_owned(),
+                0,
+                "Edited app.txt".to_owned(),
+            )
+            .unwrap();
+
+        assert_eq!(finish.evidence.thread_id, preparation.thread.id);
+        assert_eq!(finish.review.thread_id, preparation.thread.id);
+        assert!(finish.workspace.latest_snapshot.is_some());
+        let markdown = fs::read_to_string(finish.review_markdown_path).unwrap();
+        assert!(markdown.contains("Live agent"));
+        assert!(markdown.contains("Edit app.txt"));
+        assert!(markdown.contains("Edited app.txt"));
+        assert!(markdown.contains("anvics publish create"));
+    }
+
+    #[test]
+    fn legacy_git_patch_export_covers_added_modified_deleted_files() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "delete me\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Patch export".to_owned(), "Change three files".to_owned())
+            .unwrap();
+        let workspace = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace.join("modified.txt"), "after\n").unwrap();
+        fs::remove_file(workspace.join("deleted.txt")).unwrap();
+        fs::write(workspace.join("added.txt"), "new\n").unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "script".to_owned(),
+                0,
+                "Changed three files".to_owned(),
+            )
+            .unwrap();
+        let publication = store
+            .create_publication(preparation.thread.id.as_str(), finish.review.id.as_str())
+            .unwrap();
+        let output = dir.path().join("accepted.patch");
+
+        store
+            .export_legacy_git_patch(publication.id.as_str(), &output)
+            .unwrap();
+
+        let patch = fs::read_to_string(output).unwrap();
+        assert!(patch.contains("Anvics-Publication"));
+        assert!(patch.contains("diff --git a/added.txt b/added.txt"));
+        assert!(patch.contains("diff --git a/modified.txt b/modified.txt"));
+        assert!(patch.contains("diff --git a/deleted.txt b/deleted.txt"));
     }
 }

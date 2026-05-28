@@ -1,6 +1,6 @@
 # Anvics Agent Test Runbook
 
-This runbook tests Anvics with one deterministic scripted flow and one manual live-agent flow. The goal is to validate threads, materialized workspaces, compact evidence, reviews, overlap notes, and native publication without using Git branches or worktrees.
+This runbook tests Anvics with deterministic scripted flows and one manual live-agent flow. The goal is to validate threads, materialized workspaces, compact evidence, reviews, overlap notes, native publication, and legacy Git patch export without using Git branches or worktrees as the agent working model.
 
 ## Scripted Smoke Test
 
@@ -8,9 +8,12 @@ From the Anvics repo:
 
 ```sh
 scripts/agent_smoke.sh
+scripts/live_agent_packet_smoke.sh
 ```
 
-The script creates a temporary target repo, initializes Anvics, creates two threads and workspaces, applies scripted edits, attaches compact evidence, creates a review, and publishes one result.
+`agent_smoke.sh` creates two threads and workspaces, applies scripted edits, attaches compact evidence, creates a review, and publishes one result.
+
+`live_agent_packet_smoke.sh` uses the same convenience flow intended for live agents: `agent prepare`, scripted workspace edits, `agent finish`, review markdown, native publication, and legacy Git patch export. It also verifies that the exported patch applies to a clean Git checkout.
 
 ## Manual Live-Agent Test
 
@@ -23,52 +26,49 @@ The script creates a temporary target repo, initializes Anvics, creates two thre
    cargo run -q -p anvics-cli -- --repo "$target_repo" snapshot create --message base
    ```
 
-2. Create a thread:
+2. Prepare a live-agent packet:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" thread create \
+   cargo run -q -p anvics-cli -- --repo "$target_repo" agent prepare \
      --title "Live agent test" \
      --task "Edit app.txt so it clearly identifies the live agent run."
    ```
 
-3. Create a workspace for that thread and copy the printed `path:` value:
-
-   ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" workspace create --thread "<thread-id>"
-   ```
-
-4. Give the live agent this instruction:
+3. Open the printed packet path, then paste this prompt into Codex, Claude, Cursor, or another agent CLI:
 
    ```text
-   Work only inside this Anvics workspace path:
-   <workspace-path>
+   You are working inside an Anvics task packet.
 
-   Task: edit app.txt so it clearly identifies this live agent run.
+   Read the packet at:
+   <packet-path>
 
-   Do not create a Git branch, Git worktree, or Git commit. Keep output compact.
+   Follow it exactly. Work only inside the workspace path listed in the packet.
+   Do not create a Git branch, Git worktree, or Git commit.
+   When done, tell me the command you ran, its exit code, and a one-sentence summary.
    ```
 
-5. Attach compact evidence:
+4. Finish the agent task from the Anvics repo, using the printed workspace id:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" evidence attach \
-     --thread "<thread-id>" \
+   cargo run -q -p anvics-cli -- --repo "$target_repo" agent finish \
+     --workspace "<workspace-id>" \
      --command "manual live-agent run" \
      --exit-code 0 \
      --summary "Live agent edited app.txt in the materialized workspace."
    ```
 
-6. Snapshot the workspace, create a review, and publish:
+5. Review, publish, and export a legacy Git patch:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" workspace snapshot "<workspace-id>" \
-     --message "live agent result"
+   cargo run -q -p anvics-cli -- --repo "$target_repo" review show "<review-id>" --format markdown
 
-   cargo run -q -p anvics-cli -- --repo "$target_repo" review create --thread "<thread-id>"
-   cargo run -q -p anvics-cli -- --repo "$target_repo" review show "<review-id>"
    cargo run -q -p anvics-cli -- --repo "$target_repo" publish create \
      --thread "<thread-id>" \
      --review "<review-id>"
+
+   cargo run -q -p anvics-cli -- --repo "$target_repo" legacy git export \
+     --publication "<publication-id>" \
+     --output "$target_repo/accepted.patch"
    ```
 
 ## What To Check
@@ -78,3 +78,11 @@ The script creates a temporary target repo, initializes Anvics, creates two thre
 - Evidence is a short summary, not a transcript dump.
 - The review shows changed paths and evidence.
 - Publication points to the accepted native snapshot.
+- The exported patch applies to a clean copy of the base files with `git apply`.
+
+## Known Limitations
+
+- Workspaces are still materialized directories under `.anvics/workspaces/`.
+- Patch export is the only legacy Git artifact in this slice; commit creation and push come later.
+- Conflict handling is path-level overlap notes, not semantic resolution.
+- The live-agent flow is manual and tool-agnostic; Anvics does not run the agent yet.

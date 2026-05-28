@@ -217,6 +217,21 @@ pub struct NativePublication {
     pub created_at: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentPreparation {
+    pub thread: WorkThread,
+    pub workspace: WorkspaceView,
+    pub packet_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentFinish {
+    pub evidence: EvidenceRecord,
+    pub workspace: WorkspaceView,
+    pub review: ReviewProjection,
+    pub review_markdown_path: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

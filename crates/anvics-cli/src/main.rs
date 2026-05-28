@@ -1,6 +1,6 @@
 use anvics_store::{AnvicsStore, StoreError};
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -43,6 +43,14 @@ enum Command {
     Publish {
         #[command(subcommand)]
         command: PublishCommand,
+    },
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    Legacy {
+        #[command(subcommand)]
+        command: LegacyCommand,
     },
 }
 
@@ -114,6 +122,11 @@ enum ReviewCommand {
     },
     Show {
         id: String,
+        #[arg(long, value_enum, default_value_t = ReviewFormat::Json)]
+        format: ReviewFormat,
+    },
+    Path {
+        id: String,
     },
 }
 
@@ -124,6 +137,50 @@ enum PublishCommand {
         thread: String,
         #[arg(long)]
         review: String,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ReviewFormat {
+    Json,
+    Markdown,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    Prepare {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        task: String,
+    },
+    Finish {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        exit_code: i32,
+        #[arg(long)]
+        summary: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LegacyCommand {
+    Git {
+        #[command(subcommand)]
+        command: LegacyGitCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LegacyGitCommand {
+    Export {
+        #[arg(long)]
+        publication: String,
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -173,11 +230,36 @@ fn main() -> Result<()> {
             command: ReviewCommand::Create { thread },
         } => create_review(root, &thread),
         Command::Review {
-            command: ReviewCommand::Show { id },
-        } => show_review(root, &id),
+            command: ReviewCommand::Show { id, format },
+        } => show_review(root, &id, format),
+        Command::Review {
+            command: ReviewCommand::Path { id },
+        } => show_review_path(root, &id),
         Command::Publish {
             command: PublishCommand::Create { thread, review },
         } => create_publication(root, &thread, &review),
+        Command::Agent {
+            command: AgentCommand::Prepare { title, task },
+        } => prepare_agent(root, title, task),
+        Command::Agent {
+            command:
+                AgentCommand::Finish {
+                    workspace,
+                    command,
+                    exit_code,
+                    summary,
+                },
+        } => finish_agent(root, &workspace, command, exit_code, summary),
+        Command::Legacy {
+            command:
+                LegacyCommand::Git {
+                    command:
+                        LegacyGitCommand::Export {
+                            publication,
+                            output,
+                        },
+                },
+        } => export_legacy_git_patch(root, &publication, output),
     }
 }
 
@@ -349,13 +431,32 @@ fn create_review(root: PathBuf, thread_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn show_review(root: PathBuf, id: &str) -> Result<()> {
+fn show_review(root: PathBuf, id: &str, format: ReviewFormat) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
-    let review = store
-        .show_review(id)
-        .with_context(|| format!("failed to show review {id}"))?;
+    match format {
+        ReviewFormat::Json => {
+            let review = store
+                .show_review(id)
+                .with_context(|| format!("failed to show review {id}"))?;
+            println!("{}", serde_json::to_string_pretty(&review)?);
+        }
+        ReviewFormat::Markdown => {
+            let markdown = store
+                .review_markdown(id)
+                .with_context(|| format!("failed to show review {id} as markdown"))?;
+            println!("{markdown}");
+        }
+    }
+    Ok(())
+}
 
-    println!("{}", serde_json::to_string_pretty(&review)?);
+fn show_review_path(root: PathBuf, id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let path = store
+        .review_markdown_file_path(id)
+        .with_context(|| format!("failed to find review {id} markdown path"))?;
+
+    println!("{}", path.display());
     Ok(())
 }
 
@@ -368,5 +469,61 @@ fn create_publication(root: PathBuf, thread_id: &str, review_id: &str) -> Result
     println!("Created publication {}", publication.id);
     println!("thread: {}", publication.thread_id);
     println!("accepted_snapshot: {}", publication.accepted_snapshot);
+    Ok(())
+}
+
+fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let preparation = store
+        .prepare_agent(title, task)
+        .context("failed to prepare agent task")?;
+
+    println!("Prepared agent task");
+    println!("thread: {}", preparation.thread.id);
+    println!("workspace: {}", preparation.workspace.id);
+    println!(
+        "workspace_path: {}",
+        preparation.workspace.materialized_path
+    );
+    println!("packet: {}", preparation.packet_path);
+    println!(
+        "finish: anvics agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        preparation.workspace.id
+    );
+    Ok(())
+}
+
+fn finish_agent(
+    root: PathBuf,
+    workspace_id: &str,
+    command: String,
+    exit_code: i32,
+    summary: String,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let finish = store
+        .finish_agent(workspace_id, command, exit_code, summary)
+        .context("failed to finish agent task")?;
+
+    println!("Finished agent task");
+    println!("thread: {}", finish.workspace.thread_id);
+    println!("workspace: {}", finish.workspace.id);
+    if let Some(snapshot) = finish.workspace.latest_snapshot {
+        println!("snapshot: {snapshot}");
+    }
+    println!("evidence: {}", finish.evidence.id);
+    println!("review: {}", finish.review.id);
+    println!("review_markdown: {}", finish.review_markdown_path);
+    Ok(())
+}
+
+fn export_legacy_git_patch(root: PathBuf, publication_id: &str, output: PathBuf) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let output = store
+        .export_legacy_git_patch(publication_id, output)
+        .context("failed to export legacy Git patch")?;
+
+    println!("Exported legacy Git patch");
+    println!("path: {}", output.display());
     Ok(())
 }

@@ -22,4 +22,5 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/agent_smoke.sh
+scripts/live_agent_packet_smoke.sh
 ```

@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 #[test]
@@ -238,6 +239,246 @@ fn agent_thread_workspace_review_publish_flow() {
     .assert()
     .success()
     .stdout(predicate::str::contains("Created publication"));
+}
+
+#[test]
+fn agent_prepare_finish_and_legacy_patch_export_flow() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+    fs::write(dir.path().join("deleted.txt"), "delete me\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+
+    let prepare_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Live Agent",
+            "--task",
+            "Modify, add, and delete files",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Prepared agent task"))
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare_output, "thread: ");
+    let workspace = value_after_prefix(&prepare_output, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare_output, "workspace_path: ");
+    let packet = value_after_prefix(&prepare_output, "packet: ");
+    let packet_text = fs::read_to_string(packet).unwrap();
+    assert!(packet_text.contains(&thread));
+    assert!(packet_text.contains(&workspace));
+    assert!(packet_text.contains("Modify, add, and delete files"));
+
+    fs::write(format!("{workspace_path}/modified.txt"), "after\n").unwrap();
+    fs::remove_file(format!("{workspace_path}/deleted.txt")).unwrap();
+    fs::write(format!("{workspace_path}/added.txt"), "new\n").unwrap();
+
+    let finish_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &workspace,
+            "--command",
+            "scripted-live-agent",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Scripted live agent changed three files",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Finished agent task"))
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&finish_output, "review: ");
+    let review_markdown = value_after_prefix(&finish_output, "review_markdown: ");
+
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "Scripted live agent changed three files",
+    ))
+    .stdout(predicate::str::contains("Modify, add, and delete files"))
+    .stdout(predicate::str::contains("anvics publish create"));
+    anvics(dir.path(), &["review", "path", &review])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(review_markdown));
+
+    let publish_output = anvics(
+        dir.path(),
+        &[
+            "publish", "create", "--thread", &thread, "--review", &review,
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Created publication"))
+    .get_output()
+    .stdout
+    .clone();
+    let publication = value_after_prefix(&publish_output, "Created publication ");
+    let patch_path = dir.path().join("accepted.patch");
+
+    anvics(
+        dir.path(),
+        &[
+            "legacy",
+            "git",
+            "export",
+            "--publication",
+            &publication,
+            "--output",
+            patch_path.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Exported legacy Git patch"));
+
+    let clean = tempdir().unwrap();
+    fs::write(clean.path().join("modified.txt"), "before\n").unwrap();
+    fs::write(clean.path().join("deleted.txt"), "delete me\n").unwrap();
+    StdCommand::new("git")
+        .args(["init"])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    let apply = StdCommand::new("git")
+        .args(["apply", patch_path.to_str().unwrap()])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "git apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("modified.txt")).unwrap(),
+        "after\n"
+    );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("added.txt")).unwrap(),
+        "new\n"
+    );
+    assert!(!clean.path().join("deleted.txt").exists());
+}
+
+#[test]
+fn two_prepared_agents_report_overlap_notes() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+
+    let first_prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Agent A",
+            "--task",
+            "Change app.txt for Agent A",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let second_prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Agent B",
+            "--task",
+            "Change app.txt for Agent B",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+
+    let first_workspace = value_after_prefix(&first_prepare, "workspace: ");
+    let first_path = value_after_prefix(&first_prepare, "workspace_path: ");
+    let second_workspace = value_after_prefix(&second_prepare, "workspace: ");
+    let second_path = value_after_prefix(&second_prepare, "workspace_path: ");
+
+    fs::write(format!("{first_path}/app.txt"), "agent a\n").unwrap();
+    fs::write(format!("{second_path}/app.txt"), "agent b\n").unwrap();
+
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &second_workspace,
+            "--command",
+            "agent-b",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Agent B changed app.txt",
+        ],
+    )
+    .assert()
+    .success();
+    let first_finish = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &first_workspace,
+            "--command",
+            "agent-a",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Agent A changed app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&first_finish, "review: ");
+
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("also changed: app.txt"));
 }
 
 fn anvics(repo: &std::path::Path, args: &[&str]) -> Command {
