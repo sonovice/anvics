@@ -233,6 +233,16 @@ pub struct AgentFinish {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentAcceptance {
+    pub evidence: EvidenceRecord,
+    pub workspace: WorkspaceView,
+    pub review: ReviewProjection,
+    pub review_markdown_path: String,
+    pub publication: NativePublication,
+    pub patch_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AgentStatus {
     pub thread: WorkThread,
     pub workspaces: Vec<WorkspaceView>,
@@ -313,10 +323,18 @@ mod tests {
         };
         let publication = NativePublication {
             id: NativePublicationId::new(),
-            thread_id,
+            thread_id: thread_id.clone(),
             accepted_snapshot: final_snapshot,
             review_id,
             created_at: "2026-05-28T00:00:04Z".to_owned(),
+        };
+        let acceptance = AgentAcceptance {
+            evidence: evidence.clone(),
+            workspace: workspace.clone(),
+            review: review.clone(),
+            review_markdown_path: ".anvics/reviews/example.md".to_owned(),
+            publication: publication.clone(),
+            patch_path: "accepted.patch".to_owned(),
         };
 
         assert_eq!(
@@ -344,6 +362,11 @@ mod tests {
             )
             .unwrap(),
             publication
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentAcceptance>(&serde_json::to_string(&acceptance).unwrap())
+                .unwrap(),
+            acceptance
         );
     }
 }

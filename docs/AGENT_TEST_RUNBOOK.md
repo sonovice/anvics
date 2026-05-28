@@ -14,7 +14,7 @@ scripts/live_agent_trial_prepare.sh
 
 `agent_smoke.sh` creates two threads and workspaces, applies scripted edits, attaches compact evidence, creates a review, and publishes one result.
 
-`live_agent_packet_smoke.sh` uses the same convenience flow intended for live agents: `agent prepare`, scripted workspace edits, `agent finish`, review markdown, native publication, and legacy Git patch export. It also verifies that the exported patch applies to a clean Git checkout.
+`live_agent_packet_smoke.sh` uses the same convenience flow intended for live agents: `agent prepare`, scripted workspace edits, `agent accept`, review markdown, native publication, and legacy Git patch export. It also verifies that the exported patch applies to a clean Git checkout.
 
 `live_agent_trial_prepare.sh` creates a temporary toy repo and prints two paste-ready external-agent prompts. Use it for the first real Codex/Claude/Cursor trial.
 
@@ -57,32 +57,27 @@ scripts/live_agent_trial_prepare.sh
    When done, tell me the command you ran, its exit code, and a one-sentence summary.
    ```
 
-5. Finish the agent task from the Anvics repo, using the printed workspace id:
+5. Accept the agent task from the Anvics repo, using the printed workspace id:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" agent finish \
+   cargo run -q -p anvics-cli -- --repo "$target_repo" agent accept \
      --workspace "<workspace-id>" \
      --command "manual live-agent run" \
      --exit-code 0 \
-     --summary "Live agent edited app.txt in the materialized workspace."
+     --summary "Live agent edited app.txt in the materialized workspace." \
+     --output "$target_repo/accepted.patch"
    ```
 
    Add `--artifact <path>` if the agent produced a compact result file worth linking.
 
-6. Review, publish, and export a legacy Git patch:
+6. Inspect the accepted result:
 
    ```sh
    cargo run -q -p anvics-cli -- --repo "$target_repo" review show "<review-id>" --format markdown
    cargo run -q -p anvics-cli -- --repo "$target_repo" agent status --thread "<thread-id>"
-
-   cargo run -q -p anvics-cli -- --repo "$target_repo" publish create \
-     --thread "<thread-id>" \
-     --review "<review-id>"
-
-   cargo run -q -p anvics-cli -- --repo "$target_repo" legacy git export \
-     --publication "<publication-id>" \
-     --output "$target_repo/accepted.patch"
    ```
+
+   `agent finish`, `review show`, `publish create`, and `legacy git export` remain available when you want to inspect or publish each step manually.
 
 ## Two-Agent Trial
 
@@ -92,7 +87,7 @@ Use the harness for the first real validation run:
 scripts/live_agent_trial_prepare.sh
 ```
 
-Paste the two generated prompts into two external agents. When an agent finishes, verify and publish the result you want to accept:
+Paste the two generated prompts into two external agents. When an agent finishes, verify and accept the result you want to publish:
 
 ```sh
 scripts/live_agent_trial_verify.sh "$target_repo" \

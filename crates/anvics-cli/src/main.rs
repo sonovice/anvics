@@ -174,6 +174,20 @@ enum AgentCommand {
         #[arg(long)]
         artifact: Option<String>,
     },
+    Accept {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        exit_code: i32,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        artifact: Option<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -267,6 +281,19 @@ fn main() -> Result<()> {
                     artifact,
                 },
         } => finish_agent(root, &workspace, command, exit_code, summary, artifact),
+        Command::Agent {
+            command:
+                AgentCommand::Accept {
+                    workspace,
+                    command,
+                    exit_code,
+                    summary,
+                    artifact,
+                    output,
+                },
+        } => accept_agent(
+            root, &workspace, command, exit_code, summary, artifact, output,
+        ),
         Command::Legacy {
             command:
                 LegacyCommand::Git {
@@ -509,6 +536,11 @@ fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
     );
     println!("packet: {}", preparation.packet_path);
     println!(
+        "accept: anvics --repo {} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        shell_quote(&display_path(&root)),
+        preparation.workspace.id
+    );
+    println!(
         "finish: anvics --repo {} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
         shell_quote(&display_path(&root)),
         preparation.workspace.id
@@ -589,6 +621,38 @@ fn finish_agent(
     println!("evidence: {}", finish.evidence.id);
     println!("review: {}", finish.review.id);
     println!("review_markdown: {}", finish.review_markdown_path);
+    Ok(())
+}
+
+fn accept_agent(
+    root: PathBuf,
+    workspace_id: &str,
+    command: String,
+    exit_code: i32,
+    summary: String,
+    artifact: Option<String>,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let acceptance = store
+        .accept_agent(workspace_id, command, exit_code, summary, artifact, output)
+        .context("failed to accept agent workspace")?;
+
+    println!("Accepted agent workspace");
+    println!("thread: {}", acceptance.workspace.thread_id);
+    println!("workspace: {}", acceptance.workspace.id);
+    if let Some(snapshot) = acceptance.workspace.latest_snapshot {
+        println!("snapshot: {snapshot}");
+    }
+    println!("evidence: {}", acceptance.evidence.id);
+    println!("review: {}", acceptance.review.id);
+    println!("review_markdown: {}", acceptance.review_markdown_path);
+    println!("publication: {}", acceptance.publication.id);
+    println!("patch: {}", acceptance.patch_path);
+    println!(
+        "git_apply: git apply {}",
+        shell_quote(&acceptance.patch_path)
+    );
     Ok(())
 }
 

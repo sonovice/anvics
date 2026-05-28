@@ -43,8 +43,8 @@ rm "$workspace_path/deleted.txt"
 printf 'new\n' > "$workspace_path/added.txt"
 printf 'compact scripted evidence\n' > "$target_repo/agent-summary.txt"
 
-finish_output="$(
-  anvics agent finish \
+accept_output="$(
+  anvics agent accept \
     --workspace "$workspace" \
     --command "scripted-live-agent" \
     --exit-code 0 \
@@ -52,20 +52,14 @@ finish_output="$(
     --artifact "$target_repo/agent-summary.txt"
 )"
 
-review="$(printf '%s\n' "$finish_output" | value_after_prefix "review: ")"
-review_markdown="$(printf '%s\n' "$finish_output" | value_after_prefix "review_markdown: ")"
+review="$(printf '%s\n' "$accept_output" | value_after_prefix "review: ")"
+review_markdown="$(printf '%s\n' "$accept_output" | value_after_prefix "review_markdown: ")"
+patch="$(printf '%s\n' "$accept_output" | value_after_prefix "patch: ")"
 
 echo "Review: $review"
 echo "Review markdown: $review_markdown"
 anvics review show "$review" --format markdown
 anvics agent status --thread "$thread"
-
-publication="$(
-  anvics publish create --thread "$thread" --review "$review" |
-    value_after_prefix "Created publication "
-)"
-patch="$target_repo/accepted.patch"
-anvics legacy git export --publication "$publication" --output "$patch"
 
 printf 'before\n' > "$clean_repo/modified.txt"
 printf 'delete me\n' > "$clean_repo/deleted.txt"

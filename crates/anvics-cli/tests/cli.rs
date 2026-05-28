@@ -333,7 +333,8 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     ))
     .stdout(predicate::str::contains("Modify, add, and delete files"))
     .stdout(predicate::str::contains("anvics --repo"))
-    .stdout(predicate::str::contains("anvics --repo").count(3))
+    .stdout(predicate::str::contains("anvics --repo").count(4))
+    .stdout(predicate::str::contains("agent accept"))
     .stdout(predicate::str::contains("publish create"));
     anvics(dir.path(), &["review", "path", &review])
         .assert()
@@ -413,6 +414,105 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
 }
 
 #[test]
+fn agent_accept_publishes_and_exports_patch() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+
+    let prepare_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Accept Agent",
+            "--task",
+            "Edit app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("agent accept"))
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare_output, "thread: ");
+    let workspace = value_after_prefix(&prepare_output, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare_output, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "accepted\n").unwrap();
+    let artifact = dir.path().join("accept-artifact.txt");
+    fs::write(&artifact, "compact accept artifact\n").unwrap();
+    let patch_path = dir.path().join("custom.patch");
+
+    let accept_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--command",
+            "cat app.txt",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Accepted app.txt change",
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--output",
+            patch_path.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Accepted agent workspace"))
+    .stdout(predicate::str::contains("snapshot: "))
+    .stdout(predicate::str::contains("evidence: "))
+    .stdout(predicate::str::contains("review: "))
+    .stdout(predicate::str::contains("review_markdown: "))
+    .stdout(predicate::str::contains("publication: "))
+    .stdout(predicate::str::contains("patch: "))
+    .stdout(predicate::str::contains("git_apply: git apply"))
+    .get_output()
+    .stdout
+    .clone();
+    let publication = value_after_prefix(&accept_output, "publication: ");
+
+    assert!(patch_path.exists());
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("publication_status: published"))
+        .stdout(predicate::str::contains(&publication));
+
+    let clean = tempdir().unwrap();
+    fs::write(clean.path().join("app.txt"), "base\n").unwrap();
+    StdCommand::new("git")
+        .args(["init"])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    let apply = StdCommand::new("git")
+        .args(["apply", patch_path.to_str().unwrap()])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "git apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("app.txt")).unwrap(),
+        "accepted\n"
+    );
+}
+
+#[test]
 fn two_prepared_agents_report_overlap_notes() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -480,11 +580,11 @@ fn two_prepared_agents_report_overlap_notes() {
     )
     .assert()
     .success();
-    let first_finish = anvics(
+    let first_accept = anvics(
         dir.path(),
         &[
             "agent",
-            "finish",
+            "accept",
             "--workspace",
             &first_workspace,
             "--command",
@@ -500,7 +600,7 @@ fn two_prepared_agents_report_overlap_notes() {
     .get_output()
     .stdout
     .clone();
-    let review = value_after_prefix(&first_finish, "review: ");
+    let review = value_after_prefix(&first_accept, "review: ");
 
     anvics(
         dir.path(),

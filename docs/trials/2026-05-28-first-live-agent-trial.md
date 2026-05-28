@@ -42,3 +42,7 @@ Anvics commit: `aec3760`
 - Publication: `f4f7c1e0-e51b-4d4c-a986-5e54db977c37`
 - Legacy patch: `/var/folders/zv/p_qkzppj07n4t10f5c19gp480000gn/T/tmp.FlO4KuUrVX/accepted.patch`
 - Follow-up fixes: Add a single command to finish, review, publish, and export an accepted workspace; improve command evidence ergonomics for multi-command verification.
+
+## Follow-Up
+
+MVP 0.4 addresses the main trial friction with `anvics agent accept`, a single operator command that attaches evidence, snapshots the workspace, creates review/publication records, exports the legacy patch, and prints the audit ids.

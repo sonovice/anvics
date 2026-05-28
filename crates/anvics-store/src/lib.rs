@@ -1,9 +1,9 @@
 use anvics_core::{
-    AgentFinish, AgentPreparation, AgentStatus, ChangeStatus, ChangedPath, EvidenceRecord,
-    EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId, ObjectId,
-    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot,
-    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
-    WorkspaceView, WorkspaceViewId,
+    AgentAcceptance, AgentFinish, AgentPreparation, AgentStatus, ChangeStatus, ChangedPath,
+    EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
+    ObjectId, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
+    SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId,
+    WorkThreadStatus, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -402,6 +402,33 @@ impl AnvicsStore {
             workspace,
             review,
             review_markdown_path,
+        })
+    }
+
+    pub fn accept_agent(
+        &self,
+        workspace_id: &str,
+        command: String,
+        exit_code: i32,
+        summary: String,
+        artifact_path: Option<String>,
+        output_path: Option<PathBuf>,
+    ) -> Result<AgentAcceptance> {
+        let finish = self.finish_agent(workspace_id, command, exit_code, summary, artifact_path)?;
+        let publication = self.create_publication(
+            finish.workspace.thread_id.as_str(),
+            finish.review.id.as_str(),
+        )?;
+        let output = output_path.unwrap_or_else(|| self.root.join("accepted.patch"));
+        let patch_path = self.export_legacy_git_patch(publication.id.as_str(), output)?;
+
+        Ok(AgentAcceptance {
+            evidence: finish.evidence,
+            workspace: finish.workspace,
+            review: finish.review,
+            review_markdown_path: finish.review_markdown_path,
+            publication,
+            patch_path: patch_path.to_string_lossy().to_string(),
         })
     }
 
@@ -942,12 +969,13 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- When finished, report the command you ran, exit code, and a short summary.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- When finished, report the command you ran, exit code, and a short summary.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
         thread.id,
         workspace.id,
         repo_root.display(),
         workspace.materialized_path,
         thread.task,
+        workspace.id,
         workspace.id
     )
 }
@@ -995,6 +1023,11 @@ fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThrea
     }
 
     markdown.push_str("\n## Next Commands\n\n");
+    markdown.push_str("Shortest path for an unaccepted workspace:\n\n");
+    markdown.push_str(&format!(
+        "```sh\nanvics --repo {repo} agent accept --workspace <workspace-id> --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n"
+    ));
+    markdown.push_str("Manual path from this review:\n\n");
     markdown.push_str(&format!(
         "```sh\nanvics --repo {repo} review show {} --format markdown\nanvics --repo {repo} publish create --thread {} --review {}\nanvics --repo {repo} legacy git export --publication <publication-id> --output accepted.patch\n```\n",
         review.id,
@@ -1332,6 +1365,7 @@ mod tests {
         assert!(packet.contains("Edit app.txt"));
         assert!(packet.contains("only editable area"));
         assert!(packet.contains("anvics --repo"));
+        assert!(packet.contains("agent accept"));
         assert!(packet.contains("agent finish"));
     }
 
@@ -1373,6 +1407,7 @@ mod tests {
         assert!(markdown.contains("Edit app.txt"));
         assert!(markdown.contains("Edited app.txt"));
         assert!(markdown.contains("anvics --repo"));
+        assert!(markdown.contains("agent accept"));
         assert!(markdown.contains("publish create"));
 
         let status = store.agent_status(preparation.thread.id.as_str()).unwrap();
@@ -1419,5 +1454,53 @@ mod tests {
         assert!(patch.contains("diff --git a/added.txt b/added.txt"));
         assert!(patch.contains("diff --git a/modified.txt b/modified.txt"));
         assert!(patch.contains("diff --git a/deleted.txt b/deleted.txt"));
+    }
+
+    #[test]
+    fn agent_accept_stores_review_publication_and_patch() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Accept agent".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "accepted\n",
+        )
+        .unwrap();
+
+        let acceptance = store
+            .accept_agent(
+                preparation.workspace.id.as_str(),
+                "cat app.txt".to_owned(),
+                0,
+                "Verified accepted app.txt".to_owned(),
+                Some("artifacts/accept.log".to_owned()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(acceptance.evidence.thread_id, preparation.thread.id);
+        assert_eq!(
+            acceptance.evidence.artifact_path,
+            Some("artifacts/accept.log".to_owned())
+        );
+        assert_eq!(acceptance.review.thread_id, preparation.thread.id);
+        assert_eq!(acceptance.publication.review_id, acceptance.review.id);
+        assert_eq!(
+            acceptance.patch_path,
+            dir.path().join("accepted.patch").display().to_string()
+        );
+        assert!(dir.path().join("accepted.patch").exists());
+        assert_eq!(
+            store
+                .show_thread(preparation.thread.id.as_str())
+                .unwrap()
+                .status,
+            WorkThreadStatus::Published
+        );
     }
 }

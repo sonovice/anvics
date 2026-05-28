@@ -29,30 +29,25 @@ value_after_prefix() {
   sed -n "s/^${prefix}//p" | head -n 1
 }
 
-finish_args=(
-  agent finish
+accept_args=(
+  agent accept
   --workspace "$workspace"
   --command "$command_name"
   --exit-code "$exit_code"
   --summary "$summary"
+  --output "$patch"
 )
 if [[ -n "$artifact" ]]; then
-  finish_args+=(--artifact "$artifact")
+  accept_args+=(--artifact "$artifact")
 fi
 
-finish_output="$(anvics "${finish_args[@]}")"
-review="$(printf '%s\n' "$finish_output" | value_after_prefix "review: ")"
+accept_output="$(anvics "${accept_args[@]}")"
+review="$(printf '%s\n' "$accept_output" | value_after_prefix "review: ")"
+patch="$(printf '%s\n' "$accept_output" | value_after_prefix "patch: ")"
 
-echo "$finish_output"
+echo "$accept_output"
 anvics review show "$review" --format markdown
 anvics agent status --thread "$thread"
-
-publication="$(
-  anvics publish create --thread "$thread" --review "$review" |
-    tee /dev/stderr |
-    value_after_prefix "Created publication "
-)"
-anvics legacy git export --publication "$publication" --output "$patch"
 
 cp "$target_repo/app.txt" "$clean_repo/app.txt"
 cp "$target_repo/notes.md" "$clean_repo/notes.md"

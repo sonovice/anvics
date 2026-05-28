@@ -83,5 +83,5 @@ After agents finish, run:
 scripts/live_agent_trial_verify.sh "$target_repo" \\
   <accepted-thread-id> <accepted-workspace-id> "<command>" <exit-code> "<summary>"
 
-Agent A has one non-overlapping file change plus one deliberate same-file overlap with Agent B. Publish whichever result you want to accept.
+Agent A has one non-overlapping file change plus one deliberate same-file overlap with Agent B. Finish the competing workspace separately if you want overlap notes, then use the verify script to accept whichever result you want to publish.
 EOF
