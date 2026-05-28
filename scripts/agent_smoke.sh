@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_repo="$(mktemp -d)"
 
 anvics() {
-  cargo run -q -p anvics-cli --manifest-path "$repo_root/Cargo.toml" -- --repo "$target_repo" "$@"
+  cargo run -q -p anvics-cli --bin anvics --manifest-path "$repo_root/Cargo.toml" -- --repo "$target_repo" "$@"
 }
 
 value_after_prefix() {
@@ -52,4 +52,3 @@ anvics review show "$review_a"
 anvics publish create --thread "$thread_a" --review "$review_a"
 
 echo "Smoke test complete"
-

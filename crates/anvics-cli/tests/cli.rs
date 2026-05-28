@@ -2,6 +2,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::process::Command as StdCommand;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 #[test]
@@ -582,6 +584,48 @@ fn evidence_command_attaches_file_backed_evidence() {
 }
 
 #[test]
+fn daemon_backed_cli_flow_uses_socket_api() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = StdCommand::new(assert_cmd::cargo::cargo_bin("anvicsd"))
+        .args(["--socket", socket.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    wait_for_socket(&socket);
+
+    daemon_anvics(dir.path(), &socket, &["repo", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not initialized"));
+
+    daemon_anvics(dir.path(), &socket, &["repo", "init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Initialized Anvics repository"));
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["snapshot", "create", "--message", "base"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Created snapshot"));
+    daemon_anvics(dir.path(), &socket, &["snapshot", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("base"));
+    daemon_anvics(dir.path(), &socket, &["repo", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("initialized"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn two_prepared_agents_report_overlap_notes() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -684,6 +728,26 @@ fn anvics(repo: &std::path::Path, args: &[&str]) -> Command {
     let mut command = Command::cargo_bin("anvics").unwrap();
     command.args(["--repo", repo.to_str().unwrap()]).args(args);
     command
+}
+
+fn daemon_anvics(repo: &std::path::Path, socket: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = Command::cargo_bin("anvics").unwrap();
+    command
+        .env("ANVICS_DAEMON_SOCKET", socket)
+        .args(["--repo", repo.to_str().unwrap(), "--use-daemon"])
+        .args(args);
+    command
+}
+
+fn wait_for_socket(socket: &std::path::Path) {
+    let started = Instant::now();
+    while !socket.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timed out waiting for daemon socket"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn created_id(output: &[u8], prefix: &str) -> String {

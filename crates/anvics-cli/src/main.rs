@@ -1,7 +1,12 @@
+use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult};
 use anvics_store::{AnvicsStore, CommandEvidenceInput, StoreError};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
+    path::PathBuf,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "anvics")]
@@ -9,6 +14,9 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     repo: Option<PathBuf>,
+
+    #[arg(long, global = true)]
+    use_daemon: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -57,6 +65,7 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum RepoCommand {
     Init,
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -252,20 +261,58 @@ struct CommandEvidenceOptions {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
+    let daemon = if cli.use_daemon || std::env::var_os("ANVICS_USE_DAEMON").is_some() {
+        Some(daemon_socket()?)
+    } else {
+        None
+    };
 
     match cli.command {
         Command::Repo {
             command: RepoCommand::Init,
-        } => init_repo(root),
+        } => {
+            if let Some(socket) = daemon {
+                init_repo_via_daemon(root, socket)
+            } else {
+                init_repo(root)
+            }
+        }
+        Command::Repo {
+            command: RepoCommand::Status,
+        } => {
+            if let Some(socket) = daemon {
+                repo_status_via_daemon(root, socket)
+            } else {
+                repo_status(root)
+            }
+        }
         Command::Snapshot {
             command: SnapshotCommand::Create { message },
-        } => create_snapshot(root, message),
+        } => {
+            if let Some(socket) = daemon {
+                create_snapshot_via_daemon(root, socket, message)
+            } else {
+                create_snapshot(root, message)
+            }
+        }
         Command::Snapshot {
             command: SnapshotCommand::List,
-        } => list_snapshots(root),
+        } => {
+            if let Some(socket) = daemon {
+                list_snapshots_via_daemon(root, socket)
+            } else {
+                list_snapshots(root)
+            }
+        }
         Command::Snapshot {
             command: SnapshotCommand::Show { id },
-        } => show_snapshot(root, &id),
+        } => {
+            if let Some(socket) = daemon {
+                show_snapshot_via_daemon(root, socket, id)
+            } else {
+                show_snapshot(root, &id)
+            }
+        }
         Command::Thread {
             command: ThreadCommand::Create { title, task },
         } => create_thread(root, title, task),
@@ -336,7 +383,13 @@ fn main() -> Result<()> {
         } => show_agent_packet(root, &thread),
         Command::Agent {
             command: AgentCommand::Status { thread },
-        } => show_agent_status(root, &thread),
+        } => {
+            if let Some(socket) = daemon {
+                show_agent_status_via_daemon(root, socket, thread)
+            } else {
+                show_agent_status(root, &thread)
+            }
+        }
         Command::Agent {
             command:
                 AgentCommand::Finish {
@@ -423,6 +476,56 @@ fn init_repo(root: PathBuf) -> Result<()> {
     }
 }
 
+fn repo_status(root: PathBuf) -> Result<()> {
+    match AnvicsStore::open(&root) {
+        Ok(store) => {
+            let manifest = store.manifest().context("failed to read repository")?;
+            println!("Anvics repository initialized");
+            println!("repository: {}", manifest.id);
+            println!("format: {}", manifest.format_version);
+            Ok(())
+        }
+        Err(StoreError::NotRepository(_)) => {
+            println!("Anvics repository not initialized");
+            Ok(())
+        }
+        Err(error) => Err(error).context("failed to read repository status"),
+    }
+}
+
+fn init_repo_via_daemon(root: PathBuf, socket: PathBuf) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::RepoInit)? {
+        ApiResult::RepoInit { manifest } => {
+            println!("Initialized Anvics repository");
+            println!("repository: {}", manifest.id);
+            println!("format: {}", manifest.format_version);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn repo_status_via_daemon(root: PathBuf, socket: PathBuf) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::RepoStatus)? {
+        ApiResult::RepoStatus {
+            initialized: true,
+            manifest: Some(manifest),
+        } => {
+            println!("Anvics repository initialized");
+            println!("repository: {}", manifest.id);
+            println!("format: {}", manifest.format_version);
+            Ok(())
+        }
+        ApiResult::RepoStatus {
+            initialized: false, ..
+        } => {
+            println!("Anvics repository not initialized");
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn create_snapshot(root: PathBuf, message: Option<String>) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let snapshot = store
@@ -437,10 +540,32 @@ fn create_snapshot(root: PathBuf, message: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn create_snapshot_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    message: Option<String>,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::SnapshotCreate { message })? {
+        ApiResult::SnapshotCreate { snapshot } => {
+            println!("Created snapshot {}", snapshot.id);
+            println!("root_tree: {}", snapshot.root_tree);
+            if let Some(message) = snapshot.message {
+                println!("message: {message}");
+            }
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn list_snapshots(root: PathBuf) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let snapshots = store.list_snapshots().context("failed to list snapshots")?;
 
+    print_snapshots(snapshots)
+}
+
+fn print_snapshots(snapshots: Vec<anvics_core::SourceSnapshot>) -> Result<()> {
     if snapshots.is_empty() {
         println!("No snapshots");
         return Ok(());
@@ -464,6 +589,13 @@ fn list_snapshots(root: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn list_snapshots_via_daemon(root: PathBuf, socket: PathBuf) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::SnapshotList)? {
+        ApiResult::SnapshotList { snapshots } => print_snapshots(snapshots),
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn show_snapshot(root: PathBuf, id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let snapshot = store
@@ -472,6 +604,16 @@ fn show_snapshot(root: PathBuf, id: &str) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
     Ok(())
+}
+
+fn show_snapshot_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::SnapshotShow { id })? {
+        ApiResult::SnapshotShow { snapshot } => {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
 }
 
 fn create_thread(root: PathBuf, title: String, task: String) -> Result<()> {
@@ -675,6 +817,21 @@ fn show_agent_status(root: PathBuf, thread_id: &str) -> Result<()> {
         .agent_status(thread_id)
         .with_context(|| format!("failed to show agent status for thread {thread_id}"))?;
 
+    print_agent_status(status);
+    Ok(())
+}
+
+fn show_agent_status_via_daemon(root: PathBuf, socket: PathBuf, thread: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::AgentStatus { thread })? {
+        ApiResult::AgentStatus { status } => {
+            print_agent_status(*status);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_status(status: anvics_core::AgentStatus) {
     println!("thread: {}", status.thread.id);
     println!("title: {}", status.thread.title);
     println!("status: {:?}", status.thread.status);
@@ -707,7 +864,6 @@ fn show_agent_status(root: PathBuf, thread_id: &str) -> Result<()> {
             println!("publication: {publication_id}");
         }
     }
-    Ok(())
 }
 
 fn finish_agent(root: PathBuf, workspace_id: &str, options: CommandEvidenceOptions) -> Result<()> {
@@ -790,6 +946,38 @@ fn export_legacy_git_patch(root: PathBuf, publication_id: &str, output: PathBuf)
     println!("Exported legacy Git patch");
     println!("path: {}", output.display());
     Ok(())
+}
+
+fn daemon_socket() -> Result<PathBuf> {
+    std::env::var_os("ANVICS_DAEMON_SOCKET")
+        .map(PathBuf::from)
+        .context("ANVICS_DAEMON_SOCKET must be set when --use-daemon is used")
+}
+
+fn daemon_request(socket: &PathBuf, repo: PathBuf, method: ApiMethod) -> Result<ApiResult> {
+    let mut stream = UnixStream::connect(socket)
+        .with_context(|| format!("failed to connect to daemon socket {}", socket.display()))?;
+    let request = ApiRequest {
+        id: 1,
+        repo: display_path(&repo),
+        method,
+    };
+    serde_json::to_writer(&mut stream, &request)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    let response: ApiResponse = serde_json::from_str(&line)
+        .with_context(|| format!("failed to decode daemon response: {line}"))?;
+    match response.result {
+        ApiResult::Error { message } => anyhow::bail!("daemon error: {message}"),
+        result => Ok(result),
+    }
+}
+
+fn unexpected_daemon_result(result: ApiResult) -> Result<()> {
+    anyhow::bail!("unexpected daemon response: {result:?}")
 }
 
 fn display_path(path: &std::path::Path) -> String {

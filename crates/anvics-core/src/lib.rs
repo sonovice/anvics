@@ -59,6 +59,7 @@ opaque_id!(WorkspaceViewId);
 opaque_id!(EvidenceRecordId);
 opaque_id!(ReviewProjectionId);
 opaque_id!(NativePublicationId);
+opaque_id!(RepositoryEventId);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -252,6 +253,29 @@ pub struct NativePublication {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RepositoryEvent {
+    pub id: RepositoryEventId,
+    pub sequence: u64,
+    pub kind: RepositoryEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryEventKind {
+    RepositoryInitialized,
+    SnapshotCreated,
+    WorkThreadCreated,
+    WorkspaceCreated,
+    EvidenceAttached,
+    ReviewCreated,
+    PublicationCreated,
+    LegacyPatchExported,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AgentPreparation {
     pub thread: WorkThread,
     pub workspace: WorkspaceView,
@@ -381,6 +405,13 @@ mod tests {
             review_id,
             created_at: "2026-05-28T00:00:04Z".to_owned(),
         };
+        let event = RepositoryEvent {
+            id: RepositoryEventId::new(),
+            sequence: 1,
+            kind: RepositoryEventKind::PublicationCreated,
+            subject_id: Some(publication.id.to_string()),
+            created_at: "2026-05-28T00:00:05Z".to_owned(),
+        };
         let acceptance = AgentAcceptance {
             evidence: evidence.clone(),
             workspace: workspace.clone(),
@@ -420,6 +451,11 @@ mod tests {
             )
             .unwrap(),
             publication
+        );
+        assert_eq!(
+            serde_json::from_str::<RepositoryEvent>(&serde_json::to_string(&event).unwrap())
+                .unwrap(),
+            event
         );
         assert_eq!(
             serde_json::from_str::<AgentAcceptance>(&serde_json::to_string(&acceptance).unwrap())

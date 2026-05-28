@@ -25,14 +25,14 @@ scripts/live_agent_trial_prepare.sh
    ```sh
    target_repo="$(mktemp -d)"
    printf 'base\n' > "$target_repo/app.txt"
-   cargo run -q -p anvics-cli -- --repo "$target_repo" repo init
-   cargo run -q -p anvics-cli -- --repo "$target_repo" snapshot create --message base
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" repo init
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" snapshot create --message base
    ```
 
 2. Prepare a live-agent packet:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" agent prepare \
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent prepare \
      --title "Live agent test" \
      --task "Edit app.txt so it clearly identifies the live agent run."
    ```
@@ -40,8 +40,8 @@ scripts/live_agent_trial_prepare.sh
 3. Inspect the packet and current status:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" agent packet --thread "<thread-id>"
-   cargo run -q -p anvics-cli -- --repo "$target_repo" agent status --thread "<thread-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent packet --thread "<thread-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent status --thread "<thread-id>"
    ```
 
 4. Open the printed packet path, then paste this prompt into Codex, Claude, Cursor, or another agent CLI:
@@ -60,7 +60,7 @@ scripts/live_agent_trial_prepare.sh
 5. Accept the agent task from the Anvics repo, using the printed workspace id:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" agent accept \
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent accept \
      --workspace "<workspace-id>" \
      --command "manual live-agent run" \
      --exit-code 0 \
@@ -73,8 +73,8 @@ scripts/live_agent_trial_prepare.sh
 6. Inspect the accepted result:
 
    ```sh
-   cargo run -q -p anvics-cli -- --repo "$target_repo" review show "<review-id>" --format markdown
-   cargo run -q -p anvics-cli -- --repo "$target_repo" agent status --thread "<thread-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" review show "<review-id>" --format markdown
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent status --thread "<thread-id>"
    ```
 
    `agent finish`, `review show`, `publish create`, and `legacy git export` remain available when you want to inspect or publish each step manually.

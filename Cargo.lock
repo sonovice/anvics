@@ -62,9 +62,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvics-api"
+version = "0.1.0"
+dependencies = [
+ "anvics-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "anvics-cli"
 version = "0.1.0"
 dependencies = [
+ "anvics-api",
+ "anvics-core",
  "anvics-store",
  "anyhow",
  "assert_cmd",

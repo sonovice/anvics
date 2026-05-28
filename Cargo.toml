@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/anvics-api",
     "crates/anvics-cli",
     "crates/anvics-core",
     "crates/anvics-store",

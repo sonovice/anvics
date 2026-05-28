@@ -1,9 +1,10 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentStatus, ChangeStatus, ChangedPath,
     EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
-    ObjectId, OverlayEntry, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
-    SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId,
-    WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    ObjectId, OverlayEntry, RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId,
+    RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot, SourceSnapshotId,
+    Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay,
+    WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -97,6 +98,7 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("reviews"))?;
         fs::create_dir_all(anvics_dir.join("publications"))?;
         fs::create_dir_all(anvics_dir.join("agent-packets"))?;
+        fs::create_dir_all(anvics_dir.join("events"))?;
 
         let manifest = RepositoryManifest {
             id: RepositoryId::new(),
@@ -104,6 +106,11 @@ impl AnvicsStore {
             created_at: now_rfc3339()?,
         };
         write_json_pretty(&repo_json, &manifest)?;
+        append_event_at(
+            &anvics_dir,
+            RepositoryEventKind::RepositoryInitialized,
+            Some(manifest.id.to_string()),
+        )?;
         Ok(manifest)
     }
 
@@ -156,6 +163,10 @@ impl AnvicsStore {
         if update_head {
             fs::write(self.anvics_dir.join("HEAD"), snapshot.id.as_str())?;
         }
+        self.append_event(
+            RepositoryEventKind::SnapshotCreated,
+            Some(snapshot.id.to_string()),
+        )?;
 
         Ok(snapshot)
     }
@@ -209,6 +220,10 @@ impl AnvicsStore {
             created_at: now_rfc3339()?,
         };
         write_json_pretty(self.thread_path(thread.id.as_str()), &thread)?;
+        self.append_event(
+            RepositoryEventKind::WorkThreadCreated,
+            Some(thread.id.to_string()),
+        )?;
         Ok(thread)
     }
 
@@ -249,6 +264,10 @@ impl AnvicsStore {
             created_at: now_rfc3339()?,
         };
         write_json_pretty(self.workspace_path(workspace.id.as_str()), &workspace)?;
+        self.append_event(
+            RepositoryEventKind::WorkspaceCreated,
+            Some(workspace.id.to_string()),
+        )?;
         Ok(workspace)
     }
 
@@ -327,6 +346,10 @@ impl AnvicsStore {
             created_at: now_rfc3339()?,
         };
         write_json_pretty(self.evidence_path(evidence.id.as_str()), &evidence)?;
+        self.append_event(
+            RepositoryEventKind::EvidenceAttached,
+            Some(evidence.id.to_string()),
+        )?;
         Ok(evidence)
     }
 
@@ -361,6 +384,10 @@ impl AnvicsStore {
         fs::write(
             self.review_markdown_path(review.id.as_str()),
             render_review(&self.root, &review, &thread),
+        )?;
+        self.append_event(
+            RepositoryEventKind::ReviewCreated,
+            Some(review.id.to_string()),
         )?;
         Ok(review)
     }
@@ -398,6 +425,10 @@ impl AnvicsStore {
 
         thread.status = WorkThreadStatus::Published;
         write_json_pretty(self.thread_path(thread.id.as_str()), &thread)?;
+        self.append_event(
+            RepositoryEventKind::PublicationCreated,
+            Some(publication.id.to_string()),
+        )?;
 
         Ok(publication)
     }
@@ -590,7 +621,22 @@ impl AnvicsStore {
             fs::create_dir_all(parent)?;
         }
         fs::write(output, patch)?;
+        self.append_event(
+            RepositoryEventKind::LegacyPatchExported,
+            Some(publication.id.to_string()),
+        )?;
         Ok(output.to_path_buf())
+    }
+
+    pub fn events_since(&self, sequence: u64) -> Result<Vec<RepositoryEvent>> {
+        let mut events: Vec<RepositoryEvent> = read_json_dir(self.anvics_dir.join("events"))?;
+        events.retain(|event| event.sequence > sequence);
+        events.sort_by(|left, right| {
+            left.sequence
+                .cmp(&right.sequence)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(events)
     }
 
     pub fn restore_snapshot_to_path(
@@ -747,6 +793,14 @@ impl AnvicsStore {
         self.anvics_dir
             .join("agent-packets")
             .join(format!("{thread_id}.md"))
+    }
+
+    fn append_event(
+        &self,
+        kind: RepositoryEventKind,
+        subject_id: Option<String>,
+    ) -> Result<RepositoryEvent> {
+        append_event_at(&self.anvics_dir, kind, subject_id)
     }
 
     fn restore_tree(&self, tree_id: &ObjectId, target: &Path) -> Result<()> {
@@ -1096,6 +1150,35 @@ fn read_json_dir<T: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> Resu
     Ok(values)
 }
 
+fn append_event_at(
+    anvics_dir: &Path,
+    kind: RepositoryEventKind,
+    subject_id: Option<String>,
+) -> Result<RepositoryEvent> {
+    let events_dir = anvics_dir.join("events");
+    fs::create_dir_all(&events_dir)?;
+    let sequence_path = events_dir.join("SEQ");
+    let current_sequence = if sequence_path.exists() {
+        fs::read_to_string(&sequence_path)?
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let sequence = current_sequence + 1;
+    let event = RepositoryEvent {
+        id: RepositoryEventId::new(),
+        sequence,
+        kind,
+        subject_id,
+        created_at: now_rfc3339()?,
+    };
+    write_json_pretty(events_dir.join(format!("{sequence:020}.json")), &event)?;
+    fs::write(sequence_path, sequence.to_string())?;
+    Ok(event)
+}
+
 fn collect_files(source_root: &Path) -> Result<Vec<PathBuf>> {
     let source_root = source_root.to_path_buf();
     let mut builder = WalkBuilder::new(&source_root);
@@ -1378,6 +1461,15 @@ mod tests {
         assert!(dir.path().join(".anvics/objects/blake3").exists());
         assert!(dir.path().join(".anvics/snapshots").exists());
         assert!(dir.path().join(".anvics/agent-packets").exists());
+        assert!(dir.path().join(".anvics/events").exists());
+        assert_eq!(
+            AnvicsStore::open(dir.path())
+                .unwrap()
+                .events_since(0)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1443,6 +1535,37 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(store.object_exists(&first));
+    }
+
+    #[test]
+    fn mutation_events_are_append_only() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let thread = store
+            .create_thread("events".to_owned(), "record mutations".to_owned())
+            .unwrap();
+        let workspace = store.create_workspace(thread.id.as_str()).unwrap();
+
+        let events = store.events_since(0).unwrap();
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(events[3].subject_id, Some(workspace.id.to_string()));
+        assert!(store
+            .events_since(2)
+            .unwrap()
+            .iter()
+            .all(|event| event.sequence > 2));
     }
 
     #[test]
