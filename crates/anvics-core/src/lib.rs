@@ -62,6 +62,9 @@ opaque_id!(ReviewProjectionId);
 opaque_id!(NativePublicationId);
 opaque_id!(RepositoryEventId);
 opaque_id!(AgentSessionId);
+opaque_id!(RiskScanId);
+opaque_id!(RiskFindingId);
+opaque_id!(PolicyOverrideId);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -271,6 +274,52 @@ pub struct ReviewProjection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RiskScan {
+    pub id: RiskScanId,
+    pub review_id: ReviewProjectionId,
+    pub findings: Vec<RiskFinding>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RiskFinding {
+    pub id: RiskFindingId,
+    pub scan_id: RiskScanId,
+    pub review_id: ReviewProjectionId,
+    pub detector: String,
+    pub target_kind: RiskTargetKind,
+    pub target_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub severity: RiskSeverity,
+    pub redacted_excerpt: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskTargetKind {
+    SourceFile,
+    CommandStdout,
+    CommandStderr,
+    EvidenceArtifact,
+    CommandFile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskSeverity {
+    SecretRisk,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PolicyOverride {
+    pub id: PolicyOverrideId,
+    pub review_id: ReviewProjectionId,
+    pub reason: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ChangedPath {
     pub path: String,
     pub status: ChangeStatus,
@@ -319,6 +368,9 @@ pub enum RepositoryEventKind {
     AgentSessionEntered,
     AgentSessionSeen,
     AgentSessionFinished,
+    RiskScanCreated,
+    SecretRiskDetected,
+    PolicyOverrideRecorded,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -514,6 +566,30 @@ mod tests {
             }],
             created_at: "2026-05-28T00:00:03Z".to_owned(),
         };
+        let risk_scan_id = RiskScanId::new();
+        let risk_finding = RiskFinding {
+            id: RiskFindingId::new(),
+            scan_id: risk_scan_id.clone(),
+            review_id: review_id.clone(),
+            detector: "openai_token".to_owned(),
+            target_kind: RiskTargetKind::SourceFile,
+            target_path: "app.txt".to_owned(),
+            line: Some(1),
+            severity: RiskSeverity::SecretRisk,
+            redacted_excerpt: "OPENAI_API_KEY=<redacted:51 chars>".to_owned(),
+        };
+        let risk_scan = RiskScan {
+            id: risk_scan_id,
+            review_id: review_id.clone(),
+            findings: vec![risk_finding.clone()],
+            created_at: "2026-05-28T00:00:03Z".to_owned(),
+        };
+        let override_record = PolicyOverride {
+            id: PolicyOverrideId::new(),
+            review_id: review_id.clone(),
+            reason: "fixture false positive".to_owned(),
+            created_at: "2026-05-28T00:00:04Z".to_owned(),
+        };
         let publication = NativePublication {
             id: NativePublicationId::new(),
             thread_id: thread_id.clone(),
@@ -592,6 +668,22 @@ mod tests {
             serde_json::from_str::<ReviewProjection>(&serde_json::to_string(&review).unwrap())
                 .unwrap(),
             review
+        );
+        assert_eq!(
+            serde_json::from_str::<RiskScan>(&serde_json::to_string(&risk_scan).unwrap()).unwrap(),
+            risk_scan
+        );
+        assert_eq!(
+            serde_json::from_str::<RiskFinding>(&serde_json::to_string(&risk_finding).unwrap())
+                .unwrap(),
+            risk_finding
+        );
+        assert_eq!(
+            serde_json::from_str::<PolicyOverride>(
+                &serde_json::to_string(&override_record).unwrap()
+            )
+            .unwrap(),
+            override_record
         );
         assert_eq!(
             serde_json::from_str::<NativePublication>(

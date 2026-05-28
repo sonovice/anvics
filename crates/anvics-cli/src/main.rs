@@ -1,5 +1,7 @@
 use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat};
-use anvics_store::{AnvicsStore, CommandEvidenceInput, CommandRunInput, StoreError};
+use anvics_store::{
+    AnvicsStore, CommandEvidenceInput, CommandRunInput, PublicationOptions, StoreError,
+};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
@@ -51,6 +53,10 @@ enum CliCommand {
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
+    },
+    Risk {
+        #[command(subcommand)]
+        command: RiskCommand,
     },
     Publish {
         #[command(subcommand)]
@@ -205,6 +211,25 @@ enum PublishCommand {
         thread: String,
         #[arg(long)]
         review: String,
+        #[arg(long)]
+        allow_secret_risk: bool,
+        #[arg(long)]
+        override_reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RiskCommand {
+    Scan {
+        #[arg(long)]
+        review: String,
+    },
+    List {
+        #[arg(long)]
+        review: String,
+    },
+    Show {
+        id: String,
     },
 }
 
@@ -289,6 +314,10 @@ enum AgentCommand {
         run_timeout_seconds: Option<u64>,
         #[arg(long)]
         output: Option<PathBuf>,
+        #[arg(long)]
+        allow_secret_risk: bool,
+        #[arg(long)]
+        override_reason: Option<String>,
         #[arg(last = true)]
         argv: Vec<String>,
     },
@@ -371,7 +400,18 @@ struct AgentAcceptOptions {
     run_label: Option<String>,
     run_summary: Option<String>,
     run_timeout_seconds: Option<u64>,
+    allow_secret_risk: bool,
+    override_reason: Option<String>,
     argv: Vec<String>,
+}
+
+impl AgentAcceptOptions {
+    fn publication_options(&self) -> PublicationOptions {
+        PublicationOptions {
+            allow_secret_risk: self.allow_secret_risk,
+            override_reason: self.override_reason.clone(),
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -585,13 +625,50 @@ fn main() -> Result<()> {
                 show_review_path(root, &id)
             }
         }
-        CliCommand::Publish {
-            command: PublishCommand::Create { thread, review },
+        CliCommand::Risk {
+            command: RiskCommand::Scan { review },
         } => {
             if let Some(socket) = daemon {
-                create_publication_via_daemon(root, socket, thread, review)
+                scan_risks_via_daemon(root, socket, review)
             } else {
-                create_publication(root, &thread, &review)
+                scan_risks(root, &review)
+            }
+        }
+        CliCommand::Risk {
+            command: RiskCommand::List { review },
+        } => {
+            if let Some(socket) = daemon {
+                list_risks_via_daemon(root, socket, review)
+            } else {
+                list_risks(root, &review)
+            }
+        }
+        CliCommand::Risk {
+            command: RiskCommand::Show { id },
+        } => {
+            if let Some(socket) = daemon {
+                show_risk_via_daemon(root, socket, id)
+            } else {
+                show_risk(root, &id)
+            }
+        }
+        CliCommand::Publish {
+            command:
+                PublishCommand::Create {
+                    thread,
+                    review,
+                    allow_secret_risk,
+                    override_reason,
+                },
+        } => {
+            let options = PublicationOptions {
+                allow_secret_risk,
+                override_reason,
+            };
+            if let Some(socket) = daemon {
+                create_publication_via_daemon(root, socket, thread, review, options)
+            } else {
+                create_publication(root, &thread, &review, options)
             }
         }
         CliCommand::Agent {
@@ -691,6 +768,8 @@ fn main() -> Result<()> {
                     run_summary,
                     run_timeout_seconds,
                     output,
+                    allow_secret_risk,
+                    override_reason,
                     argv,
                 },
         } => {
@@ -705,6 +784,8 @@ fn main() -> Result<()> {
                 run_label,
                 run_summary,
                 run_timeout_seconds,
+                allow_secret_risk,
+                override_reason,
                 argv,
             };
             if let Some(socket) = daemon {
@@ -1320,10 +1401,108 @@ fn show_review_path_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Re
     }
 }
 
-fn create_publication(root: PathBuf, thread_id: &str, review_id: &str) -> Result<()> {
+fn scan_risks(root: PathBuf, review_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let scan = store
+        .scan_review_risks(review_id)
+        .context("failed to scan review risks")?;
+
+    print_risk_scan(&scan);
+    Ok(())
+}
+
+fn scan_risks_via_daemon(root: PathBuf, socket: PathBuf, review: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::RiskScan { review })? {
+        ApiResult::RiskScan { scan } => {
+            print_risk_scan(&scan);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn list_risks(root: PathBuf, review_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let findings = store
+        .list_review_risk_findings(review_id)
+        .context("failed to list review risks")?;
+
+    print_risk_findings(findings);
+    Ok(())
+}
+
+fn list_risks_via_daemon(root: PathBuf, socket: PathBuf, review: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::RiskList { review })? {
+        ApiResult::RiskList { findings } => {
+            print_risk_findings(findings);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn show_risk(root: PathBuf, id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let finding = store
+        .show_risk_finding(id)
+        .context("failed to show risk finding")?;
+
+    print_risk_finding(&finding);
+    Ok(())
+}
+
+fn show_risk_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::RiskShow { id })? {
+        ApiResult::RiskShow { finding } => {
+            print_risk_finding(&finding);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_risk_scan(scan: &anvics_core::RiskScan) {
+    println!("Risk scan {}", scan.id);
+    println!("review: {}", scan.review_id);
+    println!("findings: {}", scan.findings.len());
+    print_risk_findings(scan.findings.clone());
+}
+
+fn print_risk_findings(findings: Vec<anvics_core::RiskFinding>) {
+    if findings.is_empty() {
+        println!("No risk findings");
+        return;
+    }
+    for finding in findings {
+        print_risk_finding(&finding);
+    }
+}
+
+fn print_risk_finding(finding: &anvics_core::RiskFinding) {
+    let line = finding
+        .line
+        .map(|line| format!(":{line}"))
+        .unwrap_or_default();
+    println!("finding: {}", finding.id);
+    println!("review: {}", finding.review_id);
+    println!("severity: {:?}", finding.severity);
+    println!("detector: {}", finding.detector);
+    println!(
+        "target: {:?} {}{}",
+        finding.target_kind, finding.target_path, line
+    );
+    println!("excerpt: {}", finding.redacted_excerpt);
+}
+
+fn create_publication(
+    root: PathBuf,
+    thread_id: &str,
+    review_id: &str,
+    options: PublicationOptions,
+) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let publication = store
-        .create_publication(thread_id, review_id)
+        .create_publication_with_options(thread_id, review_id, options)
         .context("failed to create publication")?;
 
     print_publication_created(&root, publication);
@@ -1335,11 +1514,17 @@ fn create_publication_via_daemon(
     socket: PathBuf,
     thread: String,
     review: String,
+    options: PublicationOptions,
 ) -> Result<()> {
     match daemon_request(
         &socket,
         root.clone(),
-        ApiMethod::PublishCreate { thread, review },
+        ApiMethod::PublishCreate {
+            thread,
+            review,
+            allow_secret_risk: options.allow_secret_risk,
+            override_reason: options.override_reason,
+        },
     )? {
         ApiResult::PublishCreate { publication } => {
             print_publication_created(&root, publication);
@@ -1739,15 +1924,21 @@ fn accept_agent(
     output: Option<PathBuf>,
 ) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let publication_options = options.publication_options();
     let acceptance = if options.run_label.is_some() || !options.argv.is_empty() {
         let input = agent_accept_run_input(workspace_id.to_owned(), options)?;
         store
-            .accept_agent_with_command_run(input, output)
+            .accept_agent_with_command_run_and_options(input, output, publication_options)
             .context("failed to accept agent workspace with command run")?
     } else {
         let input = accept_command_input(options)?;
         store
-            .accept_agent_with_evidence(workspace_id, input, output)
+            .accept_agent_with_evidence_and_options(
+                workspace_id,
+                input,
+                output,
+                publication_options,
+            )
             .context("failed to accept agent workspace")?
     };
 
@@ -1762,6 +1953,8 @@ fn accept_agent_via_daemon(
     options: AgentAcceptOptions,
     output: Option<PathBuf>,
 ) -> Result<()> {
+    let allow_secret_risk = options.allow_secret_risk;
+    let override_reason = options.override_reason.clone();
     let method = if options.run_label.is_some() || !options.argv.is_empty() {
         let input = agent_accept_run_input(workspace, options)?;
         ApiMethod::AgentAcceptRun {
@@ -1774,6 +1967,8 @@ fn accept_agent_via_daemon(
             summary: input.summary,
             artifact_path: input.artifact_path,
             output_path: output.map(|path| path.to_string_lossy().to_string()),
+            allow_secret_risk,
+            override_reason,
         }
     } else {
         let input = accept_command_input(options)?;
@@ -1787,6 +1982,8 @@ fn accept_agent_via_daemon(
             summary: input.summary,
             artifact_path: input.artifact_path,
             output_path: output.map(|path| path.to_string_lossy().to_string()),
+            allow_secret_risk,
+            override_reason,
         }
     };
 

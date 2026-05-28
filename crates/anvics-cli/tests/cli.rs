@@ -952,6 +952,199 @@ fn agent_enter_and_coordination_status_report_related_work() {
 }
 
 #[test]
+fn secret_risk_scan_blocks_publish_until_override() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Secret Risk",
+            "--task",
+            "Add a config fixture",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(
+        format!("{workspace_path}/config.env"),
+        format!("OPENAI_API_KEY={secret}\n"),
+    )
+    .unwrap();
+    let finish = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &workspace,
+            "--command",
+            "manual verification",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Config fixture was added",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&finish, "review: ");
+
+    let scan = anvics(dir.path(), &["risk", "scan", "--review", &review])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Risk scan"))
+        .stdout(predicate::str::contains("openai_token"))
+        .stdout(predicate::str::contains("config.env"))
+        .stdout(predicate::str::contains(secret).not())
+        .get_output()
+        .stdout
+        .clone();
+    let finding = value_after_prefix(&scan, "finding: ");
+    anvics(dir.path(), &["risk", "list", "--review", &review])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&finding))
+        .stdout(predicate::str::contains(secret).not());
+    anvics(dir.path(), &["risk", "show", &finding])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("detector: "))
+        .stdout(predicate::str::contains("config.env"))
+        .stdout(predicate::str::contains(secret).not());
+
+    anvics(
+        dir.path(),
+        &[
+            "publish", "create", "--thread", &thread, "--review", &review,
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("publication blocked"));
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("publication_status: unpublished"));
+
+    anvics(
+        dir.path(),
+        &[
+            "publish",
+            "create",
+            "--thread",
+            &thread,
+            "--review",
+            &review,
+            "--allow-secret-risk",
+            "--override-reason",
+            "fixture secret is intentional",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Created publication"));
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Risk Notes"))
+    .stdout(predicate::str::contains("openai_token"))
+    .stdout(predicate::str::contains("fixture secret is intentional"))
+    .stdout(predicate::str::contains(secret).not());
+}
+
+#[test]
+fn agent_accept_run_blocks_when_command_stdout_contains_secret() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Leaky Command",
+            "--task",
+            "Edit app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "accepted\n").unwrap();
+
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "leaky verify",
+            "--run-summary",
+            "Command emitted fixture secret",
+            "--",
+            "sh",
+            "-c",
+            &format!("printf 'OPENAI_API_KEY={secret}\\n'"),
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("publication blocked"));
+    let status = anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence_count: 1"))
+        .stdout(predicate::str::contains("publication_status: unpublished"))
+        .get_output()
+        .stdout
+        .clone();
+    let review = value_after_prefix(&status, "review: ");
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("CommandStdout"))
+    .stdout(predicate::str::contains("openai_token"))
+    .stdout(predicate::str::contains(secret).not());
+}
+
+#[test]
 fn daemon_backed_cli_flow_uses_socket_api() {
     let dir = tempdir().unwrap();
     let socket = dir.path().join("anvics.sock");
@@ -991,6 +1184,111 @@ fn daemon_backed_cli_flow_uses_socket_api() {
     .assert()
     .success()
     .stdout(predicate::str::contains("daemon: ok"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn daemon_backed_secret_risk_blocks_and_override_publishes() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+
+    daemon_anvics(dir.path(), &socket, &["repo", "init"])
+        .assert()
+        .success();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["snapshot", "create", "--message", "base"],
+    )
+    .assert()
+    .success();
+    let prepare = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Daemon Secret Risk",
+            "--task",
+            "Add a fixture config",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(
+        format!("{workspace_path}/config.env"),
+        format!("OPENAI_API_KEY={secret}\n"),
+    )
+    .unwrap();
+    let finish = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &workspace,
+            "--command",
+            "manual verification",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Config fixture was added",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&finish, "review: ");
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "publish", "create", "--thread", &thread, "--review", &review,
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("daemon error"))
+    .stderr(predicate::str::contains("publication blocked"));
+    daemon_anvics(dir.path(), &socket, &["risk", "list", "--review", &review])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("openai_token"))
+        .stdout(predicate::str::contains(secret).not());
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "publish",
+            "create",
+            "--thread",
+            &thread,
+            "--review",
+            &review,
+            "--allow-secret-risk",
+            "--override-reason",
+            "fixture secret is intentional",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Created publication"));
 
     daemon.kill().unwrap();
     daemon.wait().unwrap();

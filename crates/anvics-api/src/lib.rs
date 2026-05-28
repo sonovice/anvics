@@ -1,7 +1,7 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, CommandEvent,
     CoordinationStatus, EvidenceRecord, NativePublication, RepositoryEvent, RepositoryManifest,
-    ReviewProjection, SourceSnapshot, WorkThread, WorkspaceView,
+    ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +103,8 @@ pub enum ApiMethod {
         summary: String,
         artifact_path: Option<String>,
         output_path: Option<String>,
+        allow_secret_risk: bool,
+        override_reason: Option<String>,
     },
     AgentAcceptRun {
         workspace: String,
@@ -114,6 +116,8 @@ pub enum ApiMethod {
         summary: String,
         artifact_path: Option<String>,
         output_path: Option<String>,
+        allow_secret_risk: bool,
+        override_reason: Option<String>,
     },
     AgentPacket {
         thread: String,
@@ -138,6 +142,17 @@ pub enum ApiMethod {
     PublishCreate {
         thread: String,
         review: String,
+        allow_secret_risk: bool,
+        override_reason: Option<String>,
+    },
+    RiskScan {
+        review: String,
+    },
+    RiskList {
+        review: String,
+    },
+    RiskShow {
+        id: String,
     },
     LegacyGitExport {
         publication: String,
@@ -268,6 +283,15 @@ pub enum ApiResult {
     PublishCreate {
         publication: NativePublication,
     },
+    RiskScan {
+        scan: Box<RiskScan>,
+    },
+    RiskList {
+        findings: Vec<RiskFinding>,
+    },
+    RiskShow {
+        finding: RiskFinding,
+    },
     LegacyGitExport {
         output: String,
     },
@@ -358,6 +382,17 @@ mod tests {
             ApiMethod::PublishCreate {
                 thread: "thread-1".to_owned(),
                 review: "review-1".to_owned(),
+                allow_secret_risk: false,
+                override_reason: None,
+            },
+            ApiMethod::RiskScan {
+                review: "review-1".to_owned(),
+            },
+            ApiMethod::RiskList {
+                review: "review-1".to_owned(),
+            },
+            ApiMethod::RiskShow {
+                id: "finding-1".to_owned(),
             },
             ApiMethod::AgentPrepare {
                 title: "title".to_owned(),
@@ -400,6 +435,8 @@ mod tests {
                 summary: "ok".to_owned(),
                 artifact_path: None,
                 output_path: Some("accepted.patch".to_owned()),
+                allow_secret_risk: false,
+                override_reason: None,
             },
             ApiMethod::AgentAcceptRun {
                 workspace: "workspace-1".to_owned(),
@@ -411,6 +448,8 @@ mod tests {
                 summary: "ok".to_owned(),
                 artifact_path: None,
                 output_path: Some("accepted.patch".to_owned()),
+                allow_secret_risk: true,
+                override_reason: Some("fixture false positive".to_owned()),
             },
             ApiMethod::LegacyGitExport {
                 publication: "publication-1".to_owned(),
@@ -446,6 +485,8 @@ mod tests {
         let command_event_id = CommandEventId::new();
         let review_id = ReviewProjectionId::new();
         let publication_id = NativePublicationId::new();
+        let risk_scan_id = RiskScanId::new();
+        let risk_finding_id = RiskFindingId::new();
         let object = ObjectId::new("a".repeat(64)).unwrap();
         let manifest = RepositoryManifest {
             id: RepositoryId::new(),
@@ -531,6 +572,23 @@ mod tests {
                 stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
             }],
+            created_at: "2026-05-28T00:00:05Z".to_owned(),
+        };
+        let risk_finding = RiskFinding {
+            id: risk_finding_id,
+            scan_id: risk_scan_id.clone(),
+            review_id: review_id.clone(),
+            detector: "openai_token".to_owned(),
+            target_kind: RiskTargetKind::SourceFile,
+            target_path: "app.txt".to_owned(),
+            line: Some(1),
+            severity: RiskSeverity::SecretRisk,
+            redacted_excerpt: "OPENAI_API_KEY=<redacted:51 chars>".to_owned(),
+        };
+        let risk_scan = RiskScan {
+            id: risk_scan_id,
+            review_id: review_id.clone(),
+            findings: vec![risk_finding.clone()],
             created_at: "2026-05-28T00:00:05Z".to_owned(),
         };
         let publication = NativePublication {
@@ -670,6 +728,15 @@ mod tests {
                 path: ".anvics/reviews/review.md".to_owned(),
             },
             ApiResult::PublishCreate { publication },
+            ApiResult::RiskScan {
+                scan: Box::new(risk_scan),
+            },
+            ApiResult::RiskList {
+                findings: vec![risk_finding.clone()],
+            },
+            ApiResult::RiskShow {
+                finding: risk_finding,
+            },
             ApiResult::LegacyGitExport {
                 output: "accepted.patch".to_owned(),
             },

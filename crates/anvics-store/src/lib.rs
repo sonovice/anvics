@@ -2,10 +2,11 @@ use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
     AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
     CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication,
-    NativePublicationId, ObjectId, OverlayEntry, RelatedWork, RepositoryEvent, RepositoryEventId,
-    RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
-    SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId,
-    WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, RelatedWork,
+    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
+    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
+    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
+    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -43,6 +44,8 @@ pub enum StoreError {
     AgentSessionNotFound(String),
     #[error("command event does not exist: {0}")]
     CommandEventNotFound(String),
+    #[error("risk finding does not exist: {0}")]
+    RiskFindingNotFound(String),
     #[error("agent packet does not exist for thread: {0}")]
     AgentPacketNotFound(String),
     #[error("repository has no current snapshot")]
@@ -63,6 +66,10 @@ pub enum StoreError {
     InvalidCommandCwd(String),
     #[error("command {id} failed with exit code {exit_code}")]
     CommandFailed { id: String, exit_code: i32 },
+    #[error("publication blocked by {finding_count} unresolved secret-risk finding(s); rerun with --allow-secret-risk --override-reason <reason> to proceed")]
+    PublicationBlockedSecretRisk { finding_count: usize },
+    #[error("override reason must not be empty")]
+    EmptyOverrideReason,
     #[error("review {review_id} does not belong to thread {thread_id}")]
     ReviewThreadMismatch {
         review_id: String,
@@ -120,6 +127,12 @@ pub struct CommandRunResult {
     pub evidence: EvidenceRecord,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PublicationOptions {
+    pub allow_secret_risk: bool,
+    pub override_reason: Option<String>,
+}
+
 impl AnvicsStore {
     pub fn init(root: impl AsRef<Path>) -> Result<RepositoryManifest> {
         let root = root.as_ref();
@@ -142,6 +155,8 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("sessions"))?;
         fs::create_dir_all(anvics_dir.join("command-events"))?;
         fs::create_dir_all(anvics_dir.join("artifacts/commands"))?;
+        fs::create_dir_all(anvics_dir.join("risks"))?;
+        fs::create_dir_all(anvics_dir.join("policy-overrides"))?;
 
         let manifest = RepositoryManifest {
             id: RepositoryId::new(),
@@ -548,7 +563,7 @@ impl AnvicsStore {
         write_json_pretty(self.review_path(review.id.as_str()), &review)?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
-            render_review(&self.root, &review, &thread),
+            render_review(&self.root, &review, &thread, &[], &[]),
         )?;
         self.append_event(
             RepositoryEventKind::ReviewCreated,
@@ -565,10 +580,133 @@ impl AnvicsStore {
         read_json(path)
     }
 
+    pub fn scan_review_risks(&self, review_id: &str) -> Result<RiskScan> {
+        let review = self.show_review(review_id)?;
+        let thread = self.show_thread(review.thread_id.as_str())?;
+        let scan_id = RiskScanId::new();
+        let mut findings = Vec::new();
+
+        for changed in &review.changed_paths {
+            if changed.status == ChangeStatus::Deleted {
+                continue;
+            }
+            if let Some(bytes) =
+                self.file_bytes_at_snapshot(&review.final_snapshot, &changed.path)?
+            {
+                let text = String::from_utf8_lossy(&bytes);
+                collect_secret_findings(
+                    &mut findings,
+                    &scan_id,
+                    &review.id,
+                    RiskTargetKind::SourceFile,
+                    &changed.path,
+                    &text,
+                );
+            }
+        }
+
+        for evidence in &review.evidence {
+            for (kind, path) in [
+                (
+                    RiskTargetKind::CommandStdout,
+                    evidence.stdout_path.as_deref(),
+                ),
+                (
+                    RiskTargetKind::CommandStderr,
+                    evidence.stderr_path.as_deref(),
+                ),
+                (
+                    RiskTargetKind::EvidenceArtifact,
+                    evidence.artifact_path.as_deref(),
+                ),
+                (
+                    RiskTargetKind::CommandFile,
+                    evidence.command_file.as_deref(),
+                ),
+            ] {
+                let Some(path) = path.filter(|path| !path.trim().is_empty()) else {
+                    continue;
+                };
+                if let Ok(bytes) = self.read_risk_target_bytes(path) {
+                    let text = String::from_utf8_lossy(&bytes);
+                    collect_secret_findings(&mut findings, &scan_id, &review.id, kind, path, &text);
+                }
+            }
+        }
+
+        let scan = RiskScan {
+            id: scan_id,
+            review_id: review.id.clone(),
+            findings,
+            created_at: now_rfc3339()?,
+        };
+        write_json_pretty(self.risk_scan_path(scan.id.as_str()), &scan)?;
+        self.append_event(
+            RepositoryEventKind::RiskScanCreated,
+            Some(scan.id.to_string()),
+        )?;
+        if !scan.findings.is_empty() {
+            self.append_event(
+                RepositoryEventKind::SecretRiskDetected,
+                Some(scan.id.to_string()),
+            )?;
+        }
+        self.write_review_markdown_with_risks(&review, &thread)?;
+        Ok(scan)
+    }
+
+    pub fn list_review_risk_scans(&self, review_id: &str) -> Result<Vec<RiskScan>> {
+        let review = self.show_review(review_id)?;
+        let mut scans: Vec<RiskScan> = read_json_dir(self.anvics_dir.join("risks"))?;
+        scans.retain(|scan| scan.review_id == review.id);
+        scans.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(scans)
+    }
+
+    pub fn list_review_risk_findings(&self, review_id: &str) -> Result<Vec<RiskFinding>> {
+        let mut findings = Vec::new();
+        for scan in self.list_review_risk_scans(review_id)? {
+            findings.extend(scan.findings);
+        }
+        findings.sort_by(|left, right| {
+            left.target_path
+                .cmp(&right.target_path)
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(findings)
+    }
+
+    pub fn show_risk_finding(&self, id: &str) -> Result<RiskFinding> {
+        for scan in read_json_dir::<RiskScan>(self.anvics_dir.join("risks"))? {
+            if let Some(finding) = scan
+                .findings
+                .into_iter()
+                .find(|finding| finding.id.as_str() == id)
+            {
+                return Ok(finding);
+            }
+        }
+        Err(StoreError::RiskFindingNotFound(id.to_owned()))
+    }
+
     pub fn create_publication(
         &self,
         thread_id: &str,
         review_id: &str,
+    ) -> Result<NativePublication> {
+        self.create_publication_with_options(thread_id, review_id, PublicationOptions::default())
+    }
+
+    pub fn create_publication_with_options(
+        &self,
+        thread_id: &str,
+        review_id: &str,
+        options: PublicationOptions,
     ) -> Result<NativePublication> {
         let mut thread = self.show_thread(thread_id)?;
         let review = self.show_review(review_id)?;
@@ -577,6 +715,16 @@ impl AnvicsStore {
                 review_id: review_id.to_owned(),
                 thread_id: thread_id.to_owned(),
             });
+        }
+        let scan = self.risk_scan_for_publication(review_id)?;
+        if !scan.findings.is_empty() {
+            if options.allow_secret_risk {
+                self.record_policy_override(review_id, options.override_reason)?;
+            } else {
+                return Err(StoreError::PublicationBlockedSecretRisk {
+                    finding_count: scan.findings.len(),
+                });
+            }
         }
 
         let publication = NativePublication {
@@ -716,10 +864,26 @@ impl AnvicsStore {
         evidence_input: CommandEvidenceInput,
         output_path: Option<PathBuf>,
     ) -> Result<AgentAcceptance> {
+        self.accept_agent_with_evidence_and_options(
+            workspace_id,
+            evidence_input,
+            output_path,
+            PublicationOptions::default(),
+        )
+    }
+
+    pub fn accept_agent_with_evidence_and_options(
+        &self,
+        workspace_id: &str,
+        evidence_input: CommandEvidenceInput,
+        output_path: Option<PathBuf>,
+        options: PublicationOptions,
+    ) -> Result<AgentAcceptance> {
         let finish = self.finish_agent_with_evidence(workspace_id, evidence_input)?;
-        let publication = self.create_publication(
+        let publication = self.create_publication_with_options(
             finish.workspace.thread_id.as_str(),
             finish.review.id.as_str(),
+            options,
         )?;
         let output = output_path.unwrap_or_else(|| self.root.join("accepted.patch"));
         let patch_path = self.export_legacy_git_patch(publication.id.as_str(), output)?;
@@ -739,6 +903,19 @@ impl AnvicsStore {
         input: CommandRunInput,
         output_path: Option<PathBuf>,
     ) -> Result<AgentAcceptance> {
+        self.accept_agent_with_command_run_and_options(
+            input,
+            output_path,
+            PublicationOptions::default(),
+        )
+    }
+
+    pub fn accept_agent_with_command_run_and_options(
+        &self,
+        input: CommandRunInput,
+        output_path: Option<PathBuf>,
+        options: PublicationOptions,
+    ) -> Result<AgentAcceptance> {
         let workspace_id = input.workspace_id.clone();
         let command = self.run_command(input)?;
         let exit_code = command.command_event.exit_code.unwrap_or(-1);
@@ -749,9 +926,10 @@ impl AnvicsStore {
             });
         }
         let finish = self.finish_agent_with_existing_evidence(&workspace_id, command.evidence)?;
-        let publication = self.create_publication(
+        let publication = self.create_publication_with_options(
             finish.workspace.thread_id.as_str(),
             finish.review.id.as_str(),
+            options,
         )?;
         let output = output_path.unwrap_or_else(|| self.root.join("accepted.patch"));
         let patch_path = self.export_legacy_git_patch(publication.id.as_str(), output)?;
@@ -1109,6 +1287,16 @@ impl AnvicsStore {
         self.anvics_dir.join("artifacts").join("commands").join(id)
     }
 
+    fn risk_scan_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir.join("risks").join(format!("{id}.json"))
+    }
+
+    fn policy_override_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir
+            .join("policy-overrides")
+            .join(format!("{id}.json"))
+    }
+
     fn agent_packet_path(&self, thread_id: &str) -> PathBuf {
         self.anvics_dir
             .join("agent-packets")
@@ -1147,6 +1335,91 @@ impl AnvicsStore {
             ));
         }
         Ok(candidate)
+    }
+
+    fn file_bytes_at_snapshot(
+        &self,
+        snapshot_id: &SourceSnapshotId,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let files = self.snapshot_file_map(snapshot_id)?;
+        files
+            .get(path)
+            .map(|object| self.read_object(object))
+            .transpose()
+    }
+
+    fn write_review_markdown_with_risks(
+        &self,
+        review: &ReviewProjection,
+        thread: &WorkThread,
+    ) -> Result<()> {
+        let scans = self.list_review_risk_scans(review.id.as_str())?;
+        let overrides = self.list_review_policy_overrides(review.id.as_str())?;
+        fs::write(
+            self.review_markdown_path(review.id.as_str()),
+            render_review(&self.root, review, thread, &scans, &overrides),
+        )?;
+        Ok(())
+    }
+
+    fn risk_scan_for_publication(&self, review_id: &str) -> Result<RiskScan> {
+        let scans = self.list_review_risk_scans(review_id)?;
+        match scans.into_iter().last() {
+            Some(scan) => Ok(scan),
+            None => self.scan_review_risks(review_id),
+        }
+    }
+
+    fn list_review_policy_overrides(&self, review_id: &str) -> Result<Vec<PolicyOverride>> {
+        let review = self.show_review(review_id)?;
+        let mut overrides: Vec<PolicyOverride> =
+            read_json_dir(self.anvics_dir.join("policy-overrides"))?;
+        overrides.retain(|override_record| override_record.review_id == review.id);
+        overrides.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(overrides)
+    }
+
+    fn read_risk_target_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        let path = Path::new(path);
+        if path.is_absolute() {
+            fs::read(path)
+        } else {
+            fs::read(self.root.join(path))
+        }
+    }
+
+    fn record_policy_override(
+        &self,
+        review_id: &str,
+        reason: Option<String>,
+    ) -> Result<PolicyOverride> {
+        let reason = reason.unwrap_or_default().trim().to_owned();
+        if reason.is_empty() {
+            return Err(StoreError::EmptyOverrideReason);
+        }
+        let review = self.show_review(review_id)?;
+        let override_record = PolicyOverride {
+            id: PolicyOverrideId::new(),
+            review_id: review.id.clone(),
+            reason,
+            created_at: now_rfc3339()?,
+        };
+        write_json_pretty(
+            self.policy_override_path(override_record.id.as_str()),
+            &override_record,
+        )?;
+        self.append_event(
+            RepositoryEventKind::PolicyOverrideRecorded,
+            Some(override_record.id.to_string()),
+        )?;
+        let thread = self.show_thread(review.thread_id.as_str())?;
+        self.write_review_markdown_with_risks(&review, &thread)?;
+        Ok(override_record)
     }
 
     fn restore_tree(&self, tree_id: &ObjectId, target: &Path) -> Result<()> {
@@ -1677,6 +1950,126 @@ fn read_json_dir<T: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> Resu
     Ok(values)
 }
 
+fn collect_secret_findings(
+    findings: &mut Vec<RiskFinding>,
+    scan_id: &RiskScanId,
+    review_id: &ReviewProjectionId,
+    target_kind: RiskTargetKind,
+    target_path: &str,
+    text: &str,
+) {
+    for (index, line) in text.lines().enumerate() {
+        for detector in secret_detectors_for_line(line) {
+            findings.push(RiskFinding {
+                id: RiskFindingId::new(),
+                scan_id: scan_id.clone(),
+                review_id: review_id.clone(),
+                detector,
+                target_kind: target_kind.clone(),
+                target_path: target_path.to_owned(),
+                line: Some((index + 1) as u32),
+                severity: RiskSeverity::SecretRisk,
+                redacted_excerpt: redact_line(line),
+            });
+        }
+    }
+}
+
+fn secret_detectors_for_line(line: &str) -> Vec<String> {
+    let mut detectors = Vec::new();
+    let trimmed = line.trim();
+    if trimmed.contains("-----BEGIN ") && trimmed.contains("PRIVATE KEY-----") {
+        detectors.push("private_key_block".to_owned());
+    }
+    if contains_prefixed_token(trimmed, "ghp_", 36)
+        || contains_prefixed_token(trimmed, "gho_", 36)
+        || contains_prefixed_token(trimmed, "github_pat_", 40)
+    {
+        detectors.push("github_token".to_owned());
+    }
+    if contains_prefixed_token(trimmed, "sk-", 24) {
+        detectors.push("openai_token".to_owned());
+    }
+    if contains_aws_access_key_id(trimmed) {
+        detectors.push("aws_access_key_id".to_owned());
+    }
+    if looks_like_env_secret_assignment(trimmed) {
+        detectors.push("env_secret_assignment".to_owned());
+    }
+    if contains_suspicious_high_entropy_value(trimmed) {
+        detectors.push("high_entropy_secret_like_value".to_owned());
+    }
+    detectors.sort();
+    detectors.dedup();
+    detectors
+}
+
+fn contains_prefixed_token(line: &str, prefix: &str, min_len: usize) -> bool {
+    line.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.'))
+    })
+    .any(|part| part.starts_with(prefix) && part.len() >= min_len)
+}
+
+fn contains_aws_access_key_id(line: &str) -> bool {
+    line.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| {
+            part.len() == 20
+                && (part.starts_with("AKIA") || part.starts_with("ASIA"))
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+        })
+}
+
+fn looks_like_env_secret_assignment(line: &str) -> bool {
+    let Some((key, value)) = line.split_once('=') else {
+        return false;
+    };
+    let key = key.trim().to_ascii_uppercase();
+    let value = value.trim().trim_matches('"').trim_matches('\'');
+    value.len() >= 8
+        && ["SECRET", "TOKEN", "API_KEY", "PASSWORD", "PRIVATE_KEY"]
+            .iter()
+            .any(|marker| key.contains(marker))
+}
+
+fn contains_suspicious_high_entropy_value(line: &str) -> bool {
+    let suspicious_context = ["SECRET", "TOKEN", "API_KEY", "PASSWORD", "KEY"]
+        .iter()
+        .any(|marker| line.to_ascii_uppercase().contains(marker));
+    suspicious_context
+        && line
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '/'))
+            })
+            .any(|part| part.len() >= 32 && unique_ascii_count(part) >= 16)
+}
+
+fn unique_ascii_count(value: &str) -> usize {
+    let mut bytes = BTreeSet::new();
+    for byte in value.bytes() {
+        bytes.insert(byte);
+    }
+    bytes.len()
+}
+
+fn redact_line(line: &str) -> String {
+    let mut redacted = line.trim().to_owned();
+    if redacted.len() > 120 {
+        redacted.truncate(120);
+        redacted.push_str("...");
+    }
+    let Some((key, value)) = redacted.split_once('=') else {
+        return "<redacted secret-like content>".to_owned();
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return format!("{}=<redacted>", key.trim());
+    }
+    format!("{}=<redacted:{} chars>", key.trim(), value.len())
+}
+
 struct LocalCommandOutput {
     exit_code: i32,
     timed_out: bool,
@@ -1854,7 +2247,7 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- Prefer Anvics-run verification for stronger provenance when the operator accepts the workspace.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\nFallback for externally-run verification:\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- Prefer Anvics-run verification for stronger provenance when the operator accepts the workspace.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\nFallback for externally-run verification:\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
         thread.id,
         workspace.id,
         repo_root.display(),
@@ -1868,7 +2261,13 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     )
 }
 
-fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThread) -> String {
+fn render_review(
+    repo_root: &Path,
+    review: &ReviewProjection,
+    thread: &WorkThread,
+    scans: &[RiskScan],
+    overrides: &[PolicyOverride],
+) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let mut markdown = format!(
         "# Review {}\n\n- Thread: {}\n- Title: {}\n- Base snapshot: {}\n- Final snapshot: {}\n\n## Task\n\n{}\n\n",
@@ -1904,6 +2303,45 @@ fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThrea
     } else {
         for note in &review.overlap_notes {
             markdown.push_str(&format!("- {note}\n"));
+        }
+    }
+
+    markdown.push_str("\n## Risk Notes\n\n");
+    let findings: Vec<&RiskFinding> = scans.iter().flat_map(|scan| scan.findings.iter()).collect();
+    if findings.is_empty() {
+        if scans.is_empty() {
+            markdown.push_str("- No risk scan has run for this review.\n");
+        } else {
+            markdown.push_str("- No secret-risk findings detected.\n");
+        }
+    } else {
+        markdown.push_str(&format!(
+            "- Publication blocked by default: {} secret-risk finding(s).\n",
+            findings.len()
+        ));
+        for finding in findings {
+            let line = finding
+                .line
+                .map(|line| format!(":{line}"))
+                .unwrap_or_default();
+            markdown.push_str(&format!(
+                "- {:?} `{}`{} via `{}`: {}\n",
+                finding.target_kind,
+                finding.target_path,
+                line,
+                finding.detector,
+                finding.redacted_excerpt
+            ));
+        }
+    }
+    if overrides.is_empty() {
+        markdown.push_str("- Override: none.\n");
+    } else {
+        for override_record in overrides {
+            markdown.push_str(&format!(
+                "- Override `{}` recorded: {}\n",
+                override_record.id, override_record.reason
+            ));
         }
     }
 
@@ -2074,6 +2512,8 @@ mod tests {
         assert!(dir.path().join(".anvics/sessions").exists());
         assert!(dir.path().join(".anvics/command-events").exists());
         assert!(dir.path().join(".anvics/artifacts/commands").exists());
+        assert!(dir.path().join(".anvics/risks").exists());
+        assert!(dir.path().join(".anvics/policy-overrides").exists());
         assert_eq!(
             AnvicsStore::open(dir.path())
                 .unwrap()
@@ -2459,6 +2899,27 @@ mod tests {
     }
 
     #[test]
+    fn secret_detectors_redact_without_storing_raw_values() {
+        let openai_line = "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+        let github_line = "token=github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
+        let aws_line = "AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF";
+        let env_line = "DATABASE_PASSWORD=correct-horse-battery";
+        let private_key_line = "-----BEGIN PRIVATE KEY-----";
+
+        assert!(secret_detectors_for_line(openai_line).contains(&"openai_token".to_owned()));
+        assert!(secret_detectors_for_line(github_line).contains(&"github_token".to_owned()));
+        assert!(secret_detectors_for_line(aws_line).contains(&"aws_access_key_id".to_owned()));
+        assert!(secret_detectors_for_line(env_line).contains(&"env_secret_assignment".to_owned()));
+        assert!(
+            secret_detectors_for_line(private_key_line).contains(&"private_key_block".to_owned())
+        );
+
+        let redacted = redact_line(openai_line);
+        assert!(redacted.contains("<redacted:"));
+        assert!(!redacted.contains("sk-proj-1234567890abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
     fn command_run_records_event_artifacts_and_evidence() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -2638,6 +3099,129 @@ mod tests {
             store.show_thread(thread.id.as_str()).unwrap().status,
             WorkThreadStatus::Published
         );
+    }
+
+    #[test]
+    fn risk_scan_finds_changed_source_and_blocks_publication_until_override() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Risky source".to_owned(), "Add config".to_owned())
+            .unwrap();
+        let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("config.env"),
+            format!("OPENAI_API_KEY={secret}\n"),
+        )
+        .unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "manual check".to_owned(),
+                0,
+                "Created config fixture".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let scan = store.scan_review_risks(finish.review.id.as_str()).unwrap();
+        assert!(!scan.findings.is_empty());
+        assert!(scan
+            .findings
+            .iter()
+            .any(|finding| finding.detector == "openai_token"));
+        assert!(scan.findings.iter().all(|finding| {
+            finding.target_kind == RiskTargetKind::SourceFile
+                && finding.target_path == "config.env"
+                && !finding.redacted_excerpt.contains(secret)
+        }));
+
+        let err = store
+            .create_publication(preparation.thread.id.as_str(), finish.review.id.as_str())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::PublicationBlockedSecretRisk { finding_count } if finding_count >= 1
+        ));
+        let status = store.agent_status(preparation.thread.id.as_str()).unwrap();
+        assert!(status.publication_ids.is_empty());
+
+        let publication = store
+            .create_publication_with_options(
+                preparation.thread.id.as_str(),
+                finish.review.id.as_str(),
+                PublicationOptions {
+                    allow_secret_risk: true,
+                    override_reason: Some("fixture secret is intentional".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(publication.review_id, finish.review.id);
+        let markdown = store.review_markdown(finish.review.id.as_str()).unwrap();
+        assert!(markdown.contains("Risk Notes"));
+        assert!(markdown.contains("openai_token"));
+        assert!(markdown.contains("fixture secret is intentional"));
+        assert!(!markdown.contains(secret));
+        let events = store.events_since(0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::RiskScanCreated));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::SecretRiskDetected));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::PolicyOverrideRecorded));
+    }
+
+    #[test]
+    fn external_evidence_artifact_secret_blocks_publication() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        fs::create_dir(dir.path().join("artifacts")).unwrap();
+        fs::write(
+            dir.path().join("artifacts/leak.txt"),
+            "GH_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz\n",
+        )
+        .unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Artifact risk".to_owned(), "Edit app".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "safe change\n",
+        )
+        .unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "cat artifacts/leak.txt".to_owned(),
+                0,
+                "Linked verification artifact".to_owned(),
+                Some("artifacts/leak.txt".to_owned()),
+            )
+            .unwrap();
+
+        let err = store
+            .create_publication(preparation.thread.id.as_str(), finish.review.id.as_str())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::PublicationBlockedSecretRisk { finding_count } if finding_count >= 1
+        ));
+        let findings = store
+            .list_review_risk_findings(finish.review.id.as_str())
+            .unwrap();
+        assert!(findings
+            .iter()
+            .any(|finding| finding.target_kind == RiskTargetKind::EvidenceArtifact));
     }
 
     #[test]
@@ -2887,5 +3471,59 @@ mod tests {
         assert_eq!(status.evidence_count, 1);
         assert!(status.review_ids.is_empty());
         assert!(status.publication_ids.is_empty());
+    }
+
+    #[test]
+    fn agent_accept_with_command_run_blocks_on_secret_stdout() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Accept command run".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "accepted\n",
+        )
+        .unwrap();
+        let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+
+        let err = store
+            .accept_agent_with_command_run_and_options(
+                CommandRunInput {
+                    workspace_id: preparation.workspace.id.to_string(),
+                    argv: vec![
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        format!("printf 'OPENAI_API_KEY={secret}\\n'"),
+                    ],
+                    command_file: None,
+                    command_label: "leaky verify".to_owned(),
+                    cwd: None,
+                    timeout_seconds: Some(10),
+                    summary: "Command emitted fixture secret".to_owned(),
+                    artifact_path: None,
+                },
+                None,
+                PublicationOptions::default(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::PublicationBlockedSecretRisk { finding_count } if finding_count >= 1
+        ));
+        let status = store.agent_status(preparation.thread.id.as_str()).unwrap();
+        assert_eq!(status.evidence_count, 1);
+        assert_eq!(status.review_ids.len(), 1);
+        assert!(status.publication_ids.is_empty());
+        let markdown = store
+            .review_markdown(status.review_ids[0].as_str())
+            .unwrap();
+        assert!(markdown.contains("CommandStdout"));
+        assert!(markdown.contains("openai_token"));
+        assert!(!markdown.contains(secret));
     }
 }

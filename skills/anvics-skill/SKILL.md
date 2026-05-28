@@ -54,6 +54,8 @@ Attach enough evidence for review, but keep it compact.
 - Store raw logs, screenshots, traces, and reports as artifacts or references.
 - Quote only key excerpts that explain a failure, risk, or verification result.
 - Avoid dumping full transcripts unless explicitly requested.
+- Do not paste secrets, tokens, private keys, `.env` values, or credentials into summaries, review notes, or inline evidence.
+- If you suspect a secret appeared in source changes or command output, say so plainly and let Anvics risk scanning block publication for operator review.
 - Record uncertainty and unverified areas directly.
 
 Evidence should support review. It should not become a second codebase made of logs.
@@ -65,6 +67,7 @@ Before publish:
 - Create a final snapshot.
 - Attach verification evidence.
 - Generate a review with final diff, intent, risks, evidence, and unresolved questions.
+- Run or expect a risk scan before publication; agents should not bypass secret-risk findings.
 - Wait for required acceptance or policy approval.
 
 Publish through the native Anvics flow. Export to Git only after native acceptance, and only when a legacy Git system needs a commit, branch, patch series, or pull request.

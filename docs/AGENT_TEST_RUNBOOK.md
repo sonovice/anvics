@@ -12,6 +12,7 @@ scripts/live_agent_packet_smoke.sh
 scripts/daemon_agent_smoke.sh
 scripts/coordination_smoke.sh
 scripts/command_worker_smoke.sh
+scripts/secret_risk_smoke.sh
 scripts/live_agent_trial_prepare.sh
 ```
 
@@ -26,6 +27,8 @@ scripts/live_agent_trial_prepare.sh
 `coordination_smoke.sh` prepares two agent workspaces, enters both sessions, records one known change, and shows the other agent the related active work before it edits.
 
 `command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
+
+`secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
 
 ## Daemon Check
 
@@ -118,6 +121,23 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
 
    `agent finish`, `review show`, `publish create`, and `legacy git export` remain available when you want to inspect or publish each step manually.
 
+   If publication is blocked by a secret-risk finding, inspect the review and risk list:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" risk list --review "<review-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" review show "<review-id>" --format markdown
+   ```
+
+   Fix the workspace and rerun acceptance when the finding is real. Use an override only for a known false positive or intentionally local fixture:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" publish create \
+     --thread "<thread-id>" \
+     --review "<review-id>" \
+     --allow-secret-risk \
+     --override-reason "Short audited reason."
+   ```
+
 ## Two-Agent Trial
 
 Use the harness for the first real validation run:
@@ -146,7 +166,9 @@ Capture observations in `docs/trials/LIVE_AGENT_TRIAL_TEMPLATE.md`. Do not creat
 - The agent edited only the workspace path.
 - No Git branch, worktree, or commit was needed.
 - Evidence is a short summary, not a transcript dump.
+- Secret-like values are not copied into evidence summaries or review notes.
 - The review shows changed paths and evidence.
+- Secret-risk findings block publication unless an operator records an explicit override reason.
 - Publication points to the accepted native snapshot.
 - The exported patch applies to a clean copy of the base files with `git apply`.
 

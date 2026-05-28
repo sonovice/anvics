@@ -1,5 +1,7 @@
 use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat};
-use anvics_store::{AnvicsStore, CommandEvidenceInput, CommandRunInput, StoreError};
+use anvics_store::{
+    AnvicsStore, CommandEvidenceInput, CommandRunInput, PublicationOptions, StoreError,
+};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::{
@@ -288,6 +290,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             summary,
             artifact_path,
             output_path,
+            allow_secret_risk,
+            override_reason,
         } => {
             let input = command_input(
                 command,
@@ -298,10 +302,14 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 summary,
                 artifact_path,
             )?;
-            let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_evidence(
+            let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_evidence_and_options(
                 &workspace,
                 input,
                 output_path.map(PathBuf::from),
+                PublicationOptions {
+                    allow_secret_risk,
+                    override_reason,
+                },
             )?;
             Ok(ApiResult::AgentAccept {
                 acceptance: Box::new(acceptance),
@@ -317,8 +325,10 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             summary,
             artifact_path,
             output_path,
+            allow_secret_risk,
+            override_reason,
         } => {
-            let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_command_run(
+            let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_command_run_and_options(
                 CommandRunInput {
                     workspace_id: workspace,
                     argv,
@@ -330,6 +340,10 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                     artifact_path,
                 },
                 output_path.map(PathBuf::from),
+                PublicationOptions {
+                    allow_secret_risk,
+                    override_reason,
+                },
             )?;
             Ok(ApiResult::AgentAccept {
                 acceptance: Box::new(acceptance),
@@ -354,9 +368,35 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 .to_string();
             Ok(ApiResult::ReviewPath { path })
         }
-        ApiMethod::PublishCreate { thread, review } => {
-            let publication = AnvicsStore::open(&repo)?.create_publication(&thread, &review)?;
+        ApiMethod::PublishCreate {
+            thread,
+            review,
+            allow_secret_risk,
+            override_reason,
+        } => {
+            let publication = AnvicsStore::open(&repo)?.create_publication_with_options(
+                &thread,
+                &review,
+                PublicationOptions {
+                    allow_secret_risk,
+                    override_reason,
+                },
+            )?;
             Ok(ApiResult::PublishCreate { publication })
+        }
+        ApiMethod::RiskScan { review } => {
+            let scan = AnvicsStore::open(&repo)?.scan_review_risks(&review)?;
+            Ok(ApiResult::RiskScan {
+                scan: Box::new(scan),
+            })
+        }
+        ApiMethod::RiskList { review } => {
+            let findings = AnvicsStore::open(&repo)?.list_review_risk_findings(&review)?;
+            Ok(ApiResult::RiskList { findings })
+        }
+        ApiMethod::RiskShow { id } => {
+            let finding = AnvicsStore::open(&repo)?.show_risk_finding(&id)?;
+            Ok(ApiResult::RiskShow { finding })
         }
         ApiMethod::LegacyGitExport {
             publication,
