@@ -20,8 +20,18 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.socket.exists() {
-        fs::remove_file(&cli.socket)
-            .with_context(|| format!("failed to remove stale socket {}", cli.socket.display()))?;
+        if UnixStream::connect(&cli.socket).is_ok() {
+            anyhow::bail!(
+                "daemon socket {} is already serving a live daemon",
+                cli.socket.display()
+            );
+        }
+        fs::remove_file(&cli.socket).with_context(|| {
+            format!(
+                "failed to remove non-responsive stale socket {}",
+                cli.socket.display()
+            )
+        })?;
     }
     let listener = UnixListener::bind(&cli.socket)
         .with_context(|| format!("failed to bind socket {}", cli.socket.display()))?;
@@ -65,13 +75,14 @@ fn handle_request(request: ApiRequest) -> ApiResponse {
     let id = request.id;
     match run_request(request) {
         Ok(result) => ApiResponse::ok(id, result),
-        Err(error) => ApiResponse::error(id, format!("{error:?}")),
+        Err(error) => ApiResponse::error(id, format!("{error:#}")),
     }
 }
 
 fn run_request(request: ApiRequest) -> Result<ApiResult> {
     let repo = PathBuf::from(&request.repo);
     match request.method {
+        ApiMethod::Ping => Ok(ApiResult::Pong),
         ApiMethod::RepoInit => {
             let manifest = match AnvicsStore::init(&repo) {
                 Ok(manifest) => manifest,
@@ -106,6 +117,78 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             let snapshot = AnvicsStore::open(&repo)?.show_snapshot(&id)?;
             Ok(ApiResult::SnapshotShow { snapshot })
         }
+        ApiMethod::ThreadCreate { title, task } => {
+            let thread = AnvicsStore::open(&repo)?.create_thread(title, task)?;
+            Ok(ApiResult::ThreadCreate {
+                thread: Box::new(thread),
+            })
+        }
+        ApiMethod::ThreadList => {
+            let threads = AnvicsStore::open(&repo)?.list_threads()?;
+            Ok(ApiResult::ThreadList { threads })
+        }
+        ApiMethod::ThreadShow { id } => {
+            let thread = AnvicsStore::open(&repo)?.show_thread(&id)?;
+            Ok(ApiResult::ThreadShow {
+                thread: Box::new(thread),
+            })
+        }
+        ApiMethod::WorkspaceCreate { thread } => {
+            let workspace = AnvicsStore::open(&repo)?.create_workspace(&thread)?;
+            Ok(ApiResult::WorkspaceCreate {
+                workspace: Box::new(workspace),
+            })
+        }
+        ApiMethod::WorkspaceSnapshot { id, message } => {
+            let workspace = AnvicsStore::open(&repo)?.workspace_snapshot(&id, message)?;
+            Ok(ApiResult::WorkspaceSnapshot {
+                workspace: Box::new(workspace),
+            })
+        }
+        ApiMethod::EvidenceAttach {
+            thread,
+            command,
+            exit_code,
+            summary,
+            artifact_path,
+        } => {
+            let evidence = AnvicsStore::open(&repo)?.attach_evidence(
+                &thread,
+                command,
+                exit_code,
+                summary,
+                artifact_path,
+            )?;
+            Ok(ApiResult::EvidenceAttached { evidence })
+        }
+        ApiMethod::EvidenceCommand {
+            thread,
+            command,
+            command_file,
+            command_label,
+            cwd,
+            exit_code,
+            summary,
+            artifact_path,
+        } => {
+            let input = command_input(
+                command,
+                command_file,
+                command_label,
+                cwd,
+                exit_code,
+                summary,
+                artifact_path,
+            )?;
+            let evidence = AnvicsStore::open(&repo)?.attach_command_evidence(&thread, input)?;
+            Ok(ApiResult::EvidenceAttached { evidence })
+        }
+        ApiMethod::ReviewCreate { thread } => {
+            let review = AnvicsStore::open(&repo)?.create_review(&thread)?;
+            Ok(ApiResult::ReviewCreate {
+                review: Box::new(review),
+            })
+        }
         ApiMethod::AgentPrepare { title, task } => {
             let preparation = AnvicsStore::open(&repo)?.prepare_agent(title, task)?;
             Ok(ApiResult::AgentPrepare {
@@ -116,6 +199,37 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             let status = AnvicsStore::open(&repo)?.agent_status(&thread)?;
             Ok(ApiResult::AgentStatus {
                 status: Box::new(status),
+            })
+        }
+        ApiMethod::AgentPacket { thread } => {
+            let path = AnvicsStore::open(&repo)?
+                .agent_packet_file_path(&thread)?
+                .to_string_lossy()
+                .to_string();
+            Ok(ApiResult::AgentPacket { path })
+        }
+        ApiMethod::AgentFinish {
+            workspace,
+            command,
+            command_file,
+            command_label,
+            cwd,
+            exit_code,
+            summary,
+            artifact_path,
+        } => {
+            let input = command_input(
+                command,
+                command_file,
+                command_label,
+                cwd,
+                exit_code,
+                summary,
+                artifact_path,
+            )?;
+            let finish = AnvicsStore::open(&repo)?.finish_agent_with_evidence(&workspace, input)?;
+            Ok(ApiResult::AgentFinish {
+                finish: Box::new(finish),
             })
         }
         ApiMethod::AgentAccept {
@@ -129,23 +243,18 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             artifact_path,
             output_path,
         } => {
-            let command_text = match (&command, &command_file) {
-                (Some(command), _) => command.clone(),
-                (None, Some(path)) => fs::read_to_string(path)
-                    .with_context(|| format!("failed to read command file {path}"))?,
-                (None, None) => anyhow::bail!("either command or command_file is required"),
-            };
+            let input = command_input(
+                command,
+                command_file,
+                command_label,
+                cwd,
+                exit_code,
+                summary,
+                artifact_path,
+            )?;
             let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_evidence(
                 &workspace,
-                CommandEvidenceInput {
-                    command: command_text,
-                    command_label,
-                    command_file,
-                    cwd,
-                    exit_code,
-                    summary,
-                    artifact_path,
-                },
+                input,
                 output_path.map(PathBuf::from),
             )?;
             Ok(ApiResult::AgentAccept {
@@ -164,6 +273,17 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 Ok(ApiResult::ReviewShowMarkdown { markdown })
             }
         },
+        ApiMethod::ReviewPath { id } => {
+            let path = AnvicsStore::open(&repo)?
+                .review_markdown_file_path(&id)?
+                .to_string_lossy()
+                .to_string();
+            Ok(ApiResult::ReviewPath { path })
+        }
+        ApiMethod::PublishCreate { thread, review } => {
+            let publication = AnvicsStore::open(&repo)?.create_publication(&thread, &review)?;
+            Ok(ApiResult::PublishCreate { publication })
+        }
         ApiMethod::LegacyGitExport {
             publication,
             output,
@@ -179,4 +299,30 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             Ok(ApiResult::EventsSince { events })
         }
     }
+}
+
+fn command_input(
+    command: Option<String>,
+    command_file: Option<String>,
+    command_label: Option<String>,
+    cwd: Option<String>,
+    exit_code: i32,
+    summary: String,
+    artifact_path: Option<String>,
+) -> Result<CommandEvidenceInput> {
+    let command_text = match (&command, &command_file) {
+        (Some(command), _) => command.clone(),
+        (None, Some(path)) => fs::read_to_string(path)
+            .with_context(|| format!("failed to read command file {path}"))?,
+        (None, None) => anyhow::bail!("either command or command_file is required"),
+    };
+    Ok(CommandEvidenceInput {
+        command: command_text,
+        command_label,
+        command_file,
+        cwd,
+        exit_code,
+        summary,
+        artifact_path,
+    })
 }

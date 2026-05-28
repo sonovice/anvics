@@ -587,11 +587,7 @@ fn evidence_command_attaches_file_backed_evidence() {
 fn daemon_backed_cli_flow_uses_socket_api() {
     let dir = tempdir().unwrap();
     let socket = dir.path().join("anvics.sock");
-    let mut daemon = StdCommand::new(assert_cmd::cargo::cargo_bin("anvicsd"))
-        .args(["--socket", socket.to_str().unwrap()])
-        .spawn()
-        .unwrap();
-    wait_for_socket(&socket);
+    let mut daemon = start_daemon(&socket);
 
     daemon_anvics(dir.path(), &socket, &["repo", "status"])
         .assert()
@@ -620,6 +616,252 @@ fn daemon_backed_cli_flow_uses_socket_api() {
         .assert()
         .success()
         .stdout(predicate::str::contains("initialized"));
+    anvics(
+        dir.path(),
+        &["daemon", "ping", "--socket", socket.to_str().unwrap()],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("daemon: ok"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn daemon_backed_full_agent_flow_exports_patch_and_events() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+
+    daemon_anvics(dir.path(), &socket, &["repo", "init"])
+        .assert()
+        .success();
+    fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+    fs::write(dir.path().join("deleted.txt"), "delete me\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["snapshot", "create", "--message", "base"],
+    )
+    .assert()
+    .success();
+    let prepare = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Daemon Agent",
+            "--task",
+            "Modify, add, and delete files",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Prepared agent task"))
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+
+    fs::write(format!("{workspace_path}/modified.txt"), "after\n").unwrap();
+    fs::remove_file(format!("{workspace_path}/deleted.txt")).unwrap();
+    fs::write(format!("{workspace_path}/added.txt"), "new\n").unwrap();
+    let command_file = dir.path().join("verify.sh");
+    fs::write(&command_file, "cat modified.txt\ncat added.txt\n").unwrap();
+    let patch_path = dir.path().join("daemon.patch");
+    let accept = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--command-file",
+            command_file.to_str().unwrap(),
+            "--label",
+            "daemon verify",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Daemon-backed agent result accepted",
+            "--output",
+            patch_path.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Accepted agent workspace"))
+    .stdout(predicate::str::contains("patch: "))
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&accept, "review: ");
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("daemon verify"))
+    .stdout(predicate::str::contains("Modified: `modified.txt`"));
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "status", "--thread", &thread],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("publication_status: published"));
+    daemon_anvics(dir.path(), &socket, &["events", "list", "--since", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RepositoryInitialized"))
+        .stdout(predicate::str::contains("LegacyPatchExported"));
+
+    let clean = tempdir().unwrap();
+    fs::write(clean.path().join("modified.txt"), "before\n").unwrap();
+    fs::write(clean.path().join("deleted.txt"), "delete me\n").unwrap();
+    StdCommand::new("git")
+        .args(["init"])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    let apply = StdCommand::new("git")
+        .args(["apply", patch_path.to_str().unwrap()])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "git apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn daemon_backed_two_agent_overlap_and_error_output() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+
+    daemon_anvics(dir.path(), &socket, &["repo", "init"])
+        .assert()
+        .success();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["snapshot", "create", "--message", "base"],
+    )
+    .assert()
+    .success();
+    daemon_anvics(dir.path(), &socket, &["thread", "show", "missing-thread"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("daemon error"))
+        .stderr(predicate::str::contains("thread does not exist"));
+
+    let first = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Agent A",
+            "--task",
+            "Change app.txt for Agent A",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let second = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Agent B",
+            "--task",
+            "Change app.txt for Agent B",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let first_workspace = value_after_prefix(&first, "workspace: ");
+    let first_path = value_after_prefix(&first, "workspace_path: ");
+    let second_workspace = value_after_prefix(&second, "workspace: ");
+    let second_path = value_after_prefix(&second, "workspace_path: ");
+
+    fs::write(format!("{first_path}/app.txt"), "agent a\n").unwrap();
+    fs::write(format!("{second_path}/app.txt"), "agent b\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &second_workspace,
+            "--command",
+            "agent-b",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Agent B changed app.txt",
+        ],
+    )
+    .assert()
+    .success();
+    let first_accept = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &first_workspace,
+            "--command",
+            "agent-a",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Agent A changed app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&first_accept, "review: ");
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("also changed: app.txt"));
 
     daemon.kill().unwrap();
     daemon.wait().unwrap();
@@ -737,6 +979,15 @@ fn daemon_anvics(repo: &std::path::Path, socket: &std::path::Path, args: &[&str]
         .args(["--repo", repo.to_str().unwrap(), "--use-daemon"])
         .args(args);
     command
+}
+
+fn start_daemon(socket: &std::path::Path) -> std::process::Child {
+    let daemon = StdCommand::new(assert_cmd::cargo::cargo_bin("anvicsd"))
+        .args(["--socket", socket.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    wait_for_socket(socket);
+    daemon
 }
 
 fn wait_for_socket(socket: &std::path::Path) {

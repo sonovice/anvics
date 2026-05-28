@@ -9,6 +9,7 @@ From the Anvics repo:
 ```sh
 scripts/agent_smoke.sh
 scripts/live_agent_packet_smoke.sh
+scripts/daemon_agent_smoke.sh
 scripts/live_agent_trial_prepare.sh
 ```
 
@@ -17,6 +18,25 @@ scripts/live_agent_trial_prepare.sh
 `live_agent_packet_smoke.sh` uses the same convenience flow intended for live agents: `agent prepare`, scripted workspace edits, `agent accept`, review markdown, native publication, and legacy Git patch export. It also verifies that the exported patch applies to a clean Git checkout.
 
 `live_agent_trial_prepare.sh` creates a temporary toy repo and prints two paste-ready external-agent prompts. Use it for the first real Codex/Claude/Cursor trial.
+
+`daemon_agent_smoke.sh` runs the same accept/export loop through `anvicsd` with `--use-daemon`, proving the local socket API can drive the MVP flow.
+
+## Daemon Check
+
+For manual daemon testing, run:
+
+```sh
+socket_dir="$(mktemp -d)"
+socket="$socket_dir/anvics.sock"
+cargo run -q -p anvics-cli --bin anvicsd -- --socket "$socket"
+```
+
+In another shell:
+
+```sh
+cargo run -q -p anvics-cli --bin anvics -- daemon ping --socket "$socket"
+ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" --use-daemon repo status
+```
 
 ## Manual Live-Agent Test
 

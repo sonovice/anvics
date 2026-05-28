@@ -1,4 +1,4 @@
-use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult};
+use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat};
 use anvics_store::{AnvicsStore, CommandEvidenceInput, StoreError};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -59,6 +59,14 @@ enum Command {
     Legacy {
         #[command(subcommand)]
         command: LegacyCommand,
+    },
+    Events {
+        #[command(subcommand)]
+        command: EventsCommand,
+    },
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
 }
 
@@ -247,6 +255,22 @@ enum LegacyGitCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum EventsCommand {
+    List {
+        #[arg(long, default_value_t = 0)]
+        since: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    Ping {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug)]
 struct CommandEvidenceOptions {
     command: Option<String>,
@@ -315,19 +339,49 @@ fn main() -> Result<()> {
         }
         Command::Thread {
             command: ThreadCommand::Create { title, task },
-        } => create_thread(root, title, task),
+        } => {
+            if let Some(socket) = daemon {
+                create_thread_via_daemon(root, socket, title, task)
+            } else {
+                create_thread(root, title, task)
+            }
+        }
         Command::Thread {
             command: ThreadCommand::List,
-        } => list_threads(root),
+        } => {
+            if let Some(socket) = daemon {
+                list_threads_via_daemon(root, socket)
+            } else {
+                list_threads(root)
+            }
+        }
         Command::Thread {
             command: ThreadCommand::Show { id },
-        } => show_thread(root, &id),
+        } => {
+            if let Some(socket) = daemon {
+                show_thread_via_daemon(root, socket, id)
+            } else {
+                show_thread(root, &id)
+            }
+        }
         Command::Workspace {
             command: WorkspaceCommand::Create { thread },
-        } => create_workspace(root, &thread),
+        } => {
+            if let Some(socket) = daemon {
+                create_workspace_via_daemon(root, socket, thread)
+            } else {
+                create_workspace(root, &thread)
+            }
+        }
         Command::Workspace {
             command: WorkspaceCommand::Snapshot { id, message },
-        } => snapshot_workspace(root, &id, message),
+        } => {
+            if let Some(socket) = daemon {
+                snapshot_workspace_via_daemon(root, socket, id, message)
+            } else {
+                snapshot_workspace(root, &id, message)
+            }
+        }
         Command::Evidence {
             command:
                 EvidenceCommand::Attach {
@@ -337,7 +391,15 @@ fn main() -> Result<()> {
                     summary,
                     artifact,
                 },
-        } => attach_evidence(root, &thread, command, exit_code, summary, artifact),
+        } => {
+            if let Some(socket) = daemon {
+                attach_evidence_via_daemon(
+                    root, socket, thread, command, exit_code, summary, artifact,
+                )
+            } else {
+                attach_evidence(root, &thread, command, exit_code, summary, artifact)
+            }
+        }
         Command::Evidence {
             command:
                 EvidenceCommand::Command {
@@ -350,10 +412,8 @@ fn main() -> Result<()> {
                     summary,
                     artifact,
                 },
-        } => attach_command_evidence(
-            root,
-            &thread,
-            CommandEvidenceOptions {
+        } => {
+            let options = CommandEvidenceOptions {
                 command,
                 command_file,
                 label,
@@ -361,26 +421,67 @@ fn main() -> Result<()> {
                 exit_code,
                 summary,
                 artifact,
-            },
-        ),
+            };
+            if let Some(socket) = daemon {
+                attach_command_evidence_via_daemon(root, socket, thread, options)
+            } else {
+                attach_command_evidence(root, &thread, options)
+            }
+        }
         Command::Review {
             command: ReviewCommand::Create { thread },
-        } => create_review(root, &thread),
+        } => {
+            if let Some(socket) = daemon {
+                create_review_via_daemon(root, socket, thread)
+            } else {
+                create_review(root, &thread)
+            }
+        }
         Command::Review {
             command: ReviewCommand::Show { id, format },
-        } => show_review(root, &id, format),
+        } => {
+            if let Some(socket) = daemon {
+                show_review_via_daemon(root, socket, id, format)
+            } else {
+                show_review(root, &id, format)
+            }
+        }
         Command::Review {
             command: ReviewCommand::Path { id },
-        } => show_review_path(root, &id),
+        } => {
+            if let Some(socket) = daemon {
+                show_review_path_via_daemon(root, socket, id)
+            } else {
+                show_review_path(root, &id)
+            }
+        }
         Command::Publish {
             command: PublishCommand::Create { thread, review },
-        } => create_publication(root, &thread, &review),
+        } => {
+            if let Some(socket) = daemon {
+                create_publication_via_daemon(root, socket, thread, review)
+            } else {
+                create_publication(root, &thread, &review)
+            }
+        }
         Command::Agent {
             command: AgentCommand::Prepare { title, task },
-        } => prepare_agent(root, title, task),
+        } => {
+            if let Some(socket) = daemon {
+                prepare_agent_via_daemon(root, socket, title, task)
+            } else {
+                prepare_agent(root, title, task)
+            }
+        }
         Command::Agent {
             command: AgentCommand::Packet { thread },
-        } => show_agent_packet(root, &thread),
+        } => {
+            if let Some(socket) = daemon {
+                show_agent_packet_via_daemon(root, socket, thread)
+            } else {
+                show_agent_packet(root, &thread)
+            }
+        }
         Command::Agent {
             command: AgentCommand::Status { thread },
         } => {
@@ -402,10 +503,8 @@ fn main() -> Result<()> {
                     summary,
                     artifact,
                 },
-        } => finish_agent(
-            root,
-            &workspace,
-            CommandEvidenceOptions {
+        } => {
+            let options = CommandEvidenceOptions {
                 command,
                 command_file,
                 label,
@@ -413,8 +512,13 @@ fn main() -> Result<()> {
                 exit_code,
                 summary,
                 artifact,
-            },
-        ),
+            };
+            if let Some(socket) = daemon {
+                finish_agent_via_daemon(root, socket, workspace, options)
+            } else {
+                finish_agent(root, &workspace, options)
+            }
+        }
         Command::Agent {
             command:
                 AgentCommand::Accept {
@@ -428,10 +532,8 @@ fn main() -> Result<()> {
                     artifact,
                     output,
                 },
-        } => accept_agent(
-            root,
-            &workspace,
-            CommandEvidenceOptions {
+        } => {
+            let options = CommandEvidenceOptions {
                 command,
                 command_file,
                 label,
@@ -439,9 +541,13 @@ fn main() -> Result<()> {
                 exit_code,
                 summary,
                 artifact,
-            },
-            output,
-        ),
+            };
+            if let Some(socket) = daemon {
+                accept_agent_via_daemon(root, socket, workspace, options, output)
+            } else {
+                accept_agent(root, &workspace, options, output)
+            }
+        }
         Command::Legacy {
             command:
                 LegacyCommand::Git {
@@ -451,7 +557,25 @@ fn main() -> Result<()> {
                             output,
                         },
                 },
-        } => export_legacy_git_patch(root, &publication, output),
+        } => {
+            if let Some(socket) = daemon {
+                export_legacy_git_patch_via_daemon(root, socket, publication, output)
+            } else {
+                export_legacy_git_patch(root, &publication, output)
+            }
+        }
+        Command::Events {
+            command: EventsCommand::List { since },
+        } => {
+            if let Some(socket) = daemon {
+                list_events_via_daemon(root, socket, since)
+            } else {
+                list_events(root, since)
+            }
+        }
+        Command::Daemon {
+            command: DaemonCommand::Ping { socket },
+        } => ping_daemon(socket.or(daemon)),
     }
 }
 
@@ -622,16 +746,46 @@ fn create_thread(root: PathBuf, title: String, task: String) -> Result<()> {
         .create_thread(title, task)
         .context("failed to create thread")?;
 
+    print_thread_created(thread);
+    Ok(())
+}
+
+fn create_thread_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    title: String,
+    task: String,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ThreadCreate { title, task })? {
+        ApiResult::ThreadCreate { thread } => {
+            print_thread_created(*thread);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_thread_created(thread: anvics_core::WorkThread) {
     println!("Created thread {}", thread.id);
     println!("base_snapshot: {}", thread.base_snapshot);
     println!("title: {}", thread.title);
-    Ok(())
 }
 
 fn list_threads(root: PathBuf) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let threads = store.list_threads().context("failed to list threads")?;
 
+    print_threads(threads)
+}
+
+fn list_threads_via_daemon(root: PathBuf, socket: PathBuf) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ThreadList)? {
+        ApiResult::ThreadList { threads } => print_threads(threads),
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_threads(threads: Vec<anvics_core::WorkThread>) -> Result<()> {
     if threads.is_empty() {
         println!("No threads");
         return Ok(());
@@ -656,16 +810,40 @@ fn show_thread(root: PathBuf, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn show_thread_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ThreadShow { id })? {
+        ApiResult::ThreadShow { thread } => {
+            println!("{}", serde_json::to_string_pretty(&thread)?);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn create_workspace(root: PathBuf, thread_id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let workspace = store
         .create_workspace(thread_id)
         .context("failed to create workspace")?;
 
+    print_workspace_created(workspace);
+    Ok(())
+}
+
+fn create_workspace_via_daemon(root: PathBuf, socket: PathBuf, thread: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::WorkspaceCreate { thread })? {
+        ApiResult::WorkspaceCreate { workspace } => {
+            print_workspace_created(*workspace);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_workspace_created(workspace: anvics_core::WorkspaceView) {
     println!("Created workspace {}", workspace.id);
     println!("thread: {}", workspace.thread_id);
     println!("path: {}", workspace.materialized_path);
-    Ok(())
 }
 
 fn snapshot_workspace(root: PathBuf, workspace_id: &str, message: Option<String>) -> Result<()> {
@@ -674,11 +852,30 @@ fn snapshot_workspace(root: PathBuf, workspace_id: &str, message: Option<String>
         .workspace_snapshot(workspace_id, message)
         .context("failed to snapshot workspace")?;
 
+    print_workspace_snapshot(workspace);
+    Ok(())
+}
+
+fn snapshot_workspace_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    id: String,
+    message: Option<String>,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::WorkspaceSnapshot { id, message })? {
+        ApiResult::WorkspaceSnapshot { workspace } => {
+            print_workspace_snapshot(*workspace);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_workspace_snapshot(workspace: anvics_core::WorkspaceView) {
     println!("Snapshotted workspace {}", workspace.id);
     if let Some(snapshot) = workspace.latest_snapshot {
         println!("snapshot: {snapshot}");
     }
-    Ok(())
 }
 
 fn attach_evidence(
@@ -694,9 +891,41 @@ fn attach_evidence(
         .attach_evidence(thread_id, command, exit_code, summary, artifact)
         .context("failed to attach evidence")?;
 
-    println!("Attached evidence {}", evidence.id);
-    println!("thread: {}", evidence.thread_id);
+    print_evidence_attached("Attached evidence", evidence);
     Ok(())
+}
+
+fn attach_evidence_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    thread: String,
+    command: String,
+    exit_code: i32,
+    summary: String,
+    artifact_path: Option<String>,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::EvidenceAttach {
+            thread,
+            command,
+            exit_code,
+            summary,
+            artifact_path,
+        },
+    )? {
+        ApiResult::EvidenceAttached { evidence } => {
+            print_evidence_attached("Attached evidence", evidence);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_evidence_attached(prefix: &str, evidence: anvics_core::EvidenceRecord) {
+    println!("{prefix} {}", evidence.id);
+    println!("thread: {}", evidence.thread_id);
 }
 
 fn attach_command_evidence(
@@ -710,9 +939,38 @@ fn attach_command_evidence(
         .attach_command_evidence(thread_id, input)
         .context("failed to attach command evidence")?;
 
-    println!("Attached command evidence {}", evidence.id);
-    println!("thread: {}", evidence.thread_id);
+    print_evidence_attached("Attached command evidence", evidence);
     Ok(())
+}
+
+fn attach_command_evidence_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    thread: String,
+    options: CommandEvidenceOptions,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::EvidenceCommand {
+            thread,
+            command: options.command,
+            command_file: options
+                .command_file
+                .map(|path| path.to_string_lossy().to_string()),
+            command_label: options.label,
+            cwd: options.cwd,
+            exit_code: options.exit_code,
+            summary: options.summary,
+            artifact_path: options.artifact,
+        },
+    )? {
+        ApiResult::EvidenceAttached { evidence } => {
+            print_evidence_attached("Attached command evidence", evidence);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
 }
 
 fn create_review(root: PathBuf, thread_id: &str) -> Result<()> {
@@ -721,11 +979,25 @@ fn create_review(root: PathBuf, thread_id: &str) -> Result<()> {
         .create_review(thread_id)
         .context("failed to create review")?;
 
+    print_review_created(review);
+    Ok(())
+}
+
+fn create_review_via_daemon(root: PathBuf, socket: PathBuf, thread: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ReviewCreate { thread })? {
+        ApiResult::ReviewCreate { review } => {
+            print_review_created(*review);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_review_created(review: anvics_core::ReviewProjection) {
     println!("Created review {}", review.id);
     println!("thread: {}", review.thread_id);
     println!("changed_paths: {}", review.changed_paths.len());
     println!("overlap_notes: {}", review.overlap_notes.len());
-    Ok(())
 }
 
 fn show_review(root: PathBuf, id: &str, format: ReviewFormat) -> Result<()> {
@@ -747,6 +1019,32 @@ fn show_review(root: PathBuf, id: &str, format: ReviewFormat) -> Result<()> {
     Ok(())
 }
 
+fn show_review_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    id: String,
+    format: ReviewFormat,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::ReviewShow {
+            id,
+            format: api_review_format(format),
+        },
+    )? {
+        ApiResult::ReviewShowJson { review } => {
+            println!("{}", serde_json::to_string_pretty(&review)?);
+            Ok(())
+        }
+        ApiResult::ReviewShowMarkdown { markdown } => {
+            println!("{markdown}");
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn show_review_path(root: PathBuf, id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let path = store
@@ -757,21 +1055,54 @@ fn show_review_path(root: PathBuf, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn show_review_path_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ReviewPath { id })? {
+        ApiResult::ReviewPath { path } => {
+            println!("{path}");
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn create_publication(root: PathBuf, thread_id: &str, review_id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let publication = store
         .create_publication(thread_id, review_id)
         .context("failed to create publication")?;
 
+    print_publication_created(&root, publication);
+    Ok(())
+}
+
+fn create_publication_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    thread: String,
+    review: String,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root.clone(),
+        ApiMethod::PublishCreate { thread, review },
+    )? {
+        ApiResult::PublishCreate { publication } => {
+            print_publication_created(&root, publication);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_publication_created(root: &std::path::Path, publication: anvics_core::NativePublication) {
     println!("Created publication {}", publication.id);
     println!("thread: {}", publication.thread_id);
     println!("accepted_snapshot: {}", publication.accepted_snapshot);
     println!(
         "legacy_export: anvics --repo {} legacy git export --publication {} --output accepted.patch",
-        shell_quote(&display_path(&root)),
+        shell_quote(&display_path(root)),
         publication.id
     );
-    Ok(())
 }
 
 fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
@@ -780,6 +1111,30 @@ fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
         .prepare_agent(title, task)
         .context("failed to prepare agent task")?;
 
+    print_agent_preparation(&root, preparation);
+    Ok(())
+}
+
+fn prepare_agent_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    title: String,
+    task: String,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root.clone(),
+        ApiMethod::AgentPrepare { title, task },
+    )? {
+        ApiResult::AgentPrepare { preparation } => {
+            print_agent_preparation(&root, *preparation);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_preparation(root: &std::path::Path, preparation: anvics_core::AgentPreparation) {
     println!("Prepared agent task");
     println!("thread: {}", preparation.thread.id);
     println!("workspace: {}", preparation.workspace.id);
@@ -790,15 +1145,14 @@ fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
     println!("packet: {}", preparation.packet_path);
     println!(
         "accept: anvics --repo {} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
-        shell_quote(&display_path(&root)),
+        shell_quote(&display_path(root)),
         preparation.workspace.id
     );
     println!(
         "finish: anvics --repo {} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
-        shell_quote(&display_path(&root)),
+        shell_quote(&display_path(root)),
         preparation.workspace.id
     );
-    Ok(())
 }
 
 fn show_agent_packet(root: PathBuf, thread_id: &str) -> Result<()> {
@@ -809,6 +1163,16 @@ fn show_agent_packet(root: PathBuf, thread_id: &str) -> Result<()> {
 
     println!("{}", path.display());
     Ok(())
+}
+
+fn show_agent_packet_via_daemon(root: PathBuf, socket: PathBuf, thread: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::AgentPacket { thread })? {
+        ApiResult::AgentPacket { path } => {
+            println!("{path}");
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
 }
 
 fn show_agent_status(root: PathBuf, thread_id: &str) -> Result<()> {
@@ -873,6 +1237,41 @@ fn finish_agent(root: PathBuf, workspace_id: &str, options: CommandEvidenceOptio
         .finish_agent_with_evidence(workspace_id, input)
         .context("failed to finish agent task")?;
 
+    print_agent_finish(finish);
+    Ok(())
+}
+
+fn finish_agent_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    options: CommandEvidenceOptions,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentFinish {
+            workspace,
+            command: options.command,
+            command_file: options
+                .command_file
+                .map(|path| path.to_string_lossy().to_string()),
+            command_label: options.label,
+            cwd: options.cwd,
+            exit_code: options.exit_code,
+            summary: options.summary,
+            artifact_path: options.artifact,
+        },
+    )? {
+        ApiResult::AgentFinish { finish } => {
+            print_agent_finish(*finish);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_finish(finish: anvics_core::AgentFinish) {
     println!("Finished agent task");
     println!("thread: {}", finish.workspace.thread_id);
     println!("workspace: {}", finish.workspace.id);
@@ -882,7 +1281,6 @@ fn finish_agent(root: PathBuf, workspace_id: &str, options: CommandEvidenceOptio
     println!("evidence: {}", finish.evidence.id);
     println!("review: {}", finish.review.id);
     println!("review_markdown: {}", finish.review_markdown_path);
-    Ok(())
 }
 
 fn accept_agent(
@@ -897,6 +1295,43 @@ fn accept_agent(
         .accept_agent_with_evidence(workspace_id, input, output)
         .context("failed to accept agent workspace")?;
 
+    print_agent_acceptance(acceptance);
+    Ok(())
+}
+
+fn accept_agent_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    options: CommandEvidenceOptions,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentAccept {
+            workspace,
+            command: options.command,
+            command_file: options
+                .command_file
+                .map(|path| path.to_string_lossy().to_string()),
+            command_label: options.label,
+            cwd: options.cwd,
+            exit_code: options.exit_code,
+            summary: options.summary,
+            artifact_path: options.artifact,
+            output_path: output.map(|path| path.to_string_lossy().to_string()),
+        },
+    )? {
+        ApiResult::AgentAccept { acceptance } => {
+            print_agent_acceptance(*acceptance);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_acceptance(acceptance: anvics_core::AgentAcceptance) {
     println!("Accepted agent workspace");
     println!("thread: {}", acceptance.workspace.thread_id);
     println!("workspace: {}", acceptance.workspace.id);
@@ -912,7 +1347,6 @@ fn accept_agent(
         "git_apply: git apply {}",
         shell_quote(&acceptance.patch_path)
     );
-    Ok(())
 }
 
 fn command_input(options: CommandEvidenceOptions) -> Result<CommandEvidenceInput> {
@@ -943,9 +1377,94 @@ fn export_legacy_git_patch(root: PathBuf, publication_id: &str, output: PathBuf)
         .export_legacy_git_patch(publication_id, output)
         .context("failed to export legacy Git patch")?;
 
+    print_legacy_git_export(output);
+    Ok(())
+}
+
+fn export_legacy_git_patch_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    publication: String,
+    output: PathBuf,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::LegacyGitExport {
+            publication,
+            output: output.to_string_lossy().to_string(),
+        },
+    )? {
+        ApiResult::LegacyGitExport { output } => {
+            print_legacy_git_export(PathBuf::from(output));
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_legacy_git_export(output: PathBuf) {
     println!("Exported legacy Git patch");
     println!("path: {}", output.display());
+}
+
+fn list_events(root: PathBuf, since: u64) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let events = store
+        .events_since(since)
+        .context("failed to list repository events")?;
+
+    print_events(events);
     Ok(())
+}
+
+fn list_events_via_daemon(root: PathBuf, socket: PathBuf, since: u64) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::EventsSince { sequence: since })? {
+        ApiResult::EventsSince { events } => {
+            print_events(events);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_events(events: Vec<anvics_core::RepositoryEvent>) {
+    if events.is_empty() {
+        println!("No events");
+        return;
+    }
+    for event in events {
+        let subject = event.subject_id.unwrap_or_default();
+        if subject.is_empty() {
+            println!("{}  {:?}  {}", event.sequence, event.kind, event.created_at);
+        } else {
+            println!(
+                "{}  {:?}  {}  {}",
+                event.sequence, event.kind, subject, event.created_at
+            );
+        }
+    }
+}
+
+fn ping_daemon(socket: Option<PathBuf>) -> Result<()> {
+    let socket = socket
+        .or_else(|| std::env::var_os("ANVICS_DAEMON_SOCKET").map(PathBuf::from))
+        .context("daemon socket required: pass --socket or set ANVICS_DAEMON_SOCKET")?;
+    match daemon_request(&socket, std::env::current_dir()?, ApiMethod::Ping)? {
+        ApiResult::Pong => {
+            println!("daemon: ok");
+            println!("socket: {}", socket.display());
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn api_review_format(format: ReviewFormat) -> ApiReviewFormat {
+    match format {
+        ReviewFormat::Json => ApiReviewFormat::Json,
+        ReviewFormat::Markdown => ApiReviewFormat::Markdown,
+    }
 }
 
 fn daemon_socket() -> Result<PathBuf> {

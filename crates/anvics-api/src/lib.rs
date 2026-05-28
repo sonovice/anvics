@@ -1,6 +1,7 @@
 use anvics_core::{
-    AgentAcceptance, AgentPreparation, AgentStatus, NativePublication, RepositoryManifest,
-    ReviewProjection, SourceSnapshot,
+    AgentAcceptance, AgentFinish, AgentPreparation, AgentStatus, EvidenceRecord, NativePublication,
+    RepositoryEvent, RepositoryManifest, ReviewProjection, SourceSnapshot, WorkThread,
+    WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,7 @@ pub struct ApiRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum ApiMethod {
+    Ping,
     RepoInit,
     RepoStatus,
     SnapshotCreate {
@@ -24,6 +26,41 @@ pub enum ApiMethod {
     SnapshotList,
     SnapshotShow {
         id: String,
+    },
+    ThreadCreate {
+        title: String,
+        task: String,
+    },
+    ThreadList,
+    ThreadShow {
+        id: String,
+    },
+    WorkspaceCreate {
+        thread: String,
+    },
+    WorkspaceSnapshot {
+        id: String,
+        message: Option<String>,
+    },
+    EvidenceAttach {
+        thread: String,
+        command: String,
+        exit_code: i32,
+        summary: String,
+        artifact_path: Option<String>,
+    },
+    EvidenceCommand {
+        thread: String,
+        command: Option<String>,
+        command_file: Option<String>,
+        command_label: Option<String>,
+        cwd: Option<String>,
+        exit_code: i32,
+        summary: String,
+        artifact_path: Option<String>,
+    },
+    ReviewCreate {
+        thread: String,
     },
     AgentPrepare {
         title: String,
@@ -43,9 +80,29 @@ pub enum ApiMethod {
         artifact_path: Option<String>,
         output_path: Option<String>,
     },
+    AgentPacket {
+        thread: String,
+    },
+    AgentFinish {
+        workspace: String,
+        command: Option<String>,
+        command_file: Option<String>,
+        command_label: Option<String>,
+        cwd: Option<String>,
+        exit_code: i32,
+        summary: String,
+        artifact_path: Option<String>,
+    },
     ReviewShow {
         id: String,
         format: ReviewFormat,
+    },
+    ReviewPath {
+        id: String,
+    },
+    PublishCreate {
+        thread: String,
+        review: String,
     },
     LegacyGitExport {
         publication: String,
@@ -92,6 +149,7 @@ impl ApiResponse {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiResult {
+    Pong,
     RepoInit {
         manifest: RepositoryManifest,
     },
@@ -108,6 +166,27 @@ pub enum ApiResult {
     SnapshotShow {
         snapshot: SourceSnapshot,
     },
+    ThreadCreate {
+        thread: Box<WorkThread>,
+    },
+    ThreadList {
+        threads: Vec<WorkThread>,
+    },
+    ThreadShow {
+        thread: Box<WorkThread>,
+    },
+    WorkspaceCreate {
+        workspace: Box<WorkspaceView>,
+    },
+    WorkspaceSnapshot {
+        workspace: Box<WorkspaceView>,
+    },
+    EvidenceAttached {
+        evidence: EvidenceRecord,
+    },
+    ReviewCreate {
+        review: Box<ReviewProjection>,
+    },
     AgentPrepare {
         preparation: Box<AgentPreparation>,
     },
@@ -117,20 +196,29 @@ pub enum ApiResult {
     AgentAccept {
         acceptance: Box<AgentAcceptance>,
     },
+    AgentPacket {
+        path: String,
+    },
+    AgentFinish {
+        finish: Box<AgentFinish>,
+    },
     ReviewShowJson {
         review: Box<ReviewProjection>,
     },
     ReviewShowMarkdown {
         markdown: String,
     },
+    ReviewPath {
+        path: String,
+    },
+    PublishCreate {
+        publication: NativePublication,
+    },
     LegacyGitExport {
         output: String,
     },
     EventsSince {
-        events: Vec<anvics_core::RepositoryEvent>,
-    },
-    Publication {
-        publication: NativePublication,
+        events: Vec<RepositoryEvent>,
     },
     Error {
         message: String,
@@ -140,20 +228,308 @@ pub enum ApiResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anvics_core::*;
 
     #[test]
     fn api_request_round_trips_as_json() {
-        let request = ApiRequest {
-            id: 7,
-            repo: "/tmp/repo".to_owned(),
-            method: ApiMethod::AgentStatus {
+        let requests = vec![
+            ApiMethod::Ping,
+            ApiMethod::RepoInit,
+            ApiMethod::RepoStatus,
+            ApiMethod::SnapshotCreate {
+                message: Some("base".to_owned()),
+            },
+            ApiMethod::SnapshotList,
+            ApiMethod::SnapshotShow {
+                id: "snapshot-1".to_owned(),
+            },
+            ApiMethod::ThreadCreate {
+                title: "title".to_owned(),
+                task: "task".to_owned(),
+            },
+            ApiMethod::ThreadList,
+            ApiMethod::ThreadShow {
+                id: "thread-1".to_owned(),
+            },
+            ApiMethod::WorkspaceCreate {
                 thread: "thread-1".to_owned(),
             },
-        };
+            ApiMethod::WorkspaceSnapshot {
+                id: "workspace-1".to_owned(),
+                message: None,
+            },
+            ApiMethod::EvidenceAttach {
+                thread: "thread-1".to_owned(),
+                command: "true".to_owned(),
+                exit_code: 0,
+                summary: "ok".to_owned(),
+                artifact_path: None,
+            },
+            ApiMethod::EvidenceCommand {
+                thread: "thread-1".to_owned(),
+                command: None,
+                command_file: Some("verify.sh".to_owned()),
+                command_label: Some("verify".to_owned()),
+                cwd: Some(".".to_owned()),
+                exit_code: 0,
+                summary: "ok".to_owned(),
+                artifact_path: None,
+            },
+            ApiMethod::ReviewCreate {
+                thread: "thread-1".to_owned(),
+            },
+            ApiMethod::ReviewShow {
+                id: "review-1".to_owned(),
+                format: ReviewFormat::Markdown,
+            },
+            ApiMethod::ReviewPath {
+                id: "review-1".to_owned(),
+            },
+            ApiMethod::PublishCreate {
+                thread: "thread-1".to_owned(),
+                review: "review-1".to_owned(),
+            },
+            ApiMethod::AgentPrepare {
+                title: "title".to_owned(),
+                task: "task".to_owned(),
+            },
+            ApiMethod::AgentStatus {
+                thread: "thread-1".to_owned(),
+            },
+            ApiMethod::AgentPacket {
+                thread: "thread-1".to_owned(),
+            },
+            ApiMethod::AgentFinish {
+                workspace: "workspace-1".to_owned(),
+                command: Some("true".to_owned()),
+                command_file: None,
+                command_label: None,
+                cwd: None,
+                exit_code: 0,
+                summary: "ok".to_owned(),
+                artifact_path: None,
+            },
+            ApiMethod::AgentAccept {
+                workspace: "workspace-1".to_owned(),
+                command: Some("true".to_owned()),
+                command_file: None,
+                command_label: None,
+                cwd: None,
+                exit_code: 0,
+                summary: "ok".to_owned(),
+                artifact_path: None,
+                output_path: Some("accepted.patch".to_owned()),
+            },
+            ApiMethod::LegacyGitExport {
+                publication: "publication-1".to_owned(),
+                output: "accepted.patch".to_owned(),
+            },
+            ApiMethod::EventsSince { sequence: 42 },
+        ];
 
-        assert_eq!(
-            serde_json::from_str::<ApiRequest>(&serde_json::to_string(&request).unwrap()).unwrap(),
-            request
-        );
+        for method in requests {
+            let request = ApiRequest {
+                id: 7,
+                repo: "/tmp/repo".to_owned(),
+                method,
+            };
+            assert_eq!(
+                serde_json::from_str::<ApiRequest>(&serde_json::to_string(&request).unwrap())
+                    .unwrap(),
+                request
+            );
+        }
+    }
+
+    #[test]
+    fn api_response_round_trips_for_simple_results() {
+        let base_snapshot = SourceSnapshotId::new();
+        let final_snapshot = SourceSnapshotId::new();
+        let thread_id = WorkThreadId::new();
+        let workspace_id = WorkspaceViewId::new();
+        let evidence_id = EvidenceRecordId::new();
+        let review_id = ReviewProjectionId::new();
+        let publication_id = NativePublicationId::new();
+        let object = ObjectId::new("a".repeat(64)).unwrap();
+        let manifest = RepositoryManifest {
+            id: RepositoryId::new(),
+            format_version: 1,
+            created_at: "2026-05-28T00:00:00Z".to_owned(),
+        };
+        let snapshot = SourceSnapshot {
+            id: base_snapshot.clone(),
+            root_tree: object,
+            created_at: "2026-05-28T00:00:01Z".to_owned(),
+            message: Some("base".to_owned()),
+        };
+        let thread = WorkThread {
+            id: thread_id.clone(),
+            title: "title".to_owned(),
+            task: "task".to_owned(),
+            base_snapshot: base_snapshot.clone(),
+            status: WorkThreadStatus::Active,
+            created_at: "2026-05-28T00:00:02Z".to_owned(),
+        };
+        let workspace = WorkspaceView {
+            id: workspace_id,
+            thread_id: thread_id.clone(),
+            base_snapshot: base_snapshot.clone(),
+            materialized_path: ".anvics/workspaces/example/files".to_owned(),
+            latest_snapshot: Some(final_snapshot.clone()),
+            created_at: "2026-05-28T00:00:03Z".to_owned(),
+        };
+        let evidence = EvidenceRecord {
+            id: evidence_id.clone(),
+            thread_id: thread_id.clone(),
+            command: "true".to_owned(),
+            command_label: Some("verify".to_owned()),
+            command_file: None,
+            cwd: None,
+            exit_code: 0,
+            summary: "ok".to_owned(),
+            artifact_path: None,
+            created_at: "2026-05-28T00:00:04Z".to_owned(),
+        };
+        let review = ReviewProjection {
+            id: review_id.clone(),
+            thread_id: thread_id.clone(),
+            base_snapshot: base_snapshot.clone(),
+            final_snapshot: final_snapshot.clone(),
+            changed_paths: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
+            overlap_notes: Vec::new(),
+            evidence: vec![EvidenceSummary {
+                id: evidence_id,
+                command: "true".to_owned(),
+                command_label: Some("verify".to_owned()),
+                command_file: None,
+                cwd: None,
+                exit_code: 0,
+                summary: "ok".to_owned(),
+                artifact_path: None,
+            }],
+            created_at: "2026-05-28T00:00:05Z".to_owned(),
+        };
+        let publication = NativePublication {
+            id: publication_id,
+            thread_id: thread_id.clone(),
+            accepted_snapshot: final_snapshot,
+            review_id: review_id.clone(),
+            created_at: "2026-05-28T00:00:06Z".to_owned(),
+        };
+        let preparation = AgentPreparation {
+            thread: thread.clone(),
+            workspace: workspace.clone(),
+            packet_path: ".anvics/agent-packets/thread.md".to_owned(),
+        };
+        let finish = AgentFinish {
+            evidence: evidence.clone(),
+            workspace: workspace.clone(),
+            review: review.clone(),
+            review_markdown_path: ".anvics/reviews/review.md".to_owned(),
+        };
+        let acceptance = AgentAcceptance {
+            evidence: evidence.clone(),
+            workspace: workspace.clone(),
+            review: review.clone(),
+            review_markdown_path: ".anvics/reviews/review.md".to_owned(),
+            publication: publication.clone(),
+            patch_path: "accepted.patch".to_owned(),
+        };
+        let results = vec![
+            ApiResult::Pong,
+            ApiResult::RepoInit {
+                manifest: manifest.clone(),
+            },
+            ApiResult::RepoStatus {
+                initialized: true,
+                manifest: Some(manifest),
+            },
+            ApiResult::SnapshotCreate {
+                snapshot: snapshot.clone(),
+            },
+            ApiResult::SnapshotList {
+                snapshots: vec![snapshot.clone()],
+            },
+            ApiResult::SnapshotShow { snapshot },
+            ApiResult::ThreadCreate {
+                thread: Box::new(thread.clone()),
+            },
+            ApiResult::ThreadList {
+                threads: vec![thread.clone()],
+            },
+            ApiResult::ThreadShow {
+                thread: Box::new(thread.clone()),
+            },
+            ApiResult::WorkspaceCreate {
+                workspace: Box::new(workspace.clone()),
+            },
+            ApiResult::WorkspaceSnapshot {
+                workspace: Box::new(workspace.clone()),
+            },
+            ApiResult::EvidenceAttached {
+                evidence: evidence.clone(),
+            },
+            ApiResult::ReviewCreate {
+                review: Box::new(review.clone()),
+            },
+            ApiResult::AgentPrepare {
+                preparation: Box::new(preparation),
+            },
+            ApiResult::AgentStatus {
+                status: Box::new(AgentStatus {
+                    thread: thread.clone(),
+                    workspaces: vec![workspace],
+                    evidence_count: 1,
+                    review_ids: vec![review_id],
+                    publication_ids: vec![publication.id.clone()],
+                }),
+            },
+            ApiResult::AgentAccept {
+                acceptance: Box::new(acceptance),
+            },
+            ApiResult::AgentPacket {
+                path: ".anvics/agent-packets/thread.md".to_owned(),
+            },
+            ApiResult::AgentFinish {
+                finish: Box::new(finish),
+            },
+            ApiResult::ReviewShowJson {
+                review: Box::new(review),
+            },
+            ApiResult::ReviewShowMarkdown {
+                markdown: "# Review".to_owned(),
+            },
+            ApiResult::ReviewPath {
+                path: ".anvics/reviews/review.md".to_owned(),
+            },
+            ApiResult::PublishCreate { publication },
+            ApiResult::LegacyGitExport {
+                output: "accepted.patch".to_owned(),
+            },
+            ApiResult::EventsSince {
+                events: vec![RepositoryEvent {
+                    id: RepositoryEventId::new(),
+                    sequence: 1,
+                    kind: RepositoryEventKind::RepositoryInitialized,
+                    subject_id: None,
+                    created_at: "2026-05-28T00:00:07Z".to_owned(),
+                }],
+            },
+            ApiResult::Error {
+                message: "missing thread".to_owned(),
+            },
+        ];
+
+        for result in results {
+            let response = ApiResponse::ok(7, result);
+            assert_eq!(
+                serde_json::from_str::<ApiResponse>(&serde_json::to_string(&response).unwrap())
+                    .unwrap(),
+                response
+            );
+        }
     }
 }
