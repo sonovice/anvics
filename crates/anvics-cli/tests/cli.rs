@@ -248,6 +248,12 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
     fs::write(dir.path().join("deleted.txt"), "delete me\n").unwrap();
+    fs::create_dir_all(dir.path().join("skills/anvics-skill")).unwrap();
+    fs::write(
+        dir.path().join("skills/anvics-skill/SKILL.md"),
+        "# Anvics\n",
+    )
+    .unwrap();
 
     anvics(dir.path(), &["repo", "init"]).assert().success();
     anvics(dir.path(), &["snapshot", "create", "--message", "base"])
@@ -281,8 +287,12 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains("Modify, add, and delete files"));
     assert!(packet_text.contains("anvics --repo"));
     assert!(packet_text.contains("only editable area"));
+    assert!(packet_text.contains("## Anvics Skill"));
+    assert!(packet_text.contains("skills/anvics-skill/SKILL.md"));
+    assert!(packet_text.contains("Before editing, read and follow the Anvics skill"));
     assert!(packet_text.contains("agent enter"));
     assert!(packet_text.contains("coordination status"));
+    assert!(packet_text.contains("workspace diff"));
     anvics(dir.path(), &["agent", "packet", "--thread", &thread])
         .assert()
         .success()
@@ -610,6 +620,19 @@ fn workspace_show_and_agent_status_by_workspace_report_overlay_state() {
     .stderr(predicate::str::contains("--thread or --workspace"));
 
     fs::write(format!("{workspace_path}/app.txt"), "changed\n").unwrap();
+    anvics(dir.path(), &["workspace", "diff", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Modified: app.txt"));
+    anvics(
+        dir.path(),
+        &["workspace", "diff", &workspace, "--format", "patch"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("diff --git a/app.txt b/app.txt"))
+    .stdout(predicate::str::contains("-base"))
+    .stdout(predicate::str::contains("+changed"));
     anvics(
         dir.path(),
         &["workspace", "snapshot", &workspace, "--message", "changed"],
@@ -1427,6 +1450,28 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     fs::write(format!("{workspace_path}/modified.txt"), "after\n").unwrap();
     fs::remove_file(format!("{workspace_path}/deleted.txt")).unwrap();
     fs::write(format!("{workspace_path}/added.txt"), "new\n").unwrap();
+    daemon_anvics(dir.path(), &socket, &["workspace", "diff", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added: added.txt"))
+        .stdout(predicate::str::contains("Deleted: deleted.txt"))
+        .stdout(predicate::str::contains("Modified: modified.txt"));
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["workspace", "diff", &workspace, "--format", "patch"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "diff --git a/added.txt b/added.txt",
+    ))
+    .stdout(predicate::str::contains(
+        "diff --git a/modified.txt b/modified.txt",
+    ))
+    .stdout(predicate::str::contains(
+        "diff --git a/deleted.txt b/deleted.txt",
+    ));
     let patch_path = dir.path().join("daemon.patch");
     let accept = daemon_anvics(
         dir.path(),

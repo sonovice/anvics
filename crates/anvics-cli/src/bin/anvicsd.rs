@@ -150,6 +150,18 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 changed_paths,
             })
         }
+        ApiMethod::WorkspaceDiff { id, format } => {
+            let store = AnvicsStore::open(&repo)?;
+            let changed_paths = store.workspace_diff(&id)?;
+            let patch = match format {
+                anvics_api::WorkspaceDiffFormat::Summary => None,
+                anvics_api::WorkspaceDiffFormat::Patch => Some(store.workspace_diff_patch(&id)?),
+            };
+            Ok(ApiResult::WorkspaceDiff {
+                changed_paths,
+                patch,
+            })
+        }
         ApiMethod::WorkspaceSnapshot { id, message } => {
             let workspace = AnvicsStore::open(&repo)?.workspace_snapshot(&id, message)?;
             Ok(ApiResult::WorkspaceSnapshot {

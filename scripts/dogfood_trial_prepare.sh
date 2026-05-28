@@ -109,8 +109,12 @@ You are working inside an Anvics dogfood task packet.
 Read the packet at:
 $packet
 
-Follow it exactly. Work only inside the workspace path listed in the packet.
+Before editing, read the Anvics skill at:
+$workspace_path/skills/anvics-skill/SKILL.md
+
+Follow the skill and packet exactly. Work only inside the workspace path listed in the packet.
 Run the packet's agent enter command before editing.
+Use the packet's workspace diff command instead of Git status or Git diff.
 Run coordination status before finishing and report any potential clashes.
 Do not create a Git branch, Git worktree, or Git commit.
 Keep the change intentionally small.

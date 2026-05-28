@@ -342,6 +342,43 @@ impl AnvicsStore {
         self.overlay_changed_paths(&workspace)
     }
 
+    pub fn workspace_diff(&self, id: &str) -> Result<Vec<ChangedPath>> {
+        let workspace = self.show_workspace(id)?;
+        let base_files = self.snapshot_file_map(&workspace.base_snapshot)?;
+        let workspace_files = workspace_file_map(Path::new(&workspace.materialized_path))?;
+        Ok(diff_file_maps(&base_files, &workspace_files))
+    }
+
+    pub fn workspace_diff_patch(&self, id: &str) -> Result<String> {
+        let workspace = self.show_workspace(id)?;
+        let workspace_root = Path::new(&workspace.materialized_path);
+        let base_files = self.snapshot_file_map(&workspace.base_snapshot)?;
+        let workspace_files = workspace_file_map(workspace_root)?;
+        let changed_paths = diff_file_maps(&base_files, &workspace_files);
+        let mut patch = String::new();
+
+        for changed in changed_paths {
+            let old_content = base_files
+                .get(&changed.path)
+                .map(|object| self.read_object(object))
+                .transpose()?;
+            let new_content = match changed.status {
+                ChangeStatus::Deleted => None,
+                ChangeStatus::Added | ChangeStatus::Modified => {
+                    Some(fs::read(workspace_root.join(&changed.path))?)
+                }
+            };
+            patch.push_str(&render_unified_file_patch(
+                &changed.path,
+                &changed.status,
+                old_content.as_deref().unwrap_or_default(),
+                new_content.as_deref().unwrap_or_default(),
+            ));
+        }
+
+        Ok(patch)
+    }
+
     pub fn workspace_snapshot(&self, id: &str, message: Option<String>) -> Result<WorkspaceView> {
         let mut workspace = self.show_workspace(id)?;
         let snapshot =
@@ -598,14 +635,25 @@ impl AnvicsStore {
             if let Some(bytes) =
                 self.file_bytes_at_snapshot(&review.final_snapshot, &changed.path)?
             {
-                let text = String::from_utf8_lossy(&bytes);
-                collect_secret_findings(
+                let base_bytes =
+                    self.file_bytes_at_snapshot(&review.base_snapshot, &changed.path)?;
+                let final_text = String::from_utf8_lossy(&bytes);
+                let introduced_lines = match (&changed.status, base_bytes) {
+                    (ChangeStatus::Added, _) => all_numbered_lines(&final_text),
+                    (ChangeStatus::Modified, Some(base_bytes)) => {
+                        let base_text = String::from_utf8_lossy(&base_bytes);
+                        introduced_numbered_lines(&base_text, &final_text)
+                    }
+                    (ChangeStatus::Modified, None) => all_numbered_lines(&final_text),
+                    (ChangeStatus::Deleted, _) => Vec::new(),
+                };
+                collect_secret_findings_for_lines(
                     &mut findings,
                     &scan_id,
                     &review.id,
                     RiskTargetKind::SourceFile,
                     &changed.path,
-                    &text,
+                    introduced_lines,
                 );
             }
         }
@@ -1980,6 +2028,59 @@ fn collect_secret_findings(
     }
 }
 
+fn collect_secret_findings_for_lines<'a>(
+    findings: &mut Vec<RiskFinding>,
+    scan_id: &RiskScanId,
+    review_id: &ReviewProjectionId,
+    target_kind: RiskTargetKind,
+    target_path: &str,
+    lines: impl IntoIterator<Item = (u32, &'a str)>,
+) {
+    for (line_number, line) in lines {
+        for detector in secret_detectors_for_line(line) {
+            findings.push(RiskFinding {
+                id: RiskFindingId::new(),
+                scan_id: scan_id.clone(),
+                review_id: review_id.clone(),
+                detector,
+                target_kind: target_kind.clone(),
+                target_path: target_path.to_owned(),
+                line: Some(line_number),
+                severity: RiskSeverity::SecretRisk,
+                redacted_excerpt: redact_line(line),
+            });
+        }
+    }
+}
+
+fn all_numbered_lines(text: &str) -> Vec<(u32, &str)> {
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| ((index + 1) as u32, line))
+        .collect()
+}
+
+fn introduced_numbered_lines<'a>(base_text: &str, final_text: &'a str) -> Vec<(u32, &'a str)> {
+    let mut remaining_base_lines: BTreeMap<&str, usize> = BTreeMap::new();
+    for line in base_text.lines() {
+        *remaining_base_lines.entry(line).or_default() += 1;
+    }
+
+    final_text
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            if let Some(count) = remaining_base_lines.get_mut(line) {
+                if *count > 0 {
+                    *count -= 1;
+                    return None;
+                }
+            }
+            Some(((index + 1) as u32, line))
+        })
+        .collect()
+}
+
 fn secret_detectors_for_line(line: &str) -> Vec<String> {
     let mut detectors = Vec::new();
     let trimmed = line.trim();
@@ -2201,6 +2302,21 @@ fn collect_files(source_root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn workspace_file_map(source_root: &Path) -> Result<BTreeMap<String, ObjectId>> {
+    let mut files = BTreeMap::new();
+    for file in collect_files(source_root)? {
+        let bytes = fs::read(&file)?;
+        let relative = file
+            .strip_prefix(source_root)
+            .map_err(|_| StoreError::OutsideRoot(file.clone()))?;
+        files.insert(
+            relative.to_string_lossy().to_string(),
+            ObjectId::from_bytes(&bytes),
+        );
+    }
+    Ok(files)
+}
+
 fn is_skipped(path: &Path) -> bool {
     path.components().any(|component| {
         let Component::Normal(name) = component else {
@@ -2251,13 +2367,24 @@ fn diff_file_maps(
 fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &WorkspaceView) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
+    let skill_path = Path::new(&workspace.materialized_path).join("skills/anvics-skill/SKILL.md");
+    let skill_section = if skill_path.exists() {
+        format!(
+            "\n## Anvics Skill\n\nBefore editing, read and follow the Anvics skill:\n\n```sh\nsed -n '1,220p' {}\n```\n",
+            shell_quote(&display_path(&skill_path))
+        )
+    } else {
+        "\n## Anvics Skill\n\nIf this repository provides `skills/anvics-skill/SKILL.md`, read it before editing and follow it as the source-control workflow guide.\n".to_owned()
+    };
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- Prefer Anvics-run verification for stronger provenance when the operator accepts the workspace.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\nFallback for externally-run verification:\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n{skill_section}\n## Task\n\n{}\n\n## Instructions\n\n- Read the Anvics skill above before editing when it is available.\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Use `anvics --repo {repo} workspace diff {}` to inspect workspace changes; do not use Git status or Git diff inside the workspace.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- Prefer Anvics-run verification for stronger provenance when the operator accepts the workspace.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Workspace Diff Command\n\n```sh\nanvics --repo {repo} workspace diff {}\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\nFallback for externally-run verification:\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
         thread.id,
         workspace.id,
         repo_root.display(),
         workspace.materialized_path,
         thread.task,
+        workspace.id,
+        workspace.id,
         workspace.id,
         workspace.id,
         workspace.id,
@@ -2500,6 +2627,7 @@ fn split_patch_lines(text: &str) -> Vec<&str> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command as StdCommand;
     use tempfile::tempdir;
 
     #[test]
@@ -2795,6 +2923,101 @@ mod tests {
             path: "deleted.txt".to_owned(),
             status: ChangeStatus::Deleted,
         }));
+    }
+
+    #[test]
+    fn workspace_diff_reports_current_changes_without_snapshot() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "gone\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Workspace diff".to_owned(), "Change files".to_owned())
+            .unwrap();
+        let workspace_path = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace_path.join("modified.txt"), "after\n").unwrap();
+        fs::remove_file(workspace_path.join("deleted.txt")).unwrap();
+        fs::write(workspace_path.join("added.txt"), "new\n").unwrap();
+
+        let diff = store
+            .workspace_diff(preparation.workspace.id.as_str())
+            .unwrap();
+
+        assert_eq!(
+            diff,
+            vec![
+                ChangedPath {
+                    path: "added.txt".to_owned(),
+                    status: ChangeStatus::Added,
+                },
+                ChangedPath {
+                    path: "deleted.txt".to_owned(),
+                    status: ChangeStatus::Deleted,
+                },
+                ChangedPath {
+                    path: "modified.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                },
+            ]
+        );
+        assert!(store
+            .show_workspace(preparation.workspace.id.as_str())
+            .unwrap()
+            .latest_snapshot
+            .is_none());
+    }
+
+    #[test]
+    fn workspace_diff_patch_applies_to_clean_base() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "gone\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Workspace patch".to_owned(), "Change files".to_owned())
+            .unwrap();
+        let workspace_path = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace_path.join("modified.txt"), "after\n").unwrap();
+        fs::remove_file(workspace_path.join("deleted.txt")).unwrap();
+        fs::write(workspace_path.join("added.txt"), "new\n").unwrap();
+        let patch = store
+            .workspace_diff_patch(preparation.workspace.id.as_str())
+            .unwrap();
+        let patch_path = dir.path().join("workspace.patch");
+        fs::write(&patch_path, patch).unwrap();
+
+        let clean = tempdir().unwrap();
+        fs::write(clean.path().join("modified.txt"), "before\n").unwrap();
+        fs::write(clean.path().join("deleted.txt"), "gone\n").unwrap();
+        StdCommand::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(clean.path())
+            .status()
+            .unwrap();
+        let apply = StdCommand::new("git")
+            .args(["apply", patch_path.to_str().unwrap()])
+            .current_dir(clean.path())
+            .output()
+            .unwrap();
+        assert!(
+            apply.status.success(),
+            "git apply failed: {}",
+            String::from_utf8_lossy(&apply.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(clean.path().join("modified.txt")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            fs::read_to_string(clean.path().join("added.txt")).unwrap(),
+            "new\n"
+        );
+        assert!(!clean.path().join("deleted.txt").exists());
     }
 
     #[test]
@@ -3180,6 +3403,123 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == RepositoryEventKind::PolicyOverrideRecorded));
+    }
+
+    #[test]
+    fn unchanged_source_secret_fixture_does_not_block_unrelated_modified_line() {
+        let dir = tempdir().unwrap();
+        let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+        fs::write(
+            dir.path().join("config.rs"),
+            format!("const FIXTURE: &str = \"{secret}\";\nfn marker() {{}}\n"),
+        )
+        .unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Safe fixture edit".to_owned(), "Edit marker".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("config.rs"),
+            format!("const FIXTURE: &str = \"{secret}\";\nfn marker() {{ println!(\"safe\"); }}\n"),
+        )
+        .unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "manual check".to_owned(),
+                0,
+                "Changed non-secret code".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let scan = store.scan_review_risks(finish.review.id.as_str()).unwrap();
+
+        assert!(scan.findings.is_empty());
+        let publication = store
+            .create_publication(preparation.thread.id.as_str(), finish.review.id.as_str())
+            .unwrap();
+        assert_eq!(publication.review_id, finish.review.id);
+    }
+
+    #[test]
+    fn introduced_secret_in_modified_source_still_blocks_publication() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("config.rs"), "fn marker() {}\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Risky modified source".to_owned(), "Add fixture".to_owned())
+            .unwrap();
+        let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("config.rs"),
+            format!("fn marker() {{}}\nconst LEAK: &str = \"{secret}\";\n"),
+        )
+        .unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "manual check".to_owned(),
+                0,
+                "Added secret fixture".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let err = store
+            .create_publication(preparation.thread.id.as_str(), finish.review.id.as_str())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::PublicationBlockedSecretRisk { finding_count } if finding_count >= 1
+        ));
+        let findings = store
+            .list_review_risk_findings(finish.review.id.as_str())
+            .unwrap();
+        assert!(findings
+            .iter()
+            .any(|finding| finding.detector == "openai_token" && finding.line == Some(2)));
+    }
+
+    #[test]
+    fn secret_in_added_source_file_still_blocks_publication() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Risky added source".to_owned(), "Add config".to_owned())
+            .unwrap();
+        let secret = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("config.env"),
+            format!("OPENAI_API_KEY={secret}\n"),
+        )
+        .unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "manual check".to_owned(),
+                0,
+                "Added config fixture".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let err = store
+            .create_publication(preparation.thread.id.as_str(), finish.review.id.as_str())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::PublicationBlockedSecretRisk { finding_count } if finding_count >= 1
+        ));
     }
 
     #[test]

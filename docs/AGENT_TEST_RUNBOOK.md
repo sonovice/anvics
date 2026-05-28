@@ -84,8 +84,10 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    Read the packet at:
    <packet-path>
 
-   Follow it exactly. Work only inside the workspace path listed in the packet.
+   Read the Anvics skill path named in the packet, then follow the skill and packet exactly.
+   Work only inside the workspace path listed in the packet.
    Run the packet's agent enter command before editing.
+   Use the packet's workspace diff command instead of Git status or Git diff.
    Run coordination status before finishing and report any potential clashes.
    Do not create a Git branch, Git worktree, or Git commit.
    When done, tell me a short command label, its exit code, a one-sentence summary, and optionally a command/evidence file path.
@@ -179,6 +181,7 @@ After the actual run, copy `docs/trials/0002-anvics-dogfood-template.md` to `doc
 ## What To Check
 
 - The agent edited only the workspace path.
+- The agent used Anvics `workspace diff` rather than Git status or Git diff inside the workspace.
 - No Git branch, worktree, or commit was needed.
 - Evidence is a short summary, not a transcript dump.
 - Secret-like values are not copied into evidence summaries or review notes.

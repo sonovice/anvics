@@ -1,4 +1,7 @@
-use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat};
+use anvics_api::{
+    ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat,
+    WorkspaceDiffFormat as ApiWorkspaceDiffFormat,
+};
 use anvics_store::{
     AnvicsStore, CommandEvidenceInput, CommandRunInput, PublicationOptions, StoreError,
 };
@@ -125,6 +128,11 @@ enum WorkspaceCommand {
     Show {
         id: String,
     },
+    Diff {
+        id: String,
+        #[arg(long, value_enum, default_value_t = WorkspaceDiffFormat::Summary)]
+        format: WorkspaceDiffFormat,
+    },
     Snapshot {
         id: String,
         #[arg(short, long)]
@@ -240,6 +248,21 @@ enum RiskCommand {
 enum ReviewFormat {
     Json,
     Markdown,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum WorkspaceDiffFormat {
+    Summary,
+    Patch,
+}
+
+impl From<WorkspaceDiffFormat> for ApiWorkspaceDiffFormat {
+    fn from(format: WorkspaceDiffFormat) -> Self {
+        match format {
+            WorkspaceDiffFormat::Summary => Self::Summary,
+            WorkspaceDiffFormat::Patch => Self::Patch,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -517,6 +540,15 @@ fn main() -> Result<()> {
                 show_workspace_via_daemon(root, socket, id)
             } else {
                 show_workspace(root, &id)
+            }
+        }
+        CliCommand::Workspace {
+            command: WorkspaceCommand::Diff { id, format },
+        } => {
+            if let Some(socket) = daemon {
+                diff_workspace_via_daemon(root, socket, id, format)
+            } else {
+                diff_workspace(root, &id, format)
             }
         }
         CliCommand::Workspace {
@@ -1138,6 +1170,63 @@ fn show_workspace_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Resu
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn diff_workspace(root: PathBuf, workspace_id: &str, format: WorkspaceDiffFormat) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    match format {
+        WorkspaceDiffFormat::Summary => {
+            let changed_paths = store
+                .workspace_diff(workspace_id)
+                .with_context(|| format!("failed to diff workspace {workspace_id}"))?;
+            print_workspace_diff_summary(&changed_paths);
+        }
+        WorkspaceDiffFormat::Patch => {
+            let patch = store
+                .workspace_diff_patch(workspace_id)
+                .with_context(|| format!("failed to render workspace patch {workspace_id}"))?;
+            print!("{patch}");
+        }
+    }
+    Ok(())
+}
+
+fn diff_workspace_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    id: String,
+    format: WorkspaceDiffFormat,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::WorkspaceDiff {
+            id,
+            format: format.clone().into(),
+        },
+    )? {
+        ApiResult::WorkspaceDiff {
+            changed_paths,
+            patch,
+        } => {
+            match format {
+                WorkspaceDiffFormat::Summary => print_workspace_diff_summary(&changed_paths),
+                WorkspaceDiffFormat::Patch => print!("{}", patch.unwrap_or_default()),
+            }
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_workspace_diff_summary(changed_paths: &[anvics_core::ChangedPath]) {
+    if changed_paths.is_empty() {
+        println!("No workspace changes");
+        return;
+    }
+    for path in changed_paths {
+        println!("{:?}: {}", path.status, path.path);
     }
 }
 

@@ -42,6 +42,10 @@ pub enum ApiMethod {
     WorkspaceShow {
         id: String,
     },
+    WorkspaceDiff {
+        id: String,
+        format: WorkspaceDiffFormat,
+    },
     WorkspaceSnapshot {
         id: String,
         message: Option<String>,
@@ -178,6 +182,13 @@ pub enum ReviewFormat {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDiffFormat {
+    Summary,
+    Patch,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ApiResponse {
     pub id: u64,
     pub version: u32,
@@ -238,6 +249,10 @@ pub enum ApiResult {
     WorkspaceShow {
         workspace: Box<WorkspaceView>,
         changed_paths: Option<Vec<ChangedPath>>,
+    },
+    WorkspaceDiff {
+        changed_paths: Vec<ChangedPath>,
+        patch: Option<String>,
     },
     WorkspaceSnapshot {
         workspace: Box<WorkspaceView>,
@@ -345,6 +360,10 @@ mod tests {
             },
             ApiMethod::WorkspaceShow {
                 id: "workspace-1".to_owned(),
+            },
+            ApiMethod::WorkspaceDiff {
+                id: "workspace-1".to_owned(),
+                format: WorkspaceDiffFormat::Patch,
             },
             ApiMethod::WorkspaceSnapshot {
                 id: "workspace-1".to_owned(),
@@ -689,6 +708,13 @@ mod tests {
                     path: "app.txt".to_owned(),
                     status: ChangeStatus::Modified,
                 }]),
+            },
+            ApiResult::WorkspaceDiff {
+                changed_paths: vec![ChangedPath {
+                    path: "app.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                }],
+                patch: Some("diff --git a/app.txt b/app.txt\n".to_owned()),
             },
             ApiResult::WorkspaceSnapshot {
                 workspace: Box::new(workspace.clone()),
