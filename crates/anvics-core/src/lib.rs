@@ -164,6 +164,25 @@ pub struct WorkspaceView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceOverlay {
+    pub workspace_id: WorkspaceViewId,
+    pub base_snapshot: SourceSnapshotId,
+    pub snapshot: SourceSnapshotId,
+    pub entries: Vec<OverlayEntry>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct OverlayEntry {
+    pub path: String,
+    pub status: ChangeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EvidenceRecord {
     pub id: EvidenceRecordId,
     pub thread_id: WorkThreadId,
@@ -309,6 +328,18 @@ mod tests {
             latest_snapshot: Some(final_snapshot.clone()),
             created_at: "2026-05-28T00:00:01Z".to_owned(),
         };
+        let overlay = WorkspaceOverlay {
+            workspace_id: workspace.id.clone(),
+            base_snapshot: base_snapshot.clone(),
+            snapshot: final_snapshot.clone(),
+            entries: vec![OverlayEntry {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+                object: Some(ObjectId::new("a".repeat(64)).unwrap()),
+                size: Some(12),
+            }],
+            created_at: "2026-05-28T00:00:01Z".to_owned(),
+        };
         let evidence = EvidenceRecord {
             id: evidence_id.clone(),
             thread_id: thread_id.clone(),
@@ -367,6 +398,11 @@ mod tests {
             serde_json::from_str::<WorkspaceView>(&serde_json::to_string(&workspace).unwrap())
                 .unwrap(),
             workspace
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkspaceOverlay>(&serde_json::to_string(&overlay).unwrap())
+                .unwrap(),
+            overlay
         );
         assert_eq!(
             serde_json::from_str::<EvidenceRecord>(&serde_json::to_string(&evidence).unwrap())

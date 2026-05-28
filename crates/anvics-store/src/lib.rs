@@ -1,9 +1,9 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentStatus, ChangeStatus, ChangedPath,
     EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
-    ObjectId, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
+    ObjectId, OverlayEntry, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
     SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId,
-    WorkThreadStatus, WorkspaceView, WorkspaceViewId,
+    WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -264,9 +264,19 @@ impl AnvicsStore {
         let mut workspace = self.show_workspace(id)?;
         let snapshot =
             self.create_snapshot_from_path(&workspace.materialized_path, message, false)?;
-        workspace.latest_snapshot = Some(snapshot.id);
+        let overlay = self.build_workspace_overlay(&workspace, &snapshot)?;
+        workspace.latest_snapshot = Some(snapshot.id.clone());
+        self.write_workspace_overlay(&overlay)?;
         write_json_pretty(self.workspace_path(id), &workspace)?;
         Ok(workspace)
+    }
+
+    pub fn workspace_overlay(&self, id: &str) -> Result<Option<WorkspaceOverlay>> {
+        let path = self.workspace_overlay_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(read_json(path)?))
     }
 
     pub fn attach_evidence(
@@ -322,10 +332,18 @@ impl AnvicsStore {
 
     pub fn create_review(&self, thread_id: &str) -> Result<ReviewProjection> {
         let thread = self.show_thread(thread_id)?;
-        let final_snapshot = self
-            .latest_thread_snapshot(&thread.id)?
+        let workspace = self
+            .latest_thread_workspace(&thread.id)?
             .ok_or_else(|| StoreError::MissingWorkspaceSnapshot(thread.id.to_string()))?;
-        let changed_paths = self.diff_snapshots(&thread.base_snapshot, &final_snapshot)?;
+        let final_snapshot = workspace
+            .latest_snapshot
+            .clone()
+            .ok_or_else(|| StoreError::MissingWorkspaceSnapshot(thread.id.to_string()))?;
+        let changed_paths = if let Some(paths) = self.overlay_changed_paths(&workspace)? {
+            paths
+        } else {
+            self.diff_snapshots(&thread.base_snapshot, &final_snapshot)?
+        };
         let evidence = self.thread_evidence(&thread.id)?;
         let overlap_notes = self.overlap_notes(&thread, &changed_paths)?;
 
@@ -586,6 +604,30 @@ impl AnvicsStore {
         self.restore_tree(&snapshot.root_tree, target)
     }
 
+    pub fn restore_workspace_from_overlay(
+        &self,
+        workspace_id: &str,
+        target: impl AsRef<Path>,
+    ) -> Result<()> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let target = target.as_ref();
+        if target.exists() {
+            fs::remove_dir_all(target)?;
+        }
+        fs::create_dir_all(target)?;
+
+        if let Some(overlay) = self.workspace_overlay(workspace_id)? {
+            self.restore_snapshot_to_path(overlay.base_snapshot.as_str(), target)?;
+            self.apply_overlay_to_path(&overlay, target)?;
+        } else if let Some(snapshot) = workspace.latest_snapshot {
+            self.restore_snapshot_to_path(snapshot.as_str(), target)?;
+        } else {
+            self.restore_snapshot_to_path(workspace.base_snapshot.as_str(), target)?;
+        }
+
+        Ok(())
+    }
+
     pub fn diff_snapshots(
         &self,
         base: &SourceSnapshotId,
@@ -676,6 +718,13 @@ impl AnvicsStore {
         self.anvics_dir.join("workspaces").join(id).join("files")
     }
 
+    fn workspace_overlay_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir
+            .join("workspaces")
+            .join(id)
+            .join("overlay.json")
+    }
+
     fn evidence_path(&self, id: &str) -> PathBuf {
         self.anvics_dir.join("evidence").join(format!("{id}.json"))
     }
@@ -743,6 +792,86 @@ impl AnvicsStore {
         Ok(files)
     }
 
+    fn build_workspace_overlay(
+        &self,
+        workspace: &WorkspaceView,
+        snapshot: &SourceSnapshot,
+    ) -> Result<WorkspaceOverlay> {
+        let base_files = self.snapshot_file_map(&workspace.base_snapshot)?;
+        let final_files = self.flatten_tree(&snapshot.root_tree, "")?;
+        let entries = diff_file_maps(&base_files, &final_files)
+            .into_iter()
+            .map(|changed| {
+                let object = final_files.get(&changed.path).cloned();
+                let size = object
+                    .as_ref()
+                    .map(|object| self.read_object(object).map(|bytes| bytes.len() as u64))
+                    .transpose()?;
+                Ok(OverlayEntry {
+                    path: changed.path,
+                    status: changed.status,
+                    object,
+                    size,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(WorkspaceOverlay {
+            workspace_id: workspace.id.clone(),
+            base_snapshot: workspace.base_snapshot.clone(),
+            snapshot: snapshot.id.clone(),
+            entries,
+            created_at: now_rfc3339()?,
+        })
+    }
+
+    fn write_workspace_overlay(&self, overlay: &WorkspaceOverlay) -> Result<()> {
+        let path = self.workspace_overlay_path(overlay.workspace_id.as_str());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_json_pretty(path, overlay)
+    }
+
+    fn apply_overlay_to_path(&self, overlay: &WorkspaceOverlay, target: &Path) -> Result<()> {
+        for entry in &overlay.entries {
+            let path = target.join(&entry.path);
+            match entry.status {
+                ChangeStatus::Added | ChangeStatus::Modified => {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let Some(object) = &entry.object else {
+                        continue;
+                    };
+                    fs::write(path, self.read_object(object)?)?;
+                }
+                ChangeStatus::Deleted => {
+                    if path.exists() {
+                        fs::remove_file(path)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn overlay_changed_paths(&self, workspace: &WorkspaceView) -> Result<Option<Vec<ChangedPath>>> {
+        let Some(overlay) = self.workspace_overlay(workspace.id.as_str())? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            overlay
+                .entries
+                .into_iter()
+                .map(|entry| ChangedPath {
+                    path: entry.path,
+                    status: entry.status,
+                })
+                .collect(),
+        ))
+    }
+
     fn snapshot_file_map(
         &self,
         snapshot_id: &SourceSnapshotId,
@@ -761,13 +890,12 @@ impl AnvicsStore {
         Ok(workspaces)
     }
 
-    fn latest_thread_snapshot(&self, thread_id: &WorkThreadId) -> Result<Option<SourceSnapshotId>> {
+    fn latest_thread_workspace(&self, thread_id: &WorkThreadId) -> Result<Option<WorkspaceView>> {
         Ok(self
             .list_workspaces()?
             .into_iter()
             .filter(|workspace| &workspace.thread_id == thread_id)
-            .filter_map(|workspace| workspace.latest_snapshot)
-            .next_back())
+            .rfind(|workspace| workspace.latest_snapshot.is_some()))
     }
 
     fn thread_evidence(&self, thread_id: &WorkThreadId) -> Result<Vec<EvidenceSummary>> {
@@ -834,10 +962,18 @@ impl AnvicsStore {
             if other.id == thread.id || other.base_snapshot != thread.base_snapshot {
                 continue;
             }
-            let Some(other_final) = self.latest_thread_snapshot(&other.id)? else {
+            let Some(other_workspace) = self.latest_thread_workspace(&other.id)? else {
                 continue;
             };
-            let other_changed = self.diff_snapshots(&other.base_snapshot, &other_final)?;
+            let other_final = other_workspace
+                .latest_snapshot
+                .clone()
+                .ok_or_else(|| StoreError::MissingWorkspaceSnapshot(other.id.to_string()))?;
+            let other_changed = if let Some(paths) = self.overlay_changed_paths(&other_workspace)? {
+                paths
+            } else {
+                self.diff_snapshots(&other.base_snapshot, &other_final)?
+            };
             let overlap: Vec<String> = other_changed
                 .into_iter()
                 .filter(|path| changed.contains(path.path.as_str()))
@@ -1356,6 +1492,88 @@ mod tests {
             path: "deleted.txt".to_owned(),
             status: ChangeStatus::Deleted,
         }));
+    }
+
+    #[test]
+    fn workspace_snapshot_writes_overlay_manifest() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "remove\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Overlay".to_owned(), "Change files".to_owned())
+            .unwrap();
+        let workspace = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace.join("modified.txt"), "after\n").unwrap();
+        fs::remove_file(workspace.join("deleted.txt")).unwrap();
+        fs::write(workspace.join("added.txt"), "new\n").unwrap();
+
+        let workspace = store
+            .workspace_snapshot(preparation.workspace.id.as_str(), Some("result".to_owned()))
+            .unwrap();
+        let overlay = store
+            .workspace_overlay(preparation.workspace.id.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(overlay.workspace_id, workspace.id);
+        assert_eq!(overlay.base_snapshot, preparation.thread.base_snapshot);
+        assert_eq!(overlay.snapshot, workspace.latest_snapshot.unwrap());
+        assert_eq!(
+            overlay
+                .entries
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.status.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("added.txt".to_owned(), ChangeStatus::Added),
+                ("deleted.txt".to_owned(), ChangeStatus::Deleted),
+                ("modified.txt".to_owned(), ChangeStatus::Modified),
+            ]
+        );
+        assert!(overlay.entries.iter().any(|entry| {
+            entry.path == "added.txt" && entry.object.is_some() && entry.size == Some(4)
+        }));
+        assert!(overlay.entries.iter().any(|entry| {
+            entry.path == "deleted.txt" && entry.object.is_none() && entry.size.is_none()
+        }));
+    }
+
+    #[test]
+    fn restore_workspace_from_overlay_recreates_composed_files() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("modified.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "remove\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Overlay restore".to_owned(), "Change files".to_owned())
+            .unwrap();
+        let workspace = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace.join("modified.txt"), "after\n").unwrap();
+        fs::remove_file(workspace.join("deleted.txt")).unwrap();
+        fs::write(workspace.join("added.txt"), "new\n").unwrap();
+        store
+            .workspace_snapshot(preparation.workspace.id.as_str(), Some("result".to_owned()))
+            .unwrap();
+        let restored = dir.path().join("restored");
+
+        store
+            .restore_workspace_from_overlay(preparation.workspace.id.as_str(), &restored)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(restored.join("modified.txt")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            fs::read_to_string(restored.join("added.txt")).unwrap(),
+            "new\n"
+        );
+        assert!(!restored.join("deleted.txt").exists());
     }
 
     #[test]
