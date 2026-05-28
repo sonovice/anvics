@@ -16,7 +16,7 @@ Use Anvics as the source-control interface. Treat the filesystem as a compatibil
 5. Edit through Anvics APIs when available, or through the workspace path when tools need files.
 6. Run `coordination status` before finishing.
 7. Create a new `snapshot` at meaningful checkpoints.
-8. Attach compact `evidence`.
+8. Prefer Anvics-run verification when possible; attach compact `evidence`.
 9. Request `review` when the work is ready.
 10. `publish` after acceptance; export to Git only when a legacy system needs it.
 
@@ -41,6 +41,7 @@ Every write belongs to the current thread and workspace.
 - If the base is stale, refresh or fork the workspace instead of forcing the edit.
 - If another thread touches the same path or hunk, record the overlap before continuing.
 - Before finishing, run `coordination status` and summarize any potential clashes in evidence or review notes.
+- Prefer `agent accept --run-label ... --run-summary ... -- <program> [args...]` when the operator asks for verification, so Anvics records command provenance and artifacts itself.
 
 Do not use commits as scratchpad history. Keep failed or abandoned attempts attached to the thread as summarized evidence.
 
@@ -48,6 +49,7 @@ Do not use commits as scratchpad history. Keep failed or abandoned attempts atta
 
 Attach enough evidence for review, but keep it compact.
 
+- Prefer Anvics-run command evidence over self-reported command evidence.
 - Record command name, exit status, duration, and a short result summary.
 - Store raw logs, screenshots, traces, and reports as artifacts or references.
 - Quote only key excerpts that explain a failure, risk, or verification result.

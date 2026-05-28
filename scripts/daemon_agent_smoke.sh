@@ -42,25 +42,22 @@ anvics agent enter --workspace "$workspace" --name "daemon-smoke-agent"
 printf 'after\n' > "$workspace_path/modified.txt"
 rm "$workspace_path/deleted.txt"
 printf 'new\n' > "$workspace_path/added.txt"
-command_file="$target_repo/verify-command.txt"
-printf 'cat modified.txt\ncat added.txt\n' > "$command_file"
 anvics coordination status --workspace "$workspace"
 
 accept_output="$(
   anvics agent accept \
     --workspace "$workspace" \
-    --command-file "$command_file" \
-    --label "daemon-smoke-verify" \
-    --exit-code 0 \
-    --summary "Daemon smoke modified, deleted, and added files." \
-    --output "$target_repo/accepted.patch"
+    --run-label "daemon-smoke-verify" \
+    --run-summary "Daemon smoke modified, deleted, and added files." \
+    --output "$target_repo/accepted.patch" \
+    -- sh -c "cat modified.txt && cat added.txt"
 )"
 printf '%s\n' "$accept_output"
 review="$(printf '%s\n' "$accept_output" | sed -n 's/^review: //p')"
 
 anvics review show "$review" --format markdown
 anvics agent status --thread "$thread"
-anvics events list --since 0
+anvics events list --since 0 | grep -E 'CommandStarted|CommandFinished|LegacyPatchExported'
 
 clean_repo="$(mktemp -d)"
 printf 'before\n' > "$clean_repo/modified.txt"

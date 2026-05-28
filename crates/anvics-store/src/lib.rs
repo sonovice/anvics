@@ -1,23 +1,27 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
-    AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CoordinationStatus, EvidenceRecord,
-    EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId, ObjectId,
-    OverlayEntry, RelatedWork, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
-    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, SourceSnapshot,
-    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
-    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
+    CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication,
+    NativePublicationId, ObjectId, OverlayEntry, RelatedWork, RepositoryEvent, RepositoryEventId,
+    RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
+    SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId,
+    WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const ANVICS_DIR: &str = ".anvics";
 const FORMAT_VERSION: u32 = 1;
+const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -37,6 +41,8 @@ pub enum StoreError {
     PublicationNotFound(String),
     #[error("agent session does not exist: {0}")]
     AgentSessionNotFound(String),
+    #[error("command event does not exist: {0}")]
+    CommandEventNotFound(String),
     #[error("agent packet does not exist for thread: {0}")]
     AgentPacketNotFound(String),
     #[error("repository has no current snapshot")]
@@ -49,6 +55,14 @@ pub enum StoreError {
     EmptyEvidenceCommand,
     #[error("agent name must not be empty")]
     EmptyAgentName,
+    #[error("command label must not be empty")]
+    EmptyCommandLabel,
+    #[error("command argv must not be empty")]
+    EmptyCommandArgv,
+    #[error("command cwd must stay inside workspace: {0}")]
+    InvalidCommandCwd(String),
+    #[error("command {id} failed with exit code {exit_code}")]
+    CommandFailed { id: String, exit_code: i32 },
     #[error("review {review_id} does not belong to thread {thread_id}")]
     ReviewThreadMismatch {
         review_id: String,
@@ -77,12 +91,33 @@ pub struct AnvicsStore {
 #[derive(Clone, Debug)]
 pub struct CommandEvidenceInput {
     pub command: String,
+    pub command_event_id: Option<CommandEventId>,
     pub command_label: Option<String>,
     pub command_file: Option<String>,
     pub cwd: Option<String>,
     pub exit_code: i32,
     pub summary: String,
     pub artifact_path: Option<String>,
+    pub stdout_path: Option<String>,
+    pub stderr_path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandRunInput {
+    pub workspace_id: String,
+    pub argv: Vec<String>,
+    pub command_file: Option<String>,
+    pub command_label: String,
+    pub cwd: Option<String>,
+    pub timeout_seconds: Option<u64>,
+    pub summary: String,
+    pub artifact_path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandRunResult {
+    pub command_event: CommandEvent,
+    pub evidence: EvidenceRecord,
 }
 
 impl AnvicsStore {
@@ -105,6 +140,8 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("agent-packets"))?;
         fs::create_dir_all(anvics_dir.join("events"))?;
         fs::create_dir_all(anvics_dir.join("sessions"))?;
+        fs::create_dir_all(anvics_dir.join("command-events"))?;
+        fs::create_dir_all(anvics_dir.join("artifacts/commands"))?;
 
         let manifest = RepositoryManifest {
             id: RepositoryId::new(),
@@ -316,12 +353,15 @@ impl AnvicsStore {
             thread_id,
             CommandEvidenceInput {
                 command,
+                command_event_id: None,
                 command_label: None,
                 command_file: None,
                 cwd: None,
                 exit_code,
                 summary,
                 artifact_path,
+                stdout_path: None,
+                stderr_path: None,
             },
         )
     }
@@ -342,6 +382,7 @@ impl AnvicsStore {
         let evidence = EvidenceRecord {
             id: EvidenceRecordId::new(),
             thread_id: thread.id,
+            command_event_id: input.command_event_id,
             command: input.command,
             command_label: input.command_label,
             command_file: input.command_file,
@@ -349,6 +390,8 @@ impl AnvicsStore {
             exit_code: input.exit_code,
             summary: input.summary,
             artifact_path: input.artifact_path,
+            stdout_path: input.stdout_path,
+            stderr_path: input.stderr_path,
             created_at: now_rfc3339()?,
         };
         write_json_pretty(self.evidence_path(evidence.id.as_str()), &evidence)?;
@@ -357,6 +400,122 @@ impl AnvicsStore {
             Some(evidence.id.to_string()),
         )?;
         Ok(evidence)
+    }
+
+    pub fn run_command(&self, input: CommandRunInput) -> Result<CommandRunResult> {
+        let workspace = self.show_workspace(&input.workspace_id)?;
+        let thread = self.show_thread(workspace.thread_id.as_str())?;
+        let command_label = input.command_label.trim().to_owned();
+        if command_label.is_empty() {
+            return Err(StoreError::EmptyCommandLabel);
+        }
+        if input.summary.trim().is_empty() {
+            return Err(StoreError::EmptyEvidenceSummary);
+        }
+
+        let command_file = input.command_file.clone();
+        let argv = if let Some(path) = &command_file {
+            if !input.argv.is_empty() {
+                return Err(StoreError::EmptyCommandArgv);
+            }
+            vec!["sh".to_owned(), path.clone()]
+        } else {
+            if input.argv.is_empty() || input.argv[0].trim().is_empty() {
+                return Err(StoreError::EmptyCommandArgv);
+            }
+            input.argv.clone()
+        };
+
+        let cwd = self.resolve_workspace_cwd(&workspace, input.cwd.as_deref())?;
+        let cwd_display = cwd.to_string_lossy().to_string();
+        let timeout = Duration::from_secs(
+            input
+                .timeout_seconds
+                .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        );
+        let command_event_id = CommandEventId::new();
+        let artifact_dir = self.command_artifact_dir(command_event_id.as_str());
+        fs::create_dir_all(&artifact_dir)?;
+        let stdout_path = artifact_dir.join("stdout.txt");
+        let stderr_path = artifact_dir.join("stderr.txt");
+        let started_at = now_rfc3339()?;
+        let agent_session_id = self
+            .latest_active_workspace_session(workspace.id.as_str())?
+            .map(|session| session.id);
+
+        let mut command_event = CommandEvent {
+            id: command_event_id.clone(),
+            workspace_id: workspace.id.clone(),
+            thread_id: thread.id.clone(),
+            agent_session_id,
+            command_label: command_label.clone(),
+            argv: argv.clone(),
+            command_file: command_file.clone(),
+            cwd: cwd_display.clone(),
+            exit_code: None,
+            timed_out: false,
+            duration_ms: 0,
+            summary: input.summary.clone(),
+            artifact_path: input.artifact_path.clone(),
+            stdout_path: Some(stdout_path.to_string_lossy().to_string()),
+            stderr_path: Some(stderr_path.to_string_lossy().to_string()),
+            started_at,
+            finished_at: None,
+        };
+        write_json_pretty(
+            self.command_event_path(command_event.id.as_str()),
+            &command_event,
+        )?;
+        self.append_event(
+            RepositoryEventKind::CommandStarted,
+            Some(command_event.id.to_string()),
+        )?;
+
+        let started = Instant::now();
+        let execution = execute_local_command(&argv, &cwd, timeout)?;
+        command_event.exit_code = Some(execution.exit_code);
+        command_event.timed_out = execution.timed_out;
+        command_event.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        command_event.finished_at = Some(now_rfc3339()?);
+        fs::write(&stdout_path, execution.stdout)?;
+        fs::write(&stderr_path, execution.stderr)?;
+        write_json_pretty(
+            self.command_event_path(command_event.id.as_str()),
+            &command_event,
+        )?;
+        self.append_event(
+            RepositoryEventKind::CommandFinished,
+            Some(command_event.id.to_string()),
+        )?;
+
+        let evidence = self.attach_command_evidence(
+            thread.id.as_str(),
+            CommandEvidenceInput {
+                command: shell_join(&argv),
+                command_event_id: Some(command_event.id.clone()),
+                command_label: Some(command_label),
+                command_file,
+                cwd: Some(cwd_display),
+                exit_code: execution.exit_code,
+                summary: input.summary,
+                artifact_path: input.artifact_path,
+                stdout_path: command_event.stdout_path.clone(),
+                stderr_path: command_event.stderr_path.clone(),
+            },
+        )?;
+
+        Ok(CommandRunResult {
+            command_event,
+            evidence,
+        })
+    }
+
+    pub fn show_command_event(&self, id: &str) -> Result<CommandEvent> {
+        let path = self.command_event_path(id);
+        if !path.exists() {
+            return Err(StoreError::CommandEventNotFound(id.to_owned()));
+        }
+        read_json(path)
     }
 
     pub fn create_review(&self, thread_id: &str) -> Result<ReviewProjection> {
@@ -478,12 +637,15 @@ impl AnvicsStore {
             workspace_id,
             CommandEvidenceInput {
                 command,
+                command_event_id: None,
                 command_label: None,
                 command_file: None,
                 cwd: None,
                 exit_code,
                 summary,
                 artifact_path,
+                stdout_path: None,
+                stderr_path: None,
             },
         )
     }
@@ -496,6 +658,14 @@ impl AnvicsStore {
         let workspace = self.show_workspace(workspace_id)?;
         let evidence =
             self.attach_command_evidence(workspace.thread_id.as_str(), evidence_input)?;
+        self.finish_agent_with_existing_evidence(workspace_id, evidence)
+    }
+
+    fn finish_agent_with_existing_evidence(
+        &self,
+        workspace_id: &str,
+        evidence: EvidenceRecord,
+    ) -> Result<AgentFinish> {
         let workspace =
             self.workspace_snapshot(workspace_id, Some("agent finish result".to_owned()))?;
         let review = self.create_review(workspace.thread_id.as_str())?;
@@ -526,12 +696,15 @@ impl AnvicsStore {
             workspace_id,
             CommandEvidenceInput {
                 command,
+                command_event_id: None,
                 command_label: None,
                 command_file: None,
                 cwd: None,
                 exit_code,
                 summary,
                 artifact_path,
+                stdout_path: None,
+                stderr_path: None,
             },
             output_path,
         )
@@ -544,6 +717,38 @@ impl AnvicsStore {
         output_path: Option<PathBuf>,
     ) -> Result<AgentAcceptance> {
         let finish = self.finish_agent_with_evidence(workspace_id, evidence_input)?;
+        let publication = self.create_publication(
+            finish.workspace.thread_id.as_str(),
+            finish.review.id.as_str(),
+        )?;
+        let output = output_path.unwrap_or_else(|| self.root.join("accepted.patch"));
+        let patch_path = self.export_legacy_git_patch(publication.id.as_str(), output)?;
+
+        Ok(AgentAcceptance {
+            evidence: finish.evidence,
+            workspace: finish.workspace,
+            review: finish.review,
+            review_markdown_path: finish.review_markdown_path,
+            publication,
+            patch_path: patch_path.to_string_lossy().to_string(),
+        })
+    }
+
+    pub fn accept_agent_with_command_run(
+        &self,
+        input: CommandRunInput,
+        output_path: Option<PathBuf>,
+    ) -> Result<AgentAcceptance> {
+        let workspace_id = input.workspace_id.clone();
+        let command = self.run_command(input)?;
+        let exit_code = command.command_event.exit_code.unwrap_or(-1);
+        if exit_code != 0 {
+            return Err(StoreError::CommandFailed {
+                id: command.command_event.id.to_string(),
+                exit_code,
+            });
+        }
+        let finish = self.finish_agent_with_existing_evidence(&workspace_id, command.evidence)?;
         let publication = self.create_publication(
             finish.workspace.thread_id.as_str(),
             finish.review.id.as_str(),
@@ -894,6 +1099,16 @@ impl AnvicsStore {
         self.anvics_dir.join("sessions").join(format!("{id}.json"))
     }
 
+    fn command_event_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir
+            .join("command-events")
+            .join(format!("{id}.json"))
+    }
+
+    fn command_artifact_dir(&self, id: &str) -> PathBuf {
+        self.anvics_dir.join("artifacts").join("commands").join(id)
+    }
+
     fn agent_packet_path(&self, thread_id: &str) -> PathBuf {
         self.anvics_dir
             .join("agent-packets")
@@ -906,6 +1121,32 @@ impl AnvicsStore {
         subject_id: Option<String>,
     ) -> Result<RepositoryEvent> {
         append_event_at(&self.anvics_dir, kind, subject_id)
+    }
+
+    fn resolve_workspace_cwd(
+        &self,
+        workspace: &WorkspaceView,
+        cwd: Option<&str>,
+    ) -> Result<PathBuf> {
+        let workspace_root = PathBuf::from(&workspace.materialized_path).canonicalize()?;
+        let candidate = match cwd.filter(|cwd| !cwd.trim().is_empty()) {
+            Some(cwd) => {
+                let path = PathBuf::from(cwd);
+                if path.is_absolute() {
+                    path
+                } else {
+                    workspace_root.join(path)
+                }
+            }
+            None => workspace_root.clone(),
+        };
+        let candidate = candidate.canonicalize()?;
+        if !candidate.starts_with(&workspace_root) {
+            return Err(StoreError::InvalidCommandCwd(
+                candidate.to_string_lossy().to_string(),
+            ));
+        }
+        Ok(candidate)
     }
 
     fn restore_tree(&self, tree_id: &ObjectId, target: &Path) -> Result<()> {
@@ -1247,6 +1488,7 @@ impl AnvicsStore {
             .into_iter()
             .map(|record| EvidenceSummary {
                 id: record.id,
+                command_event_id: record.command_event_id,
                 command: record.command,
                 command_label: record.command_label,
                 command_file: record.command_file,
@@ -1254,6 +1496,8 @@ impl AnvicsStore {
                 exit_code: record.exit_code,
                 summary: record.summary,
                 artifact_path: record.artifact_path,
+                stdout_path: record.stdout_path,
+                stderr_path: record.stderr_path,
             })
             .collect())
     }
@@ -1433,6 +1677,68 @@ fn read_json_dir<T: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> Resu
     Ok(values)
 }
 
+struct LocalCommandOutput {
+    exit_code: i32,
+    timed_out: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn execute_local_command(
+    argv: &[String],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<LocalCommandOutput> {
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    let mut timed_out = false;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            child.kill()?;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let output = child.wait_with_output()?;
+    let exit_code = if timed_out {
+        -1
+    } else {
+        output.status.code().unwrap_or(-1)
+    };
+    Ok(LocalCommandOutput {
+        exit_code,
+        timed_out,
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+fn shell_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|part| {
+            if part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'/' | b'-' | b'_')
+            }) {
+                part.clone()
+            } else {
+                shell_quote(part)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn append_event_at(
     anvics_dir: &Path,
     kind: RepositoryEventKind,
@@ -1548,12 +1854,13 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- When finished, report a concise command label, exit code, short summary, and optional command/evidence file path.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nFor multi-command verification, write the commands to a small file and use `--command-file <path> --label \"<short label>\"` instead of a long inline command.\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- Prefer Anvics-run verification for stronger provenance when the operator accepts the workspace.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent Enter Command\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\nFallback for externally-run verification:\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
         thread.id,
         workspace.id,
         repo_root.display(),
         workspace.materialized_path,
         thread.task,
+        workspace.id,
         workspace.id,
         workspace.id,
         workspace.id,
@@ -1603,7 +1910,7 @@ fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThrea
     markdown.push_str("\n## Next Commands\n\n");
     markdown.push_str("Shortest path for an unaccepted workspace:\n\n");
     markdown.push_str(&format!(
-        "```sh\nanvics --repo {repo} agent accept --workspace <workspace-id> --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n"
+        "```sh\nanvics --repo {repo} agent accept --workspace <workspace-id> --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\n"
     ));
     markdown.push_str("Manual path from this review:\n\n");
     markdown.push_str(&format!(
@@ -1625,6 +1932,9 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
         "`{label}` exited {}: {}",
         evidence.exit_code, evidence.summary
     );
+    if let Some(command_event_id) = &evidence.command_event_id {
+        text.push_str(&format!(" (anvics-run: `{command_event_id}`)"));
+    }
     if let Some(cwd) = evidence.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
         text.push_str(&format!(" (cwd: `{cwd}`)"));
     }
@@ -1641,6 +1951,20 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
         .filter(|path| !path.trim().is_empty())
     {
         text.push_str(&format!(" (artifact: `{artifact}`)"));
+    }
+    if let Some(stdout) = evidence
+        .stdout_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        text.push_str(&format!(" (stdout: `{stdout}`)"));
+    }
+    if let Some(stderr) = evidence
+        .stderr_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        text.push_str(&format!(" (stderr: `{stderr}`)"));
     }
     text
 }
@@ -1748,6 +2072,8 @@ mod tests {
         assert!(dir.path().join(".anvics/agent-packets").exists());
         assert!(dir.path().join(".anvics/events").exists());
         assert!(dir.path().join(".anvics/sessions").exists());
+        assert!(dir.path().join(".anvics/command-events").exists());
+        assert!(dir.path().join(".anvics/artifacts/commands").exists());
         assert_eq!(
             AnvicsStore::open(dir.path())
                 .unwrap()
@@ -2133,6 +2459,111 @@ mod tests {
     }
 
     #[test]
+    fn command_run_records_event_artifacts_and_evidence() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Command run".to_owned(), "Verify app".to_owned())
+            .unwrap();
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["sh".to_owned(), "-c".to_owned(), "cat app.txt".to_owned()],
+                command_file: None,
+                command_label: "verify app".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Read app.txt".to_owned(),
+                artifact_path: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.command_event.exit_code, Some(0));
+        assert_eq!(
+            result.evidence.command_event_id,
+            Some(result.command_event.id.clone())
+        );
+        assert!(result.command_event.stdout_path.is_some());
+        assert_eq!(
+            fs::read_to_string(result.command_event.stdout_path.unwrap()).unwrap(),
+            "base\n"
+        );
+        let event = store
+            .show_command_event(result.command_event.id.as_str())
+            .unwrap();
+        assert_eq!(event.command_label, "verify app");
+        let events = store.events_since(0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::CommandStarted));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::CommandFinished));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::EvidenceAttached));
+    }
+
+    #[test]
+    fn command_run_rejects_cwd_outside_workspace() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Command run".to_owned(), "Verify app".to_owned())
+            .unwrap();
+
+        let err = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["true".to_owned()],
+                command_file: None,
+                command_label: "verify".to_owned(),
+                cwd: Some(dir.path().to_string_lossy().to_string()),
+                timeout_seconds: Some(10),
+                summary: "ok".to_owned(),
+                artifact_path: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::InvalidCommandCwd(_)));
+    }
+
+    #[test]
+    fn command_run_timeout_records_failed_command_event() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Command run".to_owned(), "Verify app".to_owned())
+            .unwrap();
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["sh".to_owned(), "-c".to_owned(), "sleep 2".to_owned()],
+                command_file: None,
+                command_label: "slow".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(0),
+                summary: "Timed out".to_owned(),
+                artifact_path: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.command_event.exit_code, Some(-1));
+        assert!(result.command_event.timed_out);
+    }
+
+    #[test]
     fn review_reports_path_overlap_between_threads() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -2378,5 +2809,83 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, session.id);
         assert_eq!(sessions[0].status, AgentSessionStatus::Finished);
+    }
+
+    #[test]
+    fn agent_accept_with_command_run_publishes_only_on_success() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Accept command run".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "accepted\n",
+        )
+        .unwrap();
+
+        let acceptance = store
+            .accept_agent_with_command_run(
+                CommandRunInput {
+                    workspace_id: preparation.workspace.id.to_string(),
+                    argv: vec![
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        "grep accepted app.txt".to_owned(),
+                    ],
+                    command_file: None,
+                    command_label: "verify accepted".to_owned(),
+                    cwd: None,
+                    timeout_seconds: Some(10),
+                    summary: "Verified accepted app.txt".to_owned(),
+                    artifact_path: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        assert!(acceptance.evidence.command_event_id.is_some());
+        assert_eq!(acceptance.publication.review_id, acceptance.review.id);
+        let markdown = fs::read_to_string(acceptance.review_markdown_path).unwrap();
+        assert!(markdown.contains("anvics-run:"));
+        assert!(markdown.contains("stdout:"));
+        assert!(dir.path().join("accepted.patch").exists());
+    }
+
+    #[test]
+    fn agent_accept_with_failed_command_run_records_evidence_without_publication() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Accept command run".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+
+        let err = store
+            .accept_agent_with_command_run(
+                CommandRunInput {
+                    workspace_id: preparation.workspace.id.to_string(),
+                    argv: vec!["false".to_owned()],
+                    command_file: None,
+                    command_label: "verify failure".to_owned(),
+                    cwd: None,
+                    timeout_seconds: Some(10),
+                    summary: "Verification failed".to_owned(),
+                    artifact_path: None,
+                },
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StoreError::CommandFailed { .. }));
+        let status = store.agent_status(preparation.thread.id.as_str()).unwrap();
+        assert_eq!(status.evidence_count, 1);
+        assert!(status.review_ids.is_empty());
+        assert!(status.publication_ids.is_empty());
     }
 }

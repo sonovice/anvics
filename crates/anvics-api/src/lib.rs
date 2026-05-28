@@ -1,7 +1,7 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, CoordinationStatus,
-    EvidenceRecord, NativePublication, RepositoryEvent, RepositoryManifest, ReviewProjection,
-    SourceSnapshot, WorkThread, WorkspaceView,
+    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, CommandEvent,
+    CoordinationStatus, EvidenceRecord, NativePublication, RepositoryEvent, RepositoryManifest,
+    ReviewProjection, SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,19 @@ pub enum ApiMethod {
         summary: String,
         artifact_path: Option<String>,
     },
+    CommandRun {
+        workspace: String,
+        argv: Vec<String>,
+        command_file: Option<String>,
+        command_label: String,
+        cwd: Option<String>,
+        timeout_seconds: Option<u64>,
+        summary: String,
+        artifact_path: Option<String>,
+    },
+    CommandShow {
+        id: String,
+    },
     ReviewCreate {
         thread: String,
     },
@@ -87,6 +100,17 @@ pub enum ApiMethod {
         command_label: Option<String>,
         cwd: Option<String>,
         exit_code: i32,
+        summary: String,
+        artifact_path: Option<String>,
+        output_path: Option<String>,
+    },
+    AgentAcceptRun {
+        workspace: String,
+        argv: Vec<String>,
+        command_file: Option<String>,
+        command_label: String,
+        cwd: Option<String>,
+        timeout_seconds: Option<u64>,
         summary: String,
         artifact_path: Option<String>,
         output_path: Option<String>,
@@ -198,6 +222,13 @@ pub enum ApiResult {
     EvidenceAttached {
         evidence: EvidenceRecord,
     },
+    CommandRun {
+        command_event: Box<CommandEvent>,
+        evidence: EvidenceRecord,
+    },
+    CommandShow {
+        command_event: Box<CommandEvent>,
+    },
     ReviewCreate {
         review: Box<ReviewProjection>,
     },
@@ -301,6 +332,19 @@ mod tests {
                 summary: "ok".to_owned(),
                 artifact_path: None,
             },
+            ApiMethod::CommandRun {
+                workspace: "workspace-1".to_owned(),
+                argv: vec!["true".to_owned()],
+                command_file: None,
+                command_label: "verify".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(120),
+                summary: "ok".to_owned(),
+                artifact_path: None,
+            },
+            ApiMethod::CommandShow {
+                id: "command-1".to_owned(),
+            },
             ApiMethod::ReviewCreate {
                 thread: "thread-1".to_owned(),
             },
@@ -357,6 +401,17 @@ mod tests {
                 artifact_path: None,
                 output_path: Some("accepted.patch".to_owned()),
             },
+            ApiMethod::AgentAcceptRun {
+                workspace: "workspace-1".to_owned(),
+                argv: vec!["true".to_owned()],
+                command_file: None,
+                command_label: "verify".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(120),
+                summary: "ok".to_owned(),
+                artifact_path: None,
+                output_path: Some("accepted.patch".to_owned()),
+            },
             ApiMethod::LegacyGitExport {
                 publication: "publication-1".to_owned(),
                 output: "accepted.patch".to_owned(),
@@ -388,6 +443,7 @@ mod tests {
         let thread_id = WorkThreadId::new();
         let workspace_id = WorkspaceViewId::new();
         let evidence_id = EvidenceRecordId::new();
+        let command_event_id = CommandEventId::new();
         let review_id = ReviewProjectionId::new();
         let publication_id = NativePublicationId::new();
         let object = ObjectId::new("a".repeat(64)).unwrap();
@@ -421,6 +477,7 @@ mod tests {
         let evidence = EvidenceRecord {
             id: evidence_id.clone(),
             thread_id: thread_id.clone(),
+            command_event_id: Some(command_event_id.clone()),
             command: "true".to_owned(),
             command_label: Some("verify".to_owned()),
             command_file: None,
@@ -428,7 +485,28 @@ mod tests {
             exit_code: 0,
             summary: "ok".to_owned(),
             artifact_path: None,
+            stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
+            stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
             created_at: "2026-05-28T00:00:04Z".to_owned(),
+        };
+        let command_event = CommandEvent {
+            id: command_event_id.clone(),
+            workspace_id: workspace.id.clone(),
+            thread_id: thread_id.clone(),
+            agent_session_id: None,
+            command_label: "verify".to_owned(),
+            argv: vec!["true".to_owned()],
+            command_file: None,
+            cwd: ".anvics/workspaces/example/files".to_owned(),
+            exit_code: Some(0),
+            timed_out: false,
+            duration_ms: 3,
+            summary: "ok".to_owned(),
+            artifact_path: None,
+            stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
+            stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
+            started_at: "2026-05-28T00:00:04Z".to_owned(),
+            finished_at: Some("2026-05-28T00:00:05Z".to_owned()),
         };
         let review = ReviewProjection {
             id: review_id.clone(),
@@ -442,6 +520,7 @@ mod tests {
             overlap_notes: Vec::new(),
             evidence: vec![EvidenceSummary {
                 id: evidence_id,
+                command_event_id: Some(command_event_id),
                 command: "true".to_owned(),
                 command_label: Some("verify".to_owned()),
                 command_file: None,
@@ -449,6 +528,8 @@ mod tests {
                 exit_code: 0,
                 summary: "ok".to_owned(),
                 artifact_path: None,
+                stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
+                stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
             }],
             created_at: "2026-05-28T00:00:05Z".to_owned(),
         };
@@ -538,6 +619,13 @@ mod tests {
             },
             ApiResult::EvidenceAttached {
                 evidence: evidence.clone(),
+            },
+            ApiResult::CommandRun {
+                command_event: Box::new(command_event.clone()),
+                evidence: evidence.clone(),
+            },
+            ApiResult::CommandShow {
+                command_event: Box::new(command_event.clone()),
             },
             ApiResult::ReviewCreate {
                 review: Box::new(review.clone()),

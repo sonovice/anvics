@@ -1,5 +1,5 @@
 use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat};
-use anvics_store::{AnvicsStore, CommandEvidenceInput, StoreError};
+use anvics_store::{AnvicsStore, CommandEvidenceInput, CommandRunInput, StoreError};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::{
@@ -183,6 +183,37 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             let evidence = AnvicsStore::open(&repo)?.attach_command_evidence(&thread, input)?;
             Ok(ApiResult::EvidenceAttached { evidence })
         }
+        ApiMethod::CommandRun {
+            workspace,
+            argv,
+            command_file,
+            command_label,
+            cwd,
+            timeout_seconds,
+            summary,
+            artifact_path,
+        } => {
+            let result = AnvicsStore::open(&repo)?.run_command(CommandRunInput {
+                workspace_id: workspace,
+                argv,
+                command_file,
+                command_label,
+                cwd,
+                timeout_seconds,
+                summary,
+                artifact_path,
+            })?;
+            Ok(ApiResult::CommandRun {
+                command_event: Box::new(result.command_event),
+                evidence: result.evidence,
+            })
+        }
+        ApiMethod::CommandShow { id } => {
+            let command_event = AnvicsStore::open(&repo)?.show_command_event(&id)?;
+            Ok(ApiResult::CommandShow {
+                command_event: Box::new(command_event),
+            })
+        }
         ApiMethod::ReviewCreate { thread } => {
             let review = AnvicsStore::open(&repo)?.create_review(&thread)?;
             Ok(ApiResult::ReviewCreate {
@@ -276,6 +307,34 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 acceptance: Box::new(acceptance),
             })
         }
+        ApiMethod::AgentAcceptRun {
+            workspace,
+            argv,
+            command_file,
+            command_label,
+            cwd,
+            timeout_seconds,
+            summary,
+            artifact_path,
+            output_path,
+        } => {
+            let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_command_run(
+                CommandRunInput {
+                    workspace_id: workspace,
+                    argv,
+                    command_file,
+                    command_label,
+                    cwd,
+                    timeout_seconds,
+                    summary,
+                    artifact_path,
+                },
+                output_path.map(PathBuf::from),
+            )?;
+            Ok(ApiResult::AgentAccept {
+                acceptance: Box::new(acceptance),
+            })
+        }
         ApiMethod::ReviewShow { id, format } => match format {
             ReviewFormat::Json => {
                 let review = AnvicsStore::open(&repo)?.show_review(&id)?;
@@ -339,11 +398,14 @@ fn command_input(
     };
     Ok(CommandEvidenceInput {
         command: command_text,
+        command_event_id: None,
         command_label,
         command_file,
         cwd,
         exit_code,
         summary,
         artifact_path,
+        stdout_path: None,
+        stderr_path: None,
     })
 }

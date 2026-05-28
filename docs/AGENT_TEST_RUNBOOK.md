@@ -11,6 +11,7 @@ scripts/agent_smoke.sh
 scripts/live_agent_packet_smoke.sh
 scripts/daemon_agent_smoke.sh
 scripts/coordination_smoke.sh
+scripts/command_worker_smoke.sh
 scripts/live_agent_trial_prepare.sh
 ```
 
@@ -23,6 +24,8 @@ scripts/live_agent_trial_prepare.sh
 `daemon_agent_smoke.sh` runs the same accept/export loop through `anvicsd` with `--use-daemon`, proving the local socket API can drive the MVP flow.
 
 `coordination_smoke.sh` prepares two agent workspaces, enters both sessions, records one known change, and shows the other agent the related active work before it edits.
+
+`command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
 
 ## Daemon Check
 
@@ -83,6 +86,17 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    ```
 
 5. Accept the agent task from the Anvics repo, using the printed workspace id:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent accept \
+     --workspace "<workspace-id>" \
+     --run-label "verify live agent result" \
+     --run-summary "Anvics verified the live-agent workspace before accepting." \
+     --output "$target_repo/accepted.patch" \
+     -- sh -c "cat app.txt"
+   ```
+
+   If Anvics cannot run the verification command, fall back to externally-reported evidence:
 
    ```sh
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent accept \

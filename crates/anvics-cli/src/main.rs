@@ -1,5 +1,5 @@
 use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat};
-use anvics_store::{AnvicsStore, CommandEvidenceInput, StoreError};
+use anvics_store::{AnvicsStore, CommandEvidenceInput, CommandRunInput, StoreError};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
@@ -19,11 +19,11 @@ struct Cli {
     use_daemon: bool,
 
     #[command(subcommand)]
-    command: Command,
+    command: CliCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+enum CliCommand {
     Repo {
         #[command(subcommand)]
         command: RepoCommand,
@@ -43,6 +43,10 @@ enum Command {
     Evidence {
         #[command(subcommand)]
         command: EvidenceCommand,
+    },
+    Command {
+        #[command(subcommand)]
+        command: CommandRunCommand,
     },
     Review {
         #[command(subcommand)]
@@ -154,6 +158,31 @@ enum EvidenceCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum CommandRunCommand {
+    Run {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(long)]
+        artifact: Option<String>,
+        #[arg(long)]
+        command_file: Option<PathBuf>,
+        #[arg(last = true)]
+        argv: Vec<String>,
+    },
+    Show {
+        id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ReviewCommand {
     Create {
         #[arg(long)]
@@ -247,13 +276,21 @@ enum AgentCommand {
         #[arg(long)]
         cwd: Option<String>,
         #[arg(long)]
-        exit_code: i32,
+        exit_code: Option<i32>,
         #[arg(long)]
-        summary: String,
+        summary: Option<String>,
         #[arg(long)]
         artifact: Option<String>,
         #[arg(long)]
+        run_label: Option<String>,
+        #[arg(long)]
+        run_summary: Option<String>,
+        #[arg(long)]
+        run_timeout_seconds: Option<u64>,
+        #[arg(long)]
         output: Option<PathBuf>,
+        #[arg(last = true)]
+        argv: Vec<String>,
     },
 }
 
@@ -310,6 +347,33 @@ struct CommandEvidenceOptions {
     artifact: Option<String>,
 }
 
+#[derive(Debug)]
+struct CommandRunOptions {
+    workspace: String,
+    argv: Vec<String>,
+    command_file: Option<PathBuf>,
+    label: String,
+    cwd: Option<String>,
+    timeout_seconds: Option<u64>,
+    summary: String,
+    artifact: Option<String>,
+}
+
+#[derive(Debug)]
+struct AgentAcceptOptions {
+    command: Option<String>,
+    command_file: Option<PathBuf>,
+    label: Option<String>,
+    cwd: Option<String>,
+    exit_code: Option<i32>,
+    summary: Option<String>,
+    artifact: Option<String>,
+    run_label: Option<String>,
+    run_summary: Option<String>,
+    run_timeout_seconds: Option<u64>,
+    argv: Vec<String>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.repo.unwrap_or(std::env::current_dir()?);
@@ -320,7 +384,7 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Repo {
+        CliCommand::Repo {
             command: RepoCommand::Init,
         } => {
             if let Some(socket) = daemon {
@@ -329,7 +393,7 @@ fn main() -> Result<()> {
                 init_repo(root)
             }
         }
-        Command::Repo {
+        CliCommand::Repo {
             command: RepoCommand::Status,
         } => {
             if let Some(socket) = daemon {
@@ -338,7 +402,7 @@ fn main() -> Result<()> {
                 repo_status(root)
             }
         }
-        Command::Snapshot {
+        CliCommand::Snapshot {
             command: SnapshotCommand::Create { message },
         } => {
             if let Some(socket) = daemon {
@@ -347,7 +411,7 @@ fn main() -> Result<()> {
                 create_snapshot(root, message)
             }
         }
-        Command::Snapshot {
+        CliCommand::Snapshot {
             command: SnapshotCommand::List,
         } => {
             if let Some(socket) = daemon {
@@ -356,7 +420,7 @@ fn main() -> Result<()> {
                 list_snapshots(root)
             }
         }
-        Command::Snapshot {
+        CliCommand::Snapshot {
             command: SnapshotCommand::Show { id },
         } => {
             if let Some(socket) = daemon {
@@ -365,7 +429,7 @@ fn main() -> Result<()> {
                 show_snapshot(root, &id)
             }
         }
-        Command::Thread {
+        CliCommand::Thread {
             command: ThreadCommand::Create { title, task },
         } => {
             if let Some(socket) = daemon {
@@ -374,7 +438,7 @@ fn main() -> Result<()> {
                 create_thread(root, title, task)
             }
         }
-        Command::Thread {
+        CliCommand::Thread {
             command: ThreadCommand::List,
         } => {
             if let Some(socket) = daemon {
@@ -383,7 +447,7 @@ fn main() -> Result<()> {
                 list_threads(root)
             }
         }
-        Command::Thread {
+        CliCommand::Thread {
             command: ThreadCommand::Show { id },
         } => {
             if let Some(socket) = daemon {
@@ -392,7 +456,7 @@ fn main() -> Result<()> {
                 show_thread(root, &id)
             }
         }
-        Command::Workspace {
+        CliCommand::Workspace {
             command: WorkspaceCommand::Create { thread },
         } => {
             if let Some(socket) = daemon {
@@ -401,7 +465,7 @@ fn main() -> Result<()> {
                 create_workspace(root, &thread)
             }
         }
-        Command::Workspace {
+        CliCommand::Workspace {
             command: WorkspaceCommand::Snapshot { id, message },
         } => {
             if let Some(socket) = daemon {
@@ -410,7 +474,7 @@ fn main() -> Result<()> {
                 snapshot_workspace(root, &id, message)
             }
         }
-        Command::Evidence {
+        CliCommand::Evidence {
             command:
                 EvidenceCommand::Attach {
                     thread,
@@ -428,7 +492,7 @@ fn main() -> Result<()> {
                 attach_evidence(root, &thread, command, exit_code, summary, artifact)
             }
         }
-        Command::Evidence {
+        CliCommand::Evidence {
             command:
                 EvidenceCommand::Command {
                     thread,
@@ -456,7 +520,45 @@ fn main() -> Result<()> {
                 attach_command_evidence(root, &thread, options)
             }
         }
-        Command::Review {
+        CliCommand::Command {
+            command:
+                CommandRunCommand::Run {
+                    workspace,
+                    label,
+                    summary,
+                    cwd,
+                    timeout_seconds,
+                    artifact,
+                    command_file,
+                    argv,
+                },
+        } => {
+            let options = CommandRunOptions {
+                workspace,
+                argv,
+                command_file,
+                label,
+                cwd,
+                timeout_seconds,
+                summary,
+                artifact,
+            };
+            if let Some(socket) = daemon {
+                run_command_via_daemon(root, socket, options)
+            } else {
+                run_command(root, options)
+            }
+        }
+        CliCommand::Command {
+            command: CommandRunCommand::Show { id },
+        } => {
+            if let Some(socket) = daemon {
+                show_command_event_via_daemon(root, socket, id)
+            } else {
+                show_command_event(root, &id)
+            }
+        }
+        CliCommand::Review {
             command: ReviewCommand::Create { thread },
         } => {
             if let Some(socket) = daemon {
@@ -465,7 +567,7 @@ fn main() -> Result<()> {
                 create_review(root, &thread)
             }
         }
-        Command::Review {
+        CliCommand::Review {
             command: ReviewCommand::Show { id, format },
         } => {
             if let Some(socket) = daemon {
@@ -474,7 +576,7 @@ fn main() -> Result<()> {
                 show_review(root, &id, format)
             }
         }
-        Command::Review {
+        CliCommand::Review {
             command: ReviewCommand::Path { id },
         } => {
             if let Some(socket) = daemon {
@@ -483,7 +585,7 @@ fn main() -> Result<()> {
                 show_review_path(root, &id)
             }
         }
-        Command::Publish {
+        CliCommand::Publish {
             command: PublishCommand::Create { thread, review },
         } => {
             if let Some(socket) = daemon {
@@ -492,7 +594,7 @@ fn main() -> Result<()> {
                 create_publication(root, &thread, &review)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command: AgentCommand::Prepare { title, task },
         } => {
             if let Some(socket) = daemon {
@@ -501,7 +603,7 @@ fn main() -> Result<()> {
                 prepare_agent(root, title, task)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command: AgentCommand::Enter { workspace, name },
         } => {
             if let Some(socket) = daemon {
@@ -510,7 +612,7 @@ fn main() -> Result<()> {
                 enter_agent(root, &workspace, name)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command: AgentCommand::Leave { session },
         } => {
             if let Some(socket) = daemon {
@@ -519,7 +621,7 @@ fn main() -> Result<()> {
                 leave_agent(root, &session)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command: AgentCommand::Sessions { thread, workspace },
         } => {
             if let Some(socket) = daemon {
@@ -528,7 +630,7 @@ fn main() -> Result<()> {
                 list_agent_sessions(root, thread.as_deref(), workspace.as_deref())
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command: AgentCommand::Packet { thread },
         } => {
             if let Some(socket) = daemon {
@@ -537,7 +639,7 @@ fn main() -> Result<()> {
                 show_agent_packet(root, &thread)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command: AgentCommand::Status { thread },
         } => {
             if let Some(socket) = daemon {
@@ -546,7 +648,7 @@ fn main() -> Result<()> {
                 show_agent_status(root, &thread)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command:
                 AgentCommand::Finish {
                     workspace,
@@ -574,7 +676,7 @@ fn main() -> Result<()> {
                 finish_agent(root, &workspace, options)
             }
         }
-        Command::Agent {
+        CliCommand::Agent {
             command:
                 AgentCommand::Accept {
                     workspace,
@@ -585,10 +687,14 @@ fn main() -> Result<()> {
                     exit_code,
                     summary,
                     artifact,
+                    run_label,
+                    run_summary,
+                    run_timeout_seconds,
                     output,
+                    argv,
                 },
         } => {
-            let options = CommandEvidenceOptions {
+            let options = AgentAcceptOptions {
                 command,
                 command_file,
                 label,
@@ -596,6 +702,10 @@ fn main() -> Result<()> {
                 exit_code,
                 summary,
                 artifact,
+                run_label,
+                run_summary,
+                run_timeout_seconds,
+                argv,
             };
             if let Some(socket) = daemon {
                 accept_agent_via_daemon(root, socket, workspace, options, output)
@@ -603,7 +713,7 @@ fn main() -> Result<()> {
                 accept_agent(root, &workspace, options, output)
             }
         }
-        Command::Legacy {
+        CliCommand::Legacy {
             command:
                 LegacyCommand::Git {
                     command:
@@ -619,7 +729,7 @@ fn main() -> Result<()> {
                 export_legacy_git_patch(root, &publication, output)
             }
         }
-        Command::Events {
+        CliCommand::Events {
             command: EventsCommand::List { since },
         } => {
             if let Some(socket) = daemon {
@@ -628,10 +738,10 @@ fn main() -> Result<()> {
                 list_events(root, since)
             }
         }
-        Command::Daemon {
+        CliCommand::Daemon {
             command: DaemonCommand::Ping { socket },
         } => ping_daemon(socket.or(daemon)),
-        Command::Coordination {
+        CliCommand::Coordination {
             command: CoordinationCommand::Status { workspace },
         } => {
             if let Some(socket) = daemon {
@@ -1037,6 +1147,87 @@ fn attach_command_evidence_via_daemon(
     }
 }
 
+fn run_command(root: PathBuf, options: CommandRunOptions) -> Result<()> {
+    let input = command_run_input(options)?;
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let result = store
+        .run_command(input)
+        .context("failed to run command through Anvics")?;
+
+    print_command_run(result.command_event, result.evidence);
+    Ok(())
+}
+
+fn run_command_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    options: CommandRunOptions,
+) -> Result<()> {
+    let input = command_run_input(options)?;
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::CommandRun {
+            workspace: input.workspace_id,
+            argv: input.argv,
+            command_file: input.command_file,
+            command_label: input.command_label,
+            cwd: input.cwd,
+            timeout_seconds: input.timeout_seconds,
+            summary: input.summary,
+            artifact_path: input.artifact_path,
+        },
+    )? {
+        ApiResult::CommandRun {
+            command_event,
+            evidence,
+        } => {
+            print_command_run(*command_event, evidence);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn show_command_event(root: PathBuf, id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let command_event = store
+        .show_command_event(id)
+        .with_context(|| format!("failed to show command event {id}"))?;
+
+    println!("{}", serde_json::to_string_pretty(&command_event)?);
+    Ok(())
+}
+
+fn show_command_event_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::CommandShow { id })? {
+        ApiResult::CommandShow { command_event } => {
+            println!("{}", serde_json::to_string_pretty(&*command_event)?);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_command_run(
+    command_event: anvics_core::CommandEvent,
+    evidence: anvics_core::EvidenceRecord,
+) {
+    println!("Ran command {}", command_event.id);
+    println!("workspace: {}", command_event.workspace_id);
+    println!("thread: {}", command_event.thread_id);
+    println!("label: {}", command_event.command_label);
+    println!("exit_code: {}", command_event.exit_code.unwrap_or(-1));
+    println!("timed_out: {}", command_event.timed_out);
+    println!("evidence: {}", evidence.id);
+    if let Some(stdout) = command_event.stdout_path {
+        println!("stdout: {stdout}");
+    }
+    if let Some(stderr) = command_event.stderr_path {
+        println!("stderr: {stderr}");
+    }
+}
+
 fn create_review(root: PathBuf, thread_id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let review = store
@@ -1207,6 +1398,11 @@ fn print_agent_preparation(root: &std::path::Path, preparation: anvics_core::Age
         preparation.workspace.materialized_path
     );
     println!("packet: {}", preparation.packet_path);
+    println!(
+        "accept_run: anvics --repo {} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]",
+        shell_quote(&display_path(root)),
+        preparation.workspace.id
+    );
     println!(
         "accept: anvics --repo {} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
         shell_quote(&display_path(root)),
@@ -1539,14 +1735,21 @@ fn print_agent_finish(finish: anvics_core::AgentFinish) {
 fn accept_agent(
     root: PathBuf,
     workspace_id: &str,
-    options: CommandEvidenceOptions,
+    options: AgentAcceptOptions,
     output: Option<PathBuf>,
 ) -> Result<()> {
-    let input = command_input(options)?;
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
-    let acceptance = store
-        .accept_agent_with_evidence(workspace_id, input, output)
-        .context("failed to accept agent workspace")?;
+    let acceptance = if options.run_label.is_some() || !options.argv.is_empty() {
+        let input = agent_accept_run_input(workspace_id.to_owned(), options)?;
+        store
+            .accept_agent_with_command_run(input, output)
+            .context("failed to accept agent workspace with command run")?
+    } else {
+        let input = accept_command_input(options)?;
+        store
+            .accept_agent_with_evidence(workspace_id, input, output)
+            .context("failed to accept agent workspace")?
+    };
 
     print_agent_acceptance(acceptance);
     Ok(())
@@ -1556,26 +1759,38 @@ fn accept_agent_via_daemon(
     root: PathBuf,
     socket: PathBuf,
     workspace: String,
-    options: CommandEvidenceOptions,
+    options: AgentAcceptOptions,
     output: Option<PathBuf>,
 ) -> Result<()> {
-    match daemon_request(
-        &socket,
-        root,
+    let method = if options.run_label.is_some() || !options.argv.is_empty() {
+        let input = agent_accept_run_input(workspace, options)?;
+        ApiMethod::AgentAcceptRun {
+            workspace: input.workspace_id,
+            argv: input.argv,
+            command_file: input.command_file,
+            command_label: input.command_label,
+            cwd: input.cwd,
+            timeout_seconds: input.timeout_seconds,
+            summary: input.summary,
+            artifact_path: input.artifact_path,
+            output_path: output.map(|path| path.to_string_lossy().to_string()),
+        }
+    } else {
+        let input = accept_command_input(options)?;
         ApiMethod::AgentAccept {
             workspace,
-            command: options.command,
-            command_file: options
-                .command_file
-                .map(|path| path.to_string_lossy().to_string()),
-            command_label: options.label,
-            cwd: options.cwd,
-            exit_code: options.exit_code,
-            summary: options.summary,
-            artifact_path: options.artifact,
+            command: Some(input.command),
+            command_file: input.command_file,
+            command_label: input.command_label,
+            cwd: input.cwd,
+            exit_code: input.exit_code,
+            summary: input.summary,
+            artifact_path: input.artifact_path,
             output_path: output.map(|path| path.to_string_lossy().to_string()),
-        },
-    )? {
+        }
+    };
+
+    match daemon_request(&socket, root, method)? {
         ApiResult::AgentAccept { acceptance } => {
             print_agent_acceptance(*acceptance);
             Ok(())
@@ -1615,11 +1830,75 @@ fn command_input(options: CommandEvidenceOptions) -> Result<CommandEvidenceInput
 
     Ok(CommandEvidenceInput {
         command: command_text,
+        command_event_id: None,
         command_label: options.label,
         command_file,
         cwd: options.cwd,
         exit_code: options.exit_code,
         summary: options.summary,
+        artifact_path: options.artifact,
+        stdout_path: None,
+        stderr_path: None,
+    })
+}
+
+fn accept_command_input(options: AgentAcceptOptions) -> Result<CommandEvidenceInput> {
+    let exit_code = options
+        .exit_code
+        .ok_or_else(|| anyhow::anyhow!("--exit-code is required unless using --run-label"))?;
+    let summary = options
+        .summary
+        .ok_or_else(|| anyhow::anyhow!("--summary is required unless using --run-summary"))?;
+    command_input(CommandEvidenceOptions {
+        command: options.command,
+        command_file: options.command_file,
+        label: options.label,
+        cwd: options.cwd,
+        exit_code,
+        summary,
+        artifact: options.artifact,
+    })
+}
+
+fn command_run_input(options: CommandRunOptions) -> Result<CommandRunInput> {
+    if options.command_file.is_none() && options.argv.is_empty() {
+        anyhow::bail!("command run requires --command-file or command argv after --");
+    }
+    Ok(CommandRunInput {
+        workspace_id: options.workspace,
+        argv: options.argv,
+        command_file: options
+            .command_file
+            .map(|path| path.to_string_lossy().to_string()),
+        command_label: options.label,
+        cwd: options.cwd,
+        timeout_seconds: options.timeout_seconds,
+        summary: options.summary,
+        artifact_path: options.artifact,
+    })
+}
+
+fn agent_accept_run_input(
+    workspace: String,
+    options: AgentAcceptOptions,
+) -> Result<CommandRunInput> {
+    let label = options
+        .run_label
+        .ok_or_else(|| anyhow::anyhow!("--run-label is required for command-run accept"))?;
+    let summary = options
+        .run_summary
+        .ok_or_else(|| anyhow::anyhow!("--run-summary is required for command-run accept"))?;
+    if options.argv.is_empty() {
+        anyhow::bail!("command-run accept requires command argv after --");
+    }
+    Ok(CommandRunInput {
+        workspace_id: workspace,
+        argv: options.argv,
+        command_file: None,
+        command_label: label,
+        cwd: options.cwd,
+        timeout_seconds: options.run_timeout_seconds,
+        summary,
         artifact_path: options.artifact,
     })
 }

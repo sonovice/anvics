@@ -607,6 +607,229 @@ fn evidence_command_attaches_file_backed_evidence() {
 }
 
 #[test]
+fn command_run_records_artifacts_and_review_evidence() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Command Run",
+            "--task",
+            "Change and verify app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "verified\n").unwrap();
+
+    let command = anvics(
+        dir.path(),
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "verify app",
+            "--summary",
+            "Verified app.txt contents",
+            "--",
+            "sh",
+            "-c",
+            "cat app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Ran command"))
+    .stdout(predicate::str::contains("exit_code: 0"))
+    .stdout(predicate::str::contains("stdout: "))
+    .get_output()
+    .stdout
+    .clone();
+    let command_event = value_after_prefix(&command, "Ran command ");
+    let stdout_path = value_after_prefix(&command, "stdout: ");
+    assert_eq!(fs::read_to_string(stdout_path).unwrap(), "verified\n");
+
+    anvics(dir.path(), &["command", "show", &command_event])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"command_label\": \"verify app\"",
+        ));
+    anvics(
+        dir.path(),
+        &["workspace", "snapshot", &workspace, "--message", "verified"],
+    )
+    .assert()
+    .success();
+    let review_output = anvics(dir.path(), &["review", "create", "--thread", &thread])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = value_after_prefix(&review_output, "Created review ");
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("anvics-run:"))
+    .stdout(predicate::str::contains("stdout:"))
+    .stdout(predicate::str::contains("Verified app.txt contents"));
+}
+
+#[test]
+fn agent_accept_with_command_run_exports_patch_and_failed_run_does_not_publish() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Command Accept",
+            "--task",
+            "Change app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "accepted\n").unwrap();
+    let patch_path = dir.path().join("accepted-command.patch");
+
+    let accept = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "verify accepted",
+            "--run-summary",
+            "Anvics verified app.txt before accepting",
+            "--output",
+            patch_path.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            "grep accepted app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Accepted agent workspace"))
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&accept, "review: ");
+    assert!(patch_path.exists());
+
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("anvics-run:"))
+    .stdout(predicate::str::contains("verify accepted"));
+
+    let clean = tempdir().unwrap();
+    fs::write(clean.path().join("app.txt"), "base\n").unwrap();
+    StdCommand::new("git")
+        .args(["init"])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    let apply = StdCommand::new("git")
+        .args(["apply", patch_path.to_str().unwrap()])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "git apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    let failed_prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Failed Command Accept",
+            "--task",
+            "Try a failing verification",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let failed_thread = value_after_prefix(&failed_prepare, "thread: ");
+    let failed_workspace = value_after_prefix(&failed_prepare, "workspace: ");
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &failed_workspace,
+            "--run-label",
+            "verify failure",
+            "--run-summary",
+            "Verification failed as expected",
+            "--",
+            "false",
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("failed with exit code"));
+    anvics(dir.path(), &["agent", "status", "--thread", &failed_thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence_count: 1"))
+        .stdout(predicate::str::contains("publication_status: unpublished"));
+
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("publication_status: published"));
+}
+
+#[test]
 fn agent_enter_and_coordination_status_report_related_work() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -831,8 +1054,6 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     fs::write(format!("{workspace_path}/modified.txt"), "after\n").unwrap();
     fs::remove_file(format!("{workspace_path}/deleted.txt")).unwrap();
     fs::write(format!("{workspace_path}/added.txt"), "new\n").unwrap();
-    let command_file = dir.path().join("verify.sh");
-    fs::write(&command_file, "cat modified.txt\ncat added.txt\n").unwrap();
     let patch_path = dir.path().join("daemon.patch");
     let accept = daemon_anvics(
         dir.path(),
@@ -842,16 +1063,16 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
             "accept",
             "--workspace",
             &workspace,
-            "--command-file",
-            command_file.to_str().unwrap(),
-            "--label",
+            "--run-label",
             "daemon verify",
-            "--exit-code",
-            "0",
-            "--summary",
+            "--run-summary",
             "Daemon-backed agent result accepted",
             "--output",
             patch_path.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            "cat modified.txt && cat added.txt",
         ],
     )
     .assert()
@@ -871,6 +1092,7 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     .assert()
     .success()
     .stdout(predicate::str::contains("daemon verify"))
+    .stdout(predicate::str::contains("anvics-run:"))
     .stdout(predicate::str::contains("Modified: `modified.txt`"));
     daemon_anvics(
         dir.path(),
@@ -893,6 +1115,8 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
         .assert()
         .success()
         .stdout(predicate::str::contains("RepositoryInitialized"))
+        .stdout(predicate::str::contains("CommandStarted"))
+        .stdout(predicate::str::contains("CommandFinished"))
         .stdout(predicate::str::contains("LegacyPatchExported"));
 
     let clean = tempdir().unwrap();

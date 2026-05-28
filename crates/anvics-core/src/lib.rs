@@ -57,6 +57,7 @@ opaque_id!(SourceSnapshotId);
 opaque_id!(WorkThreadId);
 opaque_id!(WorkspaceViewId);
 opaque_id!(EvidenceRecordId);
+opaque_id!(CommandEventId);
 opaque_id!(ReviewProjectionId);
 opaque_id!(NativePublicationId);
 opaque_id!(RepositoryEventId);
@@ -188,6 +189,8 @@ pub struct OverlayEntry {
 pub struct EvidenceRecord {
     pub id: EvidenceRecordId,
     pub thread_id: WorkThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_event_id: Option<CommandEventId>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_label: Option<String>,
@@ -199,12 +202,18 @@ pub struct EvidenceRecord {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
     pub created_at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EvidenceSummary {
     pub id: EvidenceRecordId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_event_id: Option<CommandEventId>,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_label: Option<String>,
@@ -216,6 +225,37 @@ pub struct EvidenceSummary {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommandEvent {
+    pub id: CommandEventId,
+    pub workspace_id: WorkspaceViewId,
+    pub thread_id: WorkThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<AgentSessionId>,
+    pub command_label: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_file: Option<String>,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -274,6 +314,8 @@ pub enum RepositoryEventKind {
     ReviewCreated,
     PublicationCreated,
     LegacyPatchExported,
+    CommandStarted,
+    CommandFinished,
     AgentSessionEntered,
     AgentSessionSeen,
     AgentSessionFinished,
@@ -383,6 +425,7 @@ mod tests {
         let thread_id = WorkThreadId::new();
         let review_id = ReviewProjectionId::new();
         let evidence_id = EvidenceRecordId::new();
+        let command_event_id = CommandEventId::new();
 
         let thread = WorkThread {
             id: thread_id.clone(),
@@ -415,6 +458,7 @@ mod tests {
         let evidence = EvidenceRecord {
             id: evidence_id.clone(),
             thread_id: thread_id.clone(),
+            command_event_id: Some(command_event_id.clone()),
             command: "cargo test".to_owned(),
             command_label: Some("tests".to_owned()),
             command_file: Some("evidence/commands/test.sh".to_owned()),
@@ -422,7 +466,28 @@ mod tests {
             exit_code: 0,
             summary: "Tests passed".to_owned(),
             artifact_path: Some("target/test.log".to_owned()),
+            stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
+            stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
             created_at: "2026-05-28T00:00:02Z".to_owned(),
+        };
+        let command_event = CommandEvent {
+            id: command_event_id.clone(),
+            workspace_id: workspace.id.clone(),
+            thread_id: thread_id.clone(),
+            agent_session_id: None,
+            command_label: "tests".to_owned(),
+            argv: vec!["cargo".to_owned(), "test".to_owned()],
+            command_file: None,
+            cwd: ".anvics/workspaces/example/files".to_owned(),
+            exit_code: Some(0),
+            timed_out: false,
+            duration_ms: 12,
+            summary: "Tests passed".to_owned(),
+            artifact_path: Some("target/test.log".to_owned()),
+            stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
+            stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
+            started_at: "2026-05-28T00:00:02Z".to_owned(),
+            finished_at: Some("2026-05-28T00:00:03Z".to_owned()),
         };
         let review = ReviewProjection {
             id: review_id.clone(),
@@ -436,6 +501,7 @@ mod tests {
             overlap_notes: vec!["No path overlap detected.".to_owned()],
             evidence: vec![EvidenceSummary {
                 id: evidence_id,
+                command_event_id: Some(command_event_id),
                 command: "cargo test".to_owned(),
                 command_label: Some("tests".to_owned()),
                 command_file: Some("evidence/commands/test.sh".to_owned()),
@@ -443,6 +509,8 @@ mod tests {
                 exit_code: 0,
                 summary: "Tests passed".to_owned(),
                 artifact_path: Some("target/test.log".to_owned()),
+                stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
+                stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
             }],
             created_at: "2026-05-28T00:00:03Z".to_owned(),
         };
@@ -514,6 +582,11 @@ mod tests {
             serde_json::from_str::<EvidenceRecord>(&serde_json::to_string(&evidence).unwrap())
                 .unwrap(),
             evidence
+        );
+        assert_eq!(
+            serde_json::from_str::<CommandEvent>(&serde_json::to_string(&command_event).unwrap())
+                .unwrap(),
+            command_event
         );
         assert_eq!(
             serde_json::from_str::<ReviewProjection>(&serde_json::to_string(&review).unwrap())
