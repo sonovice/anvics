@@ -1453,12 +1453,32 @@ fn print_command_run(
     println!("label: {}", command_event.command_label);
     println!("exit_code: {}", command_event.exit_code.unwrap_or(-1));
     println!("timed_out: {}", command_event.timed_out);
+    if let Some(kind) = &command_event.projection_kind {
+        println!("projection: {}", projection_kind_label(kind));
+    }
+    if let Some(root) = &command_event.projection_root {
+        println!("projection_root: {root}");
+    }
+    if command_event.file_effects.is_empty() {
+        println!("file_effects: none");
+    } else {
+        println!("file_effects:");
+        for effect in &command_event.file_effects {
+            println!("- {:?}: {}", effect.status, effect.path);
+        }
+    }
     println!("evidence: {}", evidence.id);
     if let Some(stdout) = command_event.stdout_path {
         println!("stdout: {stdout}");
     }
     if let Some(stderr) = command_event.stderr_path {
         println!("stderr: {stderr}");
+    }
+}
+
+fn projection_kind_label(kind: &anvics_core::ProjectionKind) -> &'static str {
+    match kind {
+        anvics_core::ProjectionKind::MaterializedDir => "materialized_dir",
     }
 }
 

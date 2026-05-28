@@ -733,8 +733,6 @@ fn command_run_records_artifacts_and_review_evidence() {
     .clone();
     let thread = value_after_prefix(&prepare, "thread: ");
     let workspace = value_after_prefix(&prepare, "workspace: ");
-    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
-    fs::write(format!("{workspace_path}/app.txt"), "verified\n").unwrap();
 
     let command = anvics(
         dir.path(),
@@ -750,13 +748,16 @@ fn command_run_records_artifacts_and_review_evidence() {
             "--",
             "sh",
             "-c",
-            "cat app.txt",
+            "printf 'verified\\n' > app.txt && cat app.txt",
         ],
     )
     .assert()
     .success()
     .stdout(predicate::str::contains("Ran command"))
     .stdout(predicate::str::contains("exit_code: 0"))
+    .stdout(predicate::str::contains("projection: materialized_dir"))
+    .stdout(predicate::str::contains("file_effects:"))
+    .stdout(predicate::str::contains("- Modified: app.txt"))
     .stdout(predicate::str::contains("stdout: "))
     .get_output()
     .stdout
@@ -770,7 +771,11 @@ fn command_run_records_artifacts_and_review_evidence() {
         .success()
         .stdout(predicate::str::contains(
             "\"command_label\": \"verify app\"",
-        ));
+        ))
+        .stdout(predicate::str::contains(
+            "\"projection_kind\": \"materialized_dir\"",
+        ))
+        .stdout(predicate::str::contains("\"path\": \"app.txt\""));
     anvics(
         dir.path(),
         &["workspace", "snapshot", &workspace, "--message", "verified"],
@@ -792,6 +797,7 @@ fn command_run_records_artifacts_and_review_evidence() {
     .success()
     .stdout(predicate::str::contains("anvics-run:"))
     .stdout(predicate::str::contains("stdout:"))
+    .stdout(predicate::str::contains("file effects: modified `app.txt`"))
     .stdout(predicate::str::contains("Verified app.txt contents"));
 }
 

@@ -2,11 +2,12 @@ use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
     AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
     CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication,
-    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, RelatedWork,
-    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
-    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
-    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
-    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionKind,
+    RelatedWork, RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId,
+    RepositoryManifest, ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan,
+    RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry,
+    TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView,
+    WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -125,6 +126,16 @@ pub struct CommandRunInput {
 pub struct CommandRunResult {
     pub command_event: CommandEvent,
     pub evidence: EvidenceRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceProjection {
+    workspace_id: WorkspaceViewId,
+    thread_id: WorkThreadId,
+    kind: ProjectionKind,
+    root_path: PathBuf,
+    supports_writes: bool,
+    supports_file_effects: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -483,8 +494,13 @@ impl AnvicsStore {
             input.argv.clone()
         };
 
-        let cwd = self.resolve_workspace_cwd(&workspace, input.cwd.as_deref())?;
+        let projection = self.resolve_workspace_projection(&workspace)?;
+        debug_assert!(projection.supports_writes);
+        debug_assert!(projection.supports_file_effects);
+        let before_files = workspace_file_map(&projection.root_path)?;
+        let cwd = self.resolve_projection_cwd(&projection, input.cwd.as_deref())?;
         let cwd_display = cwd.to_string_lossy().to_string();
+        let projection_root = projection.root_path.to_string_lossy().to_string();
         let timeout = Duration::from_secs(
             input
                 .timeout_seconds
@@ -502,8 +518,8 @@ impl AnvicsStore {
 
         let mut command_event = CommandEvent {
             id: command_event_id.clone(),
-            workspace_id: workspace.id.clone(),
-            thread_id: thread.id.clone(),
+            workspace_id: projection.workspace_id.clone(),
+            thread_id: projection.thread_id.clone(),
             agent_session_id,
             command_label: command_label.clone(),
             argv: argv.clone(),
@@ -516,6 +532,9 @@ impl AnvicsStore {
             artifact_path: input.artifact_path.clone(),
             stdout_path: Some(stdout_path.to_string_lossy().to_string()),
             stderr_path: Some(stderr_path.to_string_lossy().to_string()),
+            projection_kind: Some(projection.kind.clone()),
+            projection_root: Some(projection_root),
+            file_effects: Vec::new(),
             started_at,
             finished_at: None,
         };
@@ -534,6 +553,8 @@ impl AnvicsStore {
         command_event.timed_out = execution.timed_out;
         command_event.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         command_event.finished_at = Some(now_rfc3339()?);
+        let after_files = workspace_file_map(&projection.root_path)?;
+        command_event.file_effects = diff_file_maps(&before_files, &after_files);
         fs::write(&stdout_path, execution.stdout)?;
         fs::write(&stderr_path, execution.stderr)?;
         write_json_pretty(
@@ -1364,12 +1385,27 @@ impl AnvicsStore {
         append_event_at(&self.anvics_dir, kind, subject_id)
     }
 
-    fn resolve_workspace_cwd(
+    fn resolve_workspace_projection(
         &self,
         workspace: &WorkspaceView,
+    ) -> Result<WorkspaceProjection> {
+        let root_path = PathBuf::from(&workspace.materialized_path).canonicalize()?;
+        Ok(WorkspaceProjection {
+            workspace_id: workspace.id.clone(),
+            thread_id: workspace.thread_id.clone(),
+            kind: ProjectionKind::MaterializedDir,
+            root_path,
+            supports_writes: true,
+            supports_file_effects: true,
+        })
+    }
+
+    fn resolve_projection_cwd(
+        &self,
+        projection: &WorkspaceProjection,
         cwd: Option<&str>,
     ) -> Result<PathBuf> {
-        let workspace_root = PathBuf::from(&workspace.materialized_path).canonicalize()?;
+        let workspace_root = &projection.root_path;
         let candidate = match cwd.filter(|cwd| !cwd.trim().is_empty()) {
             Some(cwd) => {
                 let path = PathBuf::from(cwd);
@@ -1379,10 +1415,10 @@ impl AnvicsStore {
                     workspace_root.join(path)
                 }
             }
-            None => workspace_root.clone(),
+            None => workspace_root.to_path_buf(),
         };
         let candidate = candidate.canonicalize()?;
-        if !candidate.starts_with(&workspace_root) {
+        if !candidate.starts_with(workspace_root) {
             return Err(StoreError::InvalidCommandCwd(
                 candidate.to_string_lossy().to_string(),
             ));
@@ -1810,9 +1846,16 @@ impl AnvicsStore {
                 .cmp(&right.created_at)
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
-        Ok(records
-            .into_iter()
-            .map(|record| EvidenceSummary {
+        let mut summaries = Vec::new();
+        for record in records {
+            let file_effects = match &record.command_event_id {
+                Some(command_event_id) => self
+                    .show_command_event(command_event_id.as_str())
+                    .map(|event| event.file_effects)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            summaries.push(EvidenceSummary {
                 id: record.id,
                 command_event_id: record.command_event_id,
                 command: record.command,
@@ -1824,8 +1867,10 @@ impl AnvicsStore {
                 artifact_path: record.artifact_path,
                 stdout_path: record.stdout_path,
                 stderr_path: record.stderr_path,
-            })
-            .collect())
+                file_effects,
+            });
+        }
+        Ok(summaries)
     }
 
     fn thread_reviews(&self, thread_id: &WorkThreadId) -> Result<Vec<ReviewProjection>> {
@@ -2537,7 +2582,24 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
     {
         text.push_str(&format!(" (stderr: `{stderr}`)"));
     }
+    if !evidence.file_effects.is_empty() {
+        let effects = evidence
+            .file_effects
+            .iter()
+            .map(|effect| format!("{} `{}`", change_status_label(&effect.status), effect.path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!(" (file effects: {effects})"));
+    }
     text
+}
+
+fn change_status_label(status: &ChangeStatus) -> &'static str {
+    match status {
+        ChangeStatus::Added => "added",
+        ChangeStatus::Modified => "modified",
+        ChangeStatus::Deleted => "deleted",
+    }
 }
 
 fn compact_command_label(command: &str) -> &str {
@@ -3223,6 +3285,159 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, StoreError::InvalidCommandCwd(_)));
+    }
+
+    #[test]
+    fn projection_resolution_returns_materialized_workspace() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Projection".to_owned(), "Resolve workspace".to_owned())
+            .unwrap();
+
+        let projection = store
+            .resolve_workspace_projection(&preparation.workspace)
+            .unwrap();
+
+        assert_eq!(projection.workspace_id, preparation.workspace.id);
+        assert_eq!(projection.thread_id, preparation.thread.id);
+        assert_eq!(projection.kind, ProjectionKind::MaterializedDir);
+        assert_eq!(
+            projection.root_path,
+            Path::new(&preparation.workspace.materialized_path)
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(projection.supports_writes);
+        assert!(projection.supports_file_effects);
+
+        let missing = store.run_command(CommandRunInput {
+            workspace_id: "missing-workspace".to_owned(),
+            argv: vec!["true".to_owned()],
+            command_file: None,
+            command_label: "missing".to_owned(),
+            cwd: None,
+            timeout_seconds: Some(10),
+            summary: "Missing workspace".to_owned(),
+            artifact_path: None,
+        });
+        assert!(matches!(missing, Err(StoreError::WorkspaceNotFound(_))));
+    }
+
+    #[test]
+    fn command_run_records_projection_and_file_effects() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        fs::write(dir.path().join("delete.txt"), "delete\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Projection effects".to_owned(), "Edit files".to_owned())
+            .unwrap();
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'changed\\n' > app.txt && rm delete.txt && printf 'new\\n' > added.txt"
+                        .to_owned(),
+                ],
+                command_file: None,
+                command_label: "edit files".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Edited files through projection".to_owned(),
+                artifact_path: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            result.command_event.projection_kind,
+            Some(ProjectionKind::MaterializedDir)
+        );
+        assert_eq!(
+            result.command_event.projection_root,
+            Some(
+                Path::new(&preparation.workspace.materialized_path)
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            result.command_event.file_effects,
+            vec![
+                ChangedPath {
+                    path: "added.txt".to_owned(),
+                    status: ChangeStatus::Added,
+                },
+                ChangedPath {
+                    path: "app.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                },
+                ChangedPath {
+                    path: "delete.txt".to_owned(),
+                    status: ChangeStatus::Deleted,
+                },
+            ]
+        );
+        assert_eq!(
+            result.evidence.command_event_id,
+            Some(result.command_event.id)
+        );
+    }
+
+    #[test]
+    fn failed_command_run_records_projection_file_effects_and_evidence() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent(
+                "Failed projection effects".to_owned(),
+                "Edit then fail".to_owned(),
+            )
+            .unwrap();
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'changed\\n' > app.txt; exit 7".to_owned(),
+                ],
+                command_file: None,
+                command_label: "edit then fail".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Edited app.txt before failing".to_owned(),
+                artifact_path: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.command_event.exit_code, Some(7));
+        assert_eq!(
+            result.command_event.projection_kind,
+            Some(ProjectionKind::MaterializedDir)
+        );
+        assert_eq!(
+            result.command_event.file_effects,
+            vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }]
+        );
+        assert_eq!(result.evidence.exit_code, 7);
     }
 
     #[test]

@@ -189,6 +189,12 @@ pub struct OverlayEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionKind {
+    MaterializedDir,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EvidenceRecord {
     pub id: EvidenceRecordId,
     pub thread_id: WorkThreadId,
@@ -232,6 +238,8 @@ pub struct EvidenceSummary {
     pub stdout_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_effects: Vec<ChangedPath>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -256,6 +264,12 @@ pub struct CommandEvent {
     pub stdout_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_kind: Option<ProjectionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_effects: Vec<ChangedPath>,
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
@@ -538,6 +552,12 @@ mod tests {
             artifact_path: Some("target/test.log".to_owned()),
             stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
             stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
+            projection_kind: Some(ProjectionKind::MaterializedDir),
+            projection_root: Some(".anvics/workspaces/example/files".to_owned()),
+            file_effects: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
             started_at: "2026-05-28T00:00:02Z".to_owned(),
             finished_at: Some("2026-05-28T00:00:03Z".to_owned()),
         };
@@ -563,6 +583,10 @@ mod tests {
                 artifact_path: Some("target/test.log".to_owned()),
                 stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
+                file_effects: vec![ChangedPath {
+                    path: "app.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                }],
             }],
             created_at: "2026-05-28T00:00:03Z".to_owned(),
         };
@@ -714,5 +738,34 @@ mod tests {
                 .unwrap(),
             acceptance
         );
+    }
+
+    #[test]
+    fn command_event_accepts_missing_projection_fields() {
+        let json = format!(
+            r#"{{
+                "id": "{}",
+                "workspace_id": "{}",
+                "thread_id": "{}",
+                "command_label": "verify",
+                "argv": ["true"],
+                "cwd": ".anvics/workspaces/example/files",
+                "exit_code": 0,
+                "timed_out": false,
+                "duration_ms": 1,
+                "summary": "ok",
+                "started_at": "2026-05-28T00:00:00Z",
+                "finished_at": "2026-05-28T00:00:01Z"
+            }}"#,
+            CommandEventId::new(),
+            WorkspaceViewId::new(),
+            WorkThreadId::new()
+        );
+
+        let event: CommandEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(event.projection_kind, None);
+        assert_eq!(event.projection_root, None);
+        assert!(event.file_effects.is_empty());
     }
 }

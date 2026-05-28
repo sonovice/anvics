@@ -576,6 +576,12 @@ mod tests {
             artifact_path: None,
             stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
             stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
+            projection_kind: Some(ProjectionKind::MaterializedDir),
+            projection_root: Some(".anvics/workspaces/example/files".to_owned()),
+            file_effects: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
             started_at: "2026-05-28T00:00:04Z".to_owned(),
             finished_at: Some("2026-05-28T00:00:05Z".to_owned()),
         };
@@ -601,6 +607,10 @@ mod tests {
                 artifact_path: None,
                 stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
+                file_effects: vec![ChangedPath {
+                    path: "app.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                }],
             }],
             created_at: "2026-05-28T00:00:05Z".to_owned(),
         };

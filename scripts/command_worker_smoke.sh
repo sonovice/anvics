@@ -30,7 +30,6 @@ workspace="$(printf '%s\n' "$prepare_output" | value_after_prefix "workspace: ")
 workspace_path="$(printf '%s\n' "$prepare_output" | value_after_prefix "workspace_path: ")"
 
 anvics agent enter --workspace "$workspace" --name "command-worker-smoke-agent"
-printf 'verified by anvics\n' > "$workspace_path/app.txt"
 anvics coordination status --workspace "$workspace"
 
 accept_output="$(
@@ -39,13 +38,13 @@ accept_output="$(
     --run-label "verify app" \
     --run-summary "Anvics verified app.txt before accepting." \
     --output "$target_repo/accepted.patch" \
-    -- sh -c "grep 'verified by anvics' app.txt"
+    -- sh -c "printf 'verified by anvics\n' > app.txt && grep 'verified by anvics' app.txt"
 )"
 printf '%s\n' "$accept_output"
 review="$(printf '%s\n' "$accept_output" | value_after_prefix "review: ")"
 patch="$(printf '%s\n' "$accept_output" | value_after_prefix "patch: ")"
 
-anvics review show "$review" --format markdown | grep -E 'anvics-run:|stdout:|verify app'
+anvics review show "$review" --format markdown | grep -E 'anvics-run:|stdout:|verify app|file effects: modified `app.txt`'
 anvics agent status --thread "$thread" | grep 'publication_status: published'
 anvics events list --since 0 | grep -E 'CommandStarted|CommandFinished|LegacyPatchExported'
 
