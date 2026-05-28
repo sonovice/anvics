@@ -113,6 +113,8 @@ Anvics should offer:
 
 Workspaces should feel native, not like users are managing filesystem hacks. An agent should be able to start work in milliseconds against the same repo state as ten other agents, mutate its own overlay, run tools through a VFS projection, and throw the whole attempt away without leaving branches, worktrees, stashes, or half-clean directories behind.
 
+The important lesson is not "build a mounted filesystem first." It is "source state must be projectable." Materialized directories can validate the product loop, but a VFS or equivalent projection is the path to cheap, lazy, path-compatible workspaces for large repos and many concurrent agents.
+
 ### 4. Source control needs an API, not just a filesystem
 
 Agents should not need a full OS and filesystem just to inspect or modify source.
@@ -535,7 +537,9 @@ Rust crate boundaries should enforce the product boundary:
 
 The core rule: `anvics-core`, `anvics-store`, `anvics-workspace`, `anvics-vfs`, `anvics-agent`, `anvics-conflict`, `anvics-policy`, and `anvics-sync` must not depend on Git. `anvics-legacy-git` depends outward on Anvics primitives. Git never flows inward as the data model.
 
-`anvics-vfs` is a strategic v1 product direction, not a late optimization. Anvics must satisfy the core premise that the filesystem is a projection over source state, not the canonical source interface. The first real VFS backends should target Linux FUSE and macOS macFUSE, with `fuser` as the initial Rust candidate. For MVP 0, however, VFS maturity should not block product validation: a `materialized_dir` backend can prove the work-thread/review loop while Linux and macOS VFS prototypes run in parallel. Windows ProjFS should be researched/prototyped early, but Linux and macOS are the first real VFS targets.
+A projection backend abstraction is a strategic v1 product direction, not a late optimization. Anvics must satisfy the core premise that the filesystem is a projection over source state, not the canonical source interface. The first real VFS backends should target Linux FUSE and macOS macFUSE, with `fuser` as the initial Rust candidate, if the proxy-mounted spike confirms that mounts pay for their complexity. For MVP 0, however, VFS maturity should not block product validation: a `materialized_dir` backend can prove the work-thread/review loop while Linux and macOS VFS prototypes run in parallel. Windows ProjFS should be researched/prototyped early, but Linux and macOS are the first real VFS targets.
+
+The agentvfs deep dive sharpened this: VFS should sit behind a proxy-mounted workspace runtime, not become a workflow agents manage directly. The preferred path is for `command run` or a later proxy execution flow to resolve the workspace, mount or materialize it, classify the command, run it, summarize changed paths, attach evidence, and clean up. `workspace mount` remains useful as a low-level/debug escape hatch.
 
 `anvicsd` should expose JSON-RPC over local sockets or Windows named pipes for v1. MCP should be a thin adapter over the same API, not the daemon's core protocol. API method names should be Anvics-native: `thread.*`, `workspace.*`, `review.*`, `publication.*`, and `coordination.*`, with Git only under explicit legacy export/import methods.
 
@@ -625,6 +629,8 @@ External agents may still run commands themselves in a VFS mount or fallback mat
 
 Command execution should run in a separate `anvics-worker` process coordinated by `anvicsd`. The worker runs commands, streams output and file effects back to the daemon, and can later evolve into remote/cloud workers without changing the core execution model. V1 command execution should enforce policy and capture provenance, but it should not claim to be a full malicious-code sandbox. Strong isolation belongs to containers, VMs, devcontainers, CI, or cloud sandboxes.
 
+Controlled command execution over isolated workspace state is as important as the mount mechanics. A mount lets tools see files; the runtime turns that tool execution into attributable, reviewable source-control evidence.
+
 Command side effects should first become neutral `FileEffectSet`s: before/after path and object metadata, not language-specific conclusions. Anvics can then apply config and policy, agents can add classifications and rationale, and only trackable source-relevant effects become `ChangeUnit`s. Ignored/cache output stays out of source changes, evidence candidates become attachment suggestions, and unresolved or sensitive effects are gated before native publication.
 
 ### Repository Configuration Model
@@ -654,7 +660,8 @@ That skill should teach agents:
 
 - Treat a thread as the task boundary.
 - Read and write through source-control APIs when available.
-- Use the Anvics VFS mount when tools need file paths; materialize a directory only as fallback.
+- Use the workspace path Anvics provides; it may be materialized or mounted.
+- Use low-level `workspace mount` only when instructed or when debugging a projection issue.
 - Create snapshots at meaningful checkpoints.
 - Attach compact command output, tests, screenshots, traces, and uncertainty as evidence.
 - Keep failed attempts linked to the work thread.
@@ -683,8 +690,7 @@ Under the hood, a work thread should not imply a complete repository copy. The e
 
 - `SourceSnapshot`: immutable base tree shared by many agents.
 - `WorkspaceView`: mutable overlay for one thread/session.
-- VFS mount: primary filesystem projection for tools that require paths.
-- Materialized checkout: fallback projection for environments where VFS mounting is unavailable.
+- Workspace projection: materialized directory for MVP/fallback, VFS mount for cheap lazy path-compatible access when available.
 - `ChangeUnit`: tracked changed path/hunk/symbol owned by the thread.
 
 This is the replacement for Git worktrees. Agents get isolation and parallelism without multiplying whole checkouts or requiring users to clean up worktree directories.
@@ -781,7 +787,7 @@ MVP 0 should validate the loop: work thread, isolated workspace, snapshot, compa
 
 For MVP 0:
 
-- VFS is strategic, but a materialized workspace backend is allowed while Linux/macOS VFS prototypes run in parallel.
+- VFS is strategic for cheap path-compatible projections, but a materialized workspace backend is allowed while Linux/macOS proxy-mounted workspace prototypes run in parallel.
 - Conflict handling means path/hunk overlap detection plus reviewable conflict notes, not semantic auto-resolution.
 - Evidence is compact by default: raw artifacts by reference, review summaries by budget.
 - Agent-facing instructions should expose the smallest useful vocabulary, not every internal object.

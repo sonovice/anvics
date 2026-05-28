@@ -10,8 +10,10 @@ How should Anvics be structured as a Rust system so the core remains a native VC
 - Rust is a strong fit for the local daemon, VFS integration, content-addressed storage, crash recovery, indexing, and concurrent agent workloads.
 - Anvics needs a strict dependency boundary: native domain/storage/workspace crates must not depend on Git. Git import/export belongs in an adapter crate.
 - VFS and overlay-backed `WorkspaceView`s are v1 product surfaces, not late optimizations, because agents need `grep`, shell tools, LSPs, test runners, and monorepo-compatible partial materialization.
-- Real VFS support is required to satisfy the Anvics product thesis. Materialized directories are a fallback, not the primary workspace model.
+- A real projection backend abstraction is required to satisfy the Anvics product thesis. VFS is the likely low-copy backend for large repos and many concurrent agents, but the agent-facing product boundary should be a proxy-mounted workspace runtime, not manual mount management.
+- Materialized directories are a fallback and MVP proving surface, not the primary long-term workspace model.
 - The first product should integrate external agents through skill/instruction files, CLI, local API/MCP, VFS, and passive ingestion, not by owning agent execution.
+- The agentvfs deep dive suggests that command/proxy execution should own workspace resolution, command policy classification, mount lifecycle, file-effect summaries, evidence attachment, and cleanup where possible.
 
 ## Sources And Artifacts
 
@@ -20,12 +22,14 @@ How should Anvics be structured as a Rust system so the core remains a native VC
 - Legacy Git adapter note: `06-git-boundary-design.md`
 - Agent workflow note: `01-agent-workflow-reality.md`
 - Draft Anvics skill: `../../skills/anvics-skill/SKILL.md`
+- Agentvfs deep dive: `14-agentvfs-deep-dive.md`
 
 ## Proposed Rust Crate Boundaries
 
 - `anvics-core`: Git-free domain types, object IDs, events, actor attribution, policies, primitive schemas, and shared error types.
 - `anvics-store`: content-addressed object store, immutable blobs/trees/snapshots, append-only event log, overlay persistence, evidence references, and transactional durability.
 - `anvics-workspace`: `WorkspaceView`, per-thread overlays, snapshot creation, replay attempts, materialization coordination, and write capture.
+- `anvics-runtime` or equivalent provisional boundary: workspace resolution, command execution, mount lifecycle, coarse policy classification, file-effect summary, and evidence attachment. This can initially live inside `anvics-store`/`anvics-cli` until the boundary earns its own crate.
 - `anvics-vfs`: VFS mount/projection layer, lazy hydration, file watching, sparse roots, developer-tool compatibility, and backend abstraction.
 - `anvics-index`: path/content search, hunk extraction, symbol/dependency indexing, `ChangeUnit` indexes, and freshness metadata.
 - `anvics-agent`: `AgentSession`, `Attempt`, `ContextPack`, `CommandEvent`, `ExecutionView`, `EvidenceBundle`, `FileEffectSet`, and `LearningNote`.
@@ -41,6 +45,7 @@ How should Anvics be structured as a Rust system so the core remains a native VC
 
 - `anvics-core` must not depend on Git, UI, CLI, VFS, or agent-specific runtimes.
 - `anvics-store`, `anvics-workspace`, `anvics-vfs`, `anvics-agent`, `anvics-conflict`, `anvics-policy`, and `anvics-sync` must not depend on `anvics-legacy-git`.
+- `anvics-runtime`, if split out, must depend on Anvics source/workspace abstractions and adapters, not on Git as a storage model.
 - `anvics-legacy-git` depends outward on Anvics primitives and translates to/from Git-era artifacts.
 - `anvics-cli`, `anvics-api`, and UI clients should not mutate repo storage directly; they talk to `anvicsd`.
 - Language/tool-specific intelligence belongs in plugins, indexes, agents, or policy modules, not in the core storage model.
@@ -109,6 +114,8 @@ Responsibilities of `anvicsd`:
 
 - Check execution policy.
 - Pin `ExecutionView`.
+- Resolve materialized or mounted execution path.
+- Own mount lifecycle when the runtime can safely do so.
 - Start/cancel worker jobs.
 - Receive output, status, file effects, and evidence references.
 - Record `CommandEvent`s transactionally.
@@ -119,7 +126,7 @@ Responsibilities of `anvics-worker`:
 - Run commands against a pinned VFS/materialized execution path.
 - Stream stdout/stderr chunks.
 - Report exit status and resource metadata.
-- Summarize file effects.
+- Summarize file effects, preferably from runtime/mount event data with tree diff as fallback.
 - Attach candidate evidence artifacts.
 - Send heartbeat/cancellation status.
 
@@ -128,6 +135,8 @@ MVP 0 may rely on externally attached command evidence. The roadmap should use a
 ## VFS Backend Strategy
 
 `anvics-vfs` should define Anvics' own backend abstraction. The product must not let one crate or platform API define the workspace model.
+
+The agentvfs lesson is that VFS should usually sit behind a proxy/runtime boundary. Agents should receive a usable workspace path and Anvics commands, while the runtime handles mount creation, policy classification, command execution, changed-path summaries, evidence attachment, and unmount. A low-level `workspace mount` remains valuable for debugging and unusual tool flows, but it is not the happy path.
 
 First real VFS backends:
 
@@ -147,6 +156,8 @@ Early research/prototype target:
 - Windows ProjFS, with Dokan/WinFSP as fallback candidates if ProjFS is not viable.
 
 Important distinction: materialized directories are acceptable for MVP 0 and compatibility fallback, but they are not Anvics' primary long-term answer to source access. The core source state remains `WorkspaceView` over shared immutable storage plus mutable overlay; VFS is the normal filesystem projection once the product loop is proven.
+
+The next VFS milestone should therefore be a proxy-mounted workspace spike: mount one workspace, run a command through that mounted projection, collect file effects, unmount cleanly, and fall back to materialized execution when FUSE/macFUSE is unavailable.
 
 Clients:
 
@@ -173,6 +184,7 @@ Clients:
 
 - Rust architecture should enforce the product thesis: Anvics is native first, Git is an adapter.
 - VFS and overlay workspaces must be designed early because they are the direct replacement for Git worktrees.
+- The runtime/proxy boundary is as important as mount mechanics: controlled command execution over isolated workspaces is the place where Anvics turns source projection into trustworthy evidence.
 - The API and CLI should use Anvics verbs: thread, workspace, snapshot, review, publish, replay, coordinate, resolve. Avoid Git-like porcelain outside `legacy git`.
 - Keep external-agent integration broad: skill/instructions, CLI, API/MCP, VFS, and passive ingestion.
 
@@ -185,13 +197,15 @@ Clients:
 - Implement MCP as a thin adapter over `anvics-api`.
 - Implement local `anvics-worker` for command execution against pinned `ExecutionView`s.
 - Keep `anvics-core` and storage/workspace crates Git-free from the first commit.
-- Treat `anvics-vfs` and overlay-backed `WorkspaceView`s as v1 requirements.
+- Treat projection backend abstraction, proxy-mounted runtime behavior, and overlay-backed `WorkspaceView`s as v1 requirements. `anvics-vfs` is the likely production projection backend if the spike proves mounts pay for their complexity.
 - Ship Linux FUSE and macOS macFUSE backends in v1 if at all possible; keep `materialized_dir` as fallback.
 - Put all Git logic in `anvics-legacy-git`.
 
 ## Open Questions
 
 - Can `fuser` meet both Linux FUSE and macOS macFUSE needs, or do we need separate backend crates?
+- Should proxy-mounted command execution live in a separate `anvics-runtime` crate immediately, or stay inside existing CLI/store boundaries until the spike clarifies the split?
+- What minimum event/audit stream is needed to replace tree-diff-only file effect summaries?
 - What is the minimum macFUSE installation flow that does not wreck developer adoption?
 - What is the right Windows VFS path: ProjFS, Dokan, WinFSP, or another projection API?
 - What IPC protocol should `anvicsd` use with local and future remote workers?

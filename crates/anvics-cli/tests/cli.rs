@@ -293,6 +293,10 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains("agent enter"));
     assert!(packet_text.contains("coordination status"));
     assert!(packet_text.contains("workspace diff"));
+    assert!(packet_text.contains("If you spawn subagents"));
+    assert!(packet_text.contains("## Agent-Run Commands"));
+    assert!(packet_text.contains("## Operator-Run Commands"));
+    assert!(packet_text.contains("Do not run them as an agent"));
     anvics(dir.path(), &["agent", "packet", "--thread", &thread])
         .assert()
         .success()
@@ -603,6 +607,8 @@ fn workspace_show_and_agent_status_by_workspace_report_overlay_state() {
         .assert()
         .success()
         .stdout(predicate::str::contains(&thread))
+        .stdout(predicate::str::contains(&workspace))
+        .stdout(predicate::str::contains(&workspace_path))
         .stdout(predicate::str::contains("publication_status: unpublished"));
     anvics(
         dir.path(),

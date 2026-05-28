@@ -2,7 +2,7 @@
 
 This roadmap turns the product thesis and decision log into a long-form implementation sequence. It is **not** the first build plan. The first build plan is [`MVP_0.md`](MVP_0.md), which proves the tight agent-native loop before Anvics attempts the full platform.
 
-The roadmap order remains dependency-driven: native model first, then storage, daemon/API, overlays, VFS, command execution, agent integration, review UI, conflict coordination, legacy Git export, and team relay. Roadmap phases can be split, deferred, or skipped until MVP 0 proves that the core work-thread/review loop is valuable.
+The roadmap order remains dependency-driven: native model first, then storage, daemon/API, overlays, proxy-mounted workspace runtime, command execution, agent integration, review UI, conflict coordination, legacy Git export, and team relay. Roadmap phases can be split, deferred, or skipped until MVP 0 proves that the core work-thread/review loop is valuable.
 
 ## Guiding Constraints
 
@@ -10,7 +10,10 @@ The roadmap order remains dependency-driven: native model first, then storage, d
 - Core crates must not depend on Git.
 - `anvicsd` owns repository state.
 - CLI/API/VFS/UI/agents are clients.
-- VFS is a strategic v1 product direction, but it is not an MVP 0 blocker.
+- A projection backend abstraction is a strategic v1 product direction, but it is not an MVP 0 blocker.
+- VFS is a compatibility projection for tools that need paths, not canonical source state and not the primary agent-facing abstraction.
+- Command/proxy execution should own mount lifecycle when possible; manual `workspace mount` is a debug or escape-hatch tool.
+- The product needs a projection backend abstraction; materialized directories are valid MVP/fallback, while VFS is the low-copy backend for large repos and many concurrent agents.
 - MVP 0 may use a materialized workspace backend while Linux/macOS VFS prototypes run in parallel.
 - Source-like content stays outside SQLite and is VFS/API-readable.
 - Agents integrate through skill, CLI, API/MCP, VFS, and passive ingestion.
@@ -186,14 +189,17 @@ Acceptance criteria:
 - Snapshotting a workspace creates a deterministic new snapshot.
 - Events record workspace writes and snapshot creation.
 
-## Roadmap Phase 5 - VFS Prototype
+## Roadmap Phase 5 - Proxy-Mounted Workspace Prototype
 
-Goal: make filesystem access a projection over `WorkspaceView`.
+Goal: prove filesystem access as a projection over `WorkspaceView` inside a controlled command/runtime boundary.
 
 MVP 0 stance: a materialized workspace backend is enough for the first proof. Linux/macOS VFS work should proceed as a prototype, but product validation must not wait for production-quality FUSE/macFUSE behavior.
 
+Agentvfs lesson: the right product boundary is not "agents manually manage mounts." It is a proxy-mounted workspace runtime: source state can be projected through a mount when tools need paths, while command/proxy execution owns workspace resolution, policy classification, mount lifecycle, file-effect summaries, evidence attachment, and cleanup where possible.
+
 Crates:
 
+- `anvics-runtime` or equivalent boundary, provisional
 - `anvics-vfs`
 - `anvics-workspace`
 - `anvics-store`
@@ -204,7 +210,12 @@ Scope:
 - Linux FUSE backend using `fuser` candidate.
 - macOS macFUSE backend using `fuser` candidate.
 - `materialized_dir` fallback backend.
-- Mount a `WorkspaceView`.
+- Mount a `WorkspaceView` as a compatibility projection.
+- Low-level `workspace mount` for debugging/manual escape hatches.
+- Preferred command/proxy path that can mount a workspace, run a command, summarize changed paths, attach evidence, and unmount cleanly.
+- Coarse command policy classification before any syscall-level sandbox claims.
+- Event/audit-derived file effects when available, with tree diff as fallback.
+- Open-file write-state handling for buffered writes, flush, release, and fsync.
 - Lazy reads from CAS/base snapshot.
 - Writes captured into overlay.
 - Directory listing.
@@ -214,14 +225,17 @@ Scope:
 Acceptance criteria:
 
 - A mounted workspace can be inspected with shell tools like `ls`, `cat`, `rg`.
+- A command can run through a mounted workspace and return changed paths.
 - Writes through the mount update the overlay, not base snapshot.
 - Unmount/remount preserves overlay state.
+- Command/proxy cleanup unmounts cleanly on success and failure.
 - Materialized fallback can produce a usable directory when VFS is unavailable.
 - Linux and macOS backend prototypes both have smoke tests or manual verification notes.
+- The prototype makes no production sandbox claim.
 
-## Roadmap Phase 6 - Command Worker
+## Roadmap Phase 6 - Command Worker And Runtime Hardening
 
-Goal: run commands with provenance against pinned source state.
+Goal: harden command/proxy execution with provenance against pinned source state.
 
 MVP 0 stance: external agents may run commands themselves and attach compact command evidence. Full `anvics-worker` mediation is roadmap work.
 
@@ -235,6 +249,14 @@ Crates:
 Scope:
 
 - `ExecutionView` creation.
+- Mount/materialized execution path lifecycle owned by the runtime when possible.
+- Coarse command policy classification:
+  - read-only
+  - mutating
+  - destructive
+  - networked
+  - host-escape-risk
+  - interactive
 - `workspace.run_command`.
 - Local `anvics-worker` process.
 - Command spec:
@@ -247,6 +269,7 @@ Scope:
 - Stream stdout/stderr.
 - Record exit status.
 - Capture before/after file effects.
+- Prefer event/audit-derived file effects; use tree diff as fallback.
 - Attach `CommandEvent`.
 - Mark externally attached command events as weaker provenance.
 
@@ -335,7 +358,8 @@ Scope:
 
 Acceptance criteria:
 
-- A shell-based agent can read the skill, create/join a work thread, mount a workspace, edit files, run commands, attach evidence, and request review.
+- A shell-based agent can read the skill, create/join a work thread, work in the runtime-provided workspace path, inspect changes, run commands, attach evidence, and request review.
+- `workspace mount` remains available for low-level debugging when the runtime cannot own the mount lifecycle.
 - MCP client can call core API methods.
 - External command events can be attached with weaker provenance.
 
@@ -466,8 +490,8 @@ Acceptance criteria:
 2. Phase 2: Storage spine.
 3. Phase 3: Daemon and local API.
 4. Phase 4: Workspace overlays.
-5. Phase 5: VFS prototype.
-6. Phase 6: Command worker.
+5. Phase 5: Proxy-mounted workspace prototype.
+6. Phase 6: Command worker and runtime hardening.
 7. Phase 7: FileEffect to ChangeUnit pipeline.
 8. Phase 8: Agent integration kit.
 9. Phase 9: Review/publication UI.
@@ -482,7 +506,7 @@ The full platform demo should show:
 1. Initialize or import a repo.
 2. Start multiple work threads from prompts/issues.
 3. Give each agent a separate overlay-backed `WorkspaceView`.
-4. Mount workspaces through VFS.
+4. Run tool commands through proxy-mounted workspace projections.
 5. Agents edit the same codebase without Git worktrees or full copies.
 6. Commands run through `anvics-worker` and attach evidence.
 7. File effects become `ChangeUnit`s.

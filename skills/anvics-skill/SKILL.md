@@ -21,6 +21,18 @@ Use Anvics as the source-control interface. Treat the filesystem as a compatibil
 10. Request `review` when the work is ready.
 11. `publish` after acceptance; export to Git only when a legacy system needs it.
 
+## Delegation And Subagents
+
+If you spawn or delegate to another agent, pass along the Anvics context before it reads or edits code:
+
+- The path to this skill.
+- The task packet path when one exists.
+- The repository path, thread id, workspace id, and workspace path.
+- The packet's `agent enter`, `workspace diff`, and `coordination status` commands.
+- The rule that the workspace path is the only editable area.
+
+Each subagent must read this skill, run `agent enter` with its own agent name before editing, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask subagents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
+
 ## Source Access
 
 Prefer Anvics API reads before materializing files:
@@ -43,7 +55,8 @@ Every write belongs to the current thread and workspace.
 - If the base is stale, refresh or fork the workspace instead of forcing the edit.
 - If another thread touches the same path or hunk, record the overlap before continuing.
 - Before finishing, run `coordination status` and summarize any potential clashes in evidence or review notes.
-- Prefer `agent accept --run-label ... --run-summary ... -- <program> [args...]` when the operator asks for verification, so Anvics records command provenance and artifacts itself.
+- When the operator explicitly asks you to accept with verification, prefer `agent accept --run-label ... --run-summary ... -- <program> [args...]` so Anvics records command provenance and artifacts itself.
+- Do not run `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.
 
 Do not use commits as scratchpad history. Keep failed or abandoned attempts attached to the thread as summarized evidence.
 

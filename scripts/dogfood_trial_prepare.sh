@@ -142,10 +142,20 @@ cat <<EOF
 
 Manifest: $manifest
 
+Success checklist for this MVP 0.14 validation:
+
+- Each agent confirms it read the Anvics skill from its workspace.
+- Each agent edits only the workspace path from the packet.
+- Each agent runs agent enter before editing.
+- Each agent uses workspace diff instead of Git status or Git diff.
+- Each agent runs coordination status before finishing.
+- The accepted workspace can produce a review, publication, and legacy patch.
+- The exported patch applies cleanly to a clean copy.
+
 After agents finish, accept the chosen workspace with:
 
 scripts/live_agent_trial_verify.sh "$target_repo" \\
   <accepted-thread-id> <accepted-workspace-id> "<verification command>" <exit-code> "<summary>"
 
-Record the actual run in docs/trials/0002-anvics-dogfood.md using docs/trials/0002-anvics-dogfood-template.md.
+Record the actual run in docs/trials/0003-anvics-dogfood.md using docs/trials/0003-anvics-dogfood-template.md.
 EOF

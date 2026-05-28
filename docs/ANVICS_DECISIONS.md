@@ -74,20 +74,25 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Implementation model: shared immutable source storage plus per-agent/per-thread mutable overlays.
 - `WorkspaceView` is the overlay-backed workspace primitive.
 - VFS mount is the primary filesystem projection for tools that need paths.
-- Materialized directory is fallback only.
+- VFS mount is not the primary agent-facing abstraction; normal agents should use Anvics packets, CLI/API, and runtime-provided workspace paths.
+- Materialized directory is the MVP/fallback projection; VFS is the strategic low-copy projection for large repos and many concurrent agents.
 - Agents should not create Git worktrees or full repo copies for parallel work.
 
 ## VFS
 
-- `anvics-vfs` is a strategic v1 product direction, not a late optimization.
+- `anvics-vfs` is a strategic v1 product direction if Anvics wants cheap path-compatible workspace projections at scale; it is not required for every workflow.
 - The filesystem is a projection over Anvics source state, not canonical source state.
+- VFS is a compatibility projection for editors, shells, language servers, tests, and other tools that require paths.
+- VFS is not canonical state and not the product's primary control plane.
+- The preferred path is proxy/command runtime ownership of mount lifecycle; manual `workspace mount` is a debug/manual escape hatch.
 - First real VFS targets: Linux FUSE and macOS macFUSE.
 - Initial Rust candidate: `fuser`.
 - Windows ProjFS should be researched/prototyped early; Dokan/WinFSP are fallback candidates.
 - MVP 0 may use `materialized_dir` to prove the product loop while VFS prototypes run in parallel.
-- `materialized_dir` backend is required as fallback for locked-down machines/CI/containers, but not the long-term primary model.
+- `materialized_dir` backend is required for MVP, locked-down machines, CI, containers, and fallback. It can remain a supported backend, but it does not solve the full no-copy worktree replacement at scale.
 - `anvics-vfs` owns Anvics' backend abstraction; do not let one crate/platform API define the workspace model.
 - Start with a small mount/capabilities backend trait; keep detailed file-operation plumbing backend-specific until prototypes teach more.
+- Open-file write state, flush/release/fsync behavior, and clean unmount semantics are core prototype risks.
 
 ## Conflict And Coordination
 
@@ -221,11 +226,15 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Roadmap command execution enforces policy and captures provenance, but does not claim to be a malicious-code sandbox.
 - Strong isolation belongs to containers, VMs, devcontainers, CI, cloud sandboxes.
 - Command policy can cover cwd, env rules, secrets, network, timeout, output size, allowed command patterns, source write capture, evidence artifact rules.
+- Command/proxy execution should own workspace resolution, optional mount lifecycle, file-effect summaries, evidence attachment, and cleanup where possible.
+- Start with coarse top-level command policy classes before claiming syscall-level control: read-only, mutating, destructive, networked, host-escape-risk, and interactive.
+- Policy classification is an operational gate and evidence signal, not a guarantee that Anvics is a sandbox.
 
 ## File Effects And Change Units
 
 - Command side effects first become neutral `FileEffectSet`s.
 - `FileEffectSet` records before/after path/object metadata, not language-specific conclusions.
+- Future `FileEffectSet`s should prefer event/audit-derived file effects when a runtime or mount can provide them, with deterministic tree diff as fallback.
 - Classification layers: config, policy, tools, humans, agent claims.
 - Built-in classification labels:
   - `source`
