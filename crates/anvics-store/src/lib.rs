@@ -41,6 +41,8 @@ pub enum StoreError {
     MissingWorkspaceSnapshot(String),
     #[error("evidence summary must not be empty")]
     EmptyEvidenceSummary,
+    #[error("evidence command must not be empty")]
+    EmptyEvidenceCommand,
     #[error("review {review_id} does not belong to thread {thread_id}")]
     ReviewThreadMismatch {
         review_id: String,
@@ -64,6 +66,17 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 pub struct AnvicsStore {
     root: PathBuf,
     anvics_dir: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandEvidenceInput {
+    pub command: String,
+    pub command_label: Option<String>,
+    pub command_file: Option<String>,
+    pub cwd: Option<String>,
+    pub exit_code: i32,
+    pub summary: String,
+    pub artifact_path: Option<String>,
 }
 
 impl AnvicsStore {
@@ -264,18 +277,43 @@ impl AnvicsStore {
         summary: String,
         artifact_path: Option<String>,
     ) -> Result<EvidenceRecord> {
+        self.attach_command_evidence(
+            thread_id,
+            CommandEvidenceInput {
+                command,
+                command_label: None,
+                command_file: None,
+                cwd: None,
+                exit_code,
+                summary,
+                artifact_path,
+            },
+        )
+    }
+
+    pub fn attach_command_evidence(
+        &self,
+        thread_id: &str,
+        input: CommandEvidenceInput,
+    ) -> Result<EvidenceRecord> {
         let thread = self.show_thread(thread_id)?;
-        if summary.trim().is_empty() {
+        if input.summary.trim().is_empty() {
             return Err(StoreError::EmptyEvidenceSummary);
+        }
+        if input.command.trim().is_empty() {
+            return Err(StoreError::EmptyEvidenceCommand);
         }
 
         let evidence = EvidenceRecord {
             id: EvidenceRecordId::new(),
             thread_id: thread.id,
-            command,
-            exit_code,
-            summary,
-            artifact_path,
+            command: input.command,
+            command_label: input.command_label,
+            command_file: input.command_file,
+            cwd: input.cwd,
+            exit_code: input.exit_code,
+            summary: input.summary,
+            artifact_path: input.artifact_path,
             created_at: now_rfc3339()?,
         };
         write_json_pretty(self.evidence_path(evidence.id.as_str()), &evidence)?;
@@ -381,14 +419,28 @@ impl AnvicsStore {
         summary: String,
         artifact_path: Option<String>,
     ) -> Result<AgentFinish> {
+        self.finish_agent_with_evidence(
+            workspace_id,
+            CommandEvidenceInput {
+                command,
+                command_label: None,
+                command_file: None,
+                cwd: None,
+                exit_code,
+                summary,
+                artifact_path,
+            },
+        )
+    }
+
+    pub fn finish_agent_with_evidence(
+        &self,
+        workspace_id: &str,
+        evidence_input: CommandEvidenceInput,
+    ) -> Result<AgentFinish> {
         let workspace = self.show_workspace(workspace_id)?;
-        let evidence = self.attach_evidence(
-            workspace.thread_id.as_str(),
-            command,
-            exit_code,
-            summary,
-            artifact_path,
-        )?;
+        let evidence =
+            self.attach_command_evidence(workspace.thread_id.as_str(), evidence_input)?;
         let workspace =
             self.workspace_snapshot(workspace_id, Some("agent finish result".to_owned()))?;
         let review = self.create_review(workspace.thread_id.as_str())?;
@@ -414,7 +466,28 @@ impl AnvicsStore {
         artifact_path: Option<String>,
         output_path: Option<PathBuf>,
     ) -> Result<AgentAcceptance> {
-        let finish = self.finish_agent(workspace_id, command, exit_code, summary, artifact_path)?;
+        self.accept_agent_with_evidence(
+            workspace_id,
+            CommandEvidenceInput {
+                command,
+                command_label: None,
+                command_file: None,
+                cwd: None,
+                exit_code,
+                summary,
+                artifact_path,
+            },
+            output_path,
+        )
+    }
+
+    pub fn accept_agent_with_evidence(
+        &self,
+        workspace_id: &str,
+        evidence_input: CommandEvidenceInput,
+        output_path: Option<PathBuf>,
+    ) -> Result<AgentAcceptance> {
+        let finish = self.finish_agent_with_evidence(workspace_id, evidence_input)?;
         let publication = self.create_publication(
             finish.workspace.thread_id.as_str(),
             finish.review.id.as_str(),
@@ -710,8 +783,12 @@ impl AnvicsStore {
             .map(|record| EvidenceSummary {
                 id: record.id,
                 command: record.command,
+                command_label: record.command_label,
+                command_file: record.command_file,
+                cwd: record.cwd,
                 exit_code: record.exit_code,
                 summary: record.summary,
+                artifact_path: record.artifact_path,
             })
             .collect())
     }
@@ -969,7 +1046,7 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- When finished, report the command you ran, exit code, and a short summary.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n\n## Task\n\n{}\n\n## Instructions\n\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact.\n- When finished, report a concise command label, exit code, short summary, and optional command/evidence file path.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Operator Acceptance Command Template\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nFor multi-command verification, write the commands to a small file and use `--command-file <path> --label \"<short label>\"` instead of a long inline command.\n\n## Manual Finish Command Template\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n",
         thread.id,
         workspace.id,
         repo_root.display(),
@@ -1006,10 +1083,7 @@ fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThrea
         markdown.push_str("- No evidence attached.\n");
     } else {
         for evidence in &review.evidence {
-            markdown.push_str(&format!(
-                "- `{}` exited {}: {}\n",
-                evidence.command, evidence.exit_code, evidence.summary
-            ));
+            markdown.push_str(&format!("- {}\n", render_evidence_summary(evidence)));
         }
     }
 
@@ -1035,6 +1109,45 @@ fn render_review(repo_root: &Path, review: &ReviewProjection, thread: &WorkThrea
     ));
 
     markdown
+}
+
+fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
+    let label = evidence
+        .command_label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| compact_command_label(&evidence.command));
+    let mut text = format!(
+        "`{label}` exited {}: {}",
+        evidence.exit_code, evidence.summary
+    );
+    if let Some(cwd) = evidence.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+        text.push_str(&format!(" (cwd: `{cwd}`)"));
+    }
+    if let Some(command_file) = evidence
+        .command_file
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        text.push_str(&format!(" (command file: `{command_file}`)"));
+    }
+    if let Some(artifact) = evidence
+        .artifact_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        text.push_str(&format!(" (artifact: `{artifact}`)"));
+    }
+    text
+}
+
+fn compact_command_label(command: &str) -> &str {
+    const MAX_INLINE_COMMAND: usize = 80;
+    if command.len() > MAX_INLINE_COMMAND || command.lines().count() > 1 {
+        "command"
+    } else {
+        command
+    }
 }
 
 fn display_path(path: &Path) -> String {

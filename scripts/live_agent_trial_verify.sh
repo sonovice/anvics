@@ -19,6 +19,7 @@ summary="$6"
 artifact="${7:-}"
 patch="$target_repo/accepted.patch"
 clean_repo="$(mktemp -d)"
+command_file="$target_repo/accepted-command.txt"
 
 anvics() {
   cargo run -q -p anvics-cli --manifest-path "$repo_root/Cargo.toml" -- --repo "$target_repo" "$@"
@@ -29,10 +30,13 @@ value_after_prefix() {
   sed -n "s/^${prefix}//p" | head -n 1
 }
 
+printf '%s\n' "$command_name" > "$command_file"
+
 accept_args=(
   agent accept
   --workspace "$workspace"
-  --command "$command_name"
+  --command-file "$command_file"
+  --label "accepted verification"
   --exit-code "$exit_code"
   --summary "$summary"
   --output "$patch"

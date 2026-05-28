@@ -168,8 +168,15 @@ pub struct EvidenceRecord {
     pub id: EvidenceRecordId,
     pub thread_id: WorkThreadId,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub exit_code: i32,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_path: Option<String>,
     pub created_at: String,
 }
@@ -178,8 +185,16 @@ pub struct EvidenceRecord {
 pub struct EvidenceSummary {
     pub id: EvidenceRecordId,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub exit_code: i32,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -298,9 +313,12 @@ mod tests {
             id: evidence_id.clone(),
             thread_id: thread_id.clone(),
             command: "cargo test".to_owned(),
+            command_label: Some("tests".to_owned()),
+            command_file: Some("evidence/commands/test.sh".to_owned()),
+            cwd: Some(".".to_owned()),
             exit_code: 0,
             summary: "Tests passed".to_owned(),
-            artifact_path: None,
+            artifact_path: Some("target/test.log".to_owned()),
             created_at: "2026-05-28T00:00:02Z".to_owned(),
         };
         let review = ReviewProjection {
@@ -316,8 +334,12 @@ mod tests {
             evidence: vec![EvidenceSummary {
                 id: evidence_id,
                 command: "cargo test".to_owned(),
+                command_label: Some("tests".to_owned()),
+                command_file: Some("evidence/commands/test.sh".to_owned()),
+                cwd: Some(".".to_owned()),
                 exit_code: 0,
                 summary: "Tests passed".to_owned(),
+                artifact_path: Some("target/test.log".to_owned()),
             }],
             created_at: "2026-05-28T00:00:03Z".to_owned(),
         };

@@ -446,6 +446,8 @@ fn agent_accept_publishes_and_exports_patch() {
     fs::write(format!("{workspace_path}/app.txt"), "accepted\n").unwrap();
     let artifact = dir.path().join("accept-artifact.txt");
     fs::write(&artifact, "compact accept artifact\n").unwrap();
+    let command_file = dir.path().join("verify.sh");
+    fs::write(&command_file, "cat app.txt\n").unwrap();
     let patch_path = dir.path().join("custom.patch");
 
     let accept_output = anvics(
@@ -455,8 +457,12 @@ fn agent_accept_publishes_and_exports_patch() {
             "accept",
             "--workspace",
             &workspace,
-            "--command",
-            "cat app.txt",
+            "--command-file",
+            command_file.to_str().unwrap(),
+            "--label",
+            "verify accepted app",
+            "--cwd",
+            &workspace_path,
             "--exit-code",
             "0",
             "--summary",
@@ -483,6 +489,16 @@ fn agent_accept_publishes_and_exports_patch() {
     let publication = value_after_prefix(&accept_output, "publication: ");
 
     assert!(patch_path.exists());
+    let review = value_after_prefix(&accept_output, "review: ");
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("verify accepted app"))
+    .stdout(predicate::str::contains("command file:"))
+    .stdout(predicate::str::contains("artifact:"));
     anvics(dir.path(), &["agent", "status", "--thread", &thread])
         .assert()
         .success()
@@ -510,6 +526,59 @@ fn agent_accept_publishes_and_exports_patch() {
         fs::read_to_string(clean.path().join("app.txt")).unwrap(),
         "accepted\n"
     );
+}
+
+#[test]
+fn evidence_command_attaches_file_backed_evidence() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    let command_file = dir.path().join("verify.sh");
+    fs::write(&command_file, "cat app.txt\ncargo test\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let thread_output = anvics(
+        dir.path(),
+        &[
+            "thread",
+            "create",
+            "--title",
+            "Evidence",
+            "--task",
+            "Attach command evidence",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&thread_output, "Created thread ");
+
+    anvics(
+        dir.path(),
+        &[
+            "evidence",
+            "command",
+            "--thread",
+            &thread,
+            "--command-file",
+            command_file.to_str().unwrap(),
+            "--label",
+            "verify script",
+            "--cwd",
+            ".",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Verification script passed",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Attached command evidence"));
 }
 
 #[test]

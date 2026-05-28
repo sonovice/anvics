@@ -69,7 +69,7 @@ $packet
 
 Follow it exactly. Work only inside the workspace path listed in the packet.
 Do not create a Git branch, Git worktree, or Git commit.
-When done, tell me the command you ran, its exit code, and a one-sentence summary.
+When done, tell me a short command label, its exit code, a one-sentence summary, and optionally a command/evidence file path.
 EOF
 }
 

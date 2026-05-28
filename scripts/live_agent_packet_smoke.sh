@@ -41,12 +41,14 @@ anvics agent status --thread "$thread"
 printf 'after\n' > "$workspace_path/modified.txt"
 rm "$workspace_path/deleted.txt"
 printf 'new\n' > "$workspace_path/added.txt"
+printf 'check modified.txt\ncheck added.txt\ncheck deleted.txt absent\n' > "$target_repo/verify-command.txt"
 printf 'compact scripted evidence\n' > "$target_repo/agent-summary.txt"
 
 accept_output="$(
   anvics agent accept \
     --workspace "$workspace" \
-    --command "scripted-live-agent" \
+    --command-file "$target_repo/verify-command.txt" \
+    --label "scripted-live-agent" \
     --exit-code 0 \
     --summary "Scripted live agent modified, deleted, and added files" \
     --artifact "$target_repo/agent-summary.txt"

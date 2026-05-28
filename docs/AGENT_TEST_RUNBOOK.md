@@ -54,7 +54,7 @@ scripts/live_agent_trial_prepare.sh
 
    Follow it exactly. Work only inside the workspace path listed in the packet.
    Do not create a Git branch, Git worktree, or Git commit.
-   When done, tell me the command you ran, its exit code, and a one-sentence summary.
+   When done, tell me a short command label, its exit code, a one-sentence summary, and optionally a command/evidence file path.
    ```
 
 5. Accept the agent task from the Anvics repo, using the printed workspace id:
@@ -68,7 +68,7 @@ scripts/live_agent_trial_prepare.sh
      --output "$target_repo/accepted.patch"
    ```
 
-   Add `--artifact <path>` if the agent produced a compact result file worth linking.
+   For multi-command verification, put the commands in a small file and use `--command-file <path> --label "<short label>"` instead of a long inline command. Add `--artifact <path>` if the agent produced a compact result file worth linking.
 
 6. Inspect the accepted result:
 

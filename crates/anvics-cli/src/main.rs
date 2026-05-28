@@ -1,4 +1,4 @@
-use anvics_store::{AnvicsStore, StoreError};
+use anvics_store::{AnvicsStore, CommandEvidenceInput, StoreError};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -112,6 +112,24 @@ enum EvidenceCommand {
         #[arg(long)]
         artifact: Option<String>,
     },
+    Command {
+        #[arg(long)]
+        thread: String,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        command_file: Option<PathBuf>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        exit_code: i32,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        artifact: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -166,7 +184,13 @@ enum AgentCommand {
         #[arg(long)]
         workspace: String,
         #[arg(long)]
-        command: String,
+        command: Option<String>,
+        #[arg(long)]
+        command_file: Option<PathBuf>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
         #[arg(long)]
         exit_code: i32,
         #[arg(long)]
@@ -178,7 +202,13 @@ enum AgentCommand {
         #[arg(long)]
         workspace: String,
         #[arg(long)]
-        command: String,
+        command: Option<String>,
+        #[arg(long)]
+        command_file: Option<PathBuf>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
         #[arg(long)]
         exit_code: i32,
         #[arg(long)]
@@ -206,6 +236,17 @@ enum LegacyGitCommand {
         #[arg(long)]
         output: PathBuf,
     },
+}
+
+#[derive(Debug)]
+struct CommandEvidenceOptions {
+    command: Option<String>,
+    command_file: Option<PathBuf>,
+    label: Option<String>,
+    cwd: Option<String>,
+    exit_code: i32,
+    summary: String,
+    artifact: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -250,6 +291,31 @@ fn main() -> Result<()> {
                     artifact,
                 },
         } => attach_evidence(root, &thread, command, exit_code, summary, artifact),
+        Command::Evidence {
+            command:
+                EvidenceCommand::Command {
+                    thread,
+                    command,
+                    command_file,
+                    label,
+                    cwd,
+                    exit_code,
+                    summary,
+                    artifact,
+                },
+        } => attach_command_evidence(
+            root,
+            &thread,
+            CommandEvidenceOptions {
+                command,
+                command_file,
+                label,
+                cwd,
+                exit_code,
+                summary,
+                artifact,
+            },
+        ),
         Command::Review {
             command: ReviewCommand::Create { thread },
         } => create_review(root, &thread),
@@ -276,23 +342,52 @@ fn main() -> Result<()> {
                 AgentCommand::Finish {
                     workspace,
                     command,
+                    command_file,
+                    label,
+                    cwd,
                     exit_code,
                     summary,
                     artifact,
                 },
-        } => finish_agent(root, &workspace, command, exit_code, summary, artifact),
+        } => finish_agent(
+            root,
+            &workspace,
+            CommandEvidenceOptions {
+                command,
+                command_file,
+                label,
+                cwd,
+                exit_code,
+                summary,
+                artifact,
+            },
+        ),
         Command::Agent {
             command:
                 AgentCommand::Accept {
                     workspace,
                     command,
+                    command_file,
+                    label,
+                    cwd,
                     exit_code,
                     summary,
                     artifact,
                     output,
                 },
         } => accept_agent(
-            root, &workspace, command, exit_code, summary, artifact, output,
+            root,
+            &workspace,
+            CommandEvidenceOptions {
+                command,
+                command_file,
+                label,
+                cwd,
+                exit_code,
+                summary,
+                artifact,
+            },
+            output,
         ),
         Command::Legacy {
             command:
@@ -462,6 +557,22 @@ fn attach_evidence(
     Ok(())
 }
 
+fn attach_command_evidence(
+    root: PathBuf,
+    thread_id: &str,
+    options: CommandEvidenceOptions,
+) -> Result<()> {
+    let input = command_input(options)?;
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let evidence = store
+        .attach_command_evidence(thread_id, input)
+        .context("failed to attach command evidence")?;
+
+    println!("Attached command evidence {}", evidence.id);
+    println!("thread: {}", evidence.thread_id);
+    Ok(())
+}
+
 fn create_review(root: PathBuf, thread_id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let review = store
@@ -599,17 +710,11 @@ fn show_agent_status(root: PathBuf, thread_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn finish_agent(
-    root: PathBuf,
-    workspace_id: &str,
-    command: String,
-    exit_code: i32,
-    summary: String,
-    artifact: Option<String>,
-) -> Result<()> {
+fn finish_agent(root: PathBuf, workspace_id: &str, options: CommandEvidenceOptions) -> Result<()> {
+    let input = command_input(options)?;
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let finish = store
-        .finish_agent(workspace_id, command, exit_code, summary, artifact)
+        .finish_agent_with_evidence(workspace_id, input)
         .context("failed to finish agent task")?;
 
     println!("Finished agent task");
@@ -627,15 +732,13 @@ fn finish_agent(
 fn accept_agent(
     root: PathBuf,
     workspace_id: &str,
-    command: String,
-    exit_code: i32,
-    summary: String,
-    artifact: Option<String>,
+    options: CommandEvidenceOptions,
     output: Option<PathBuf>,
 ) -> Result<()> {
+    let input = command_input(options)?;
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let acceptance = store
-        .accept_agent(workspace_id, command, exit_code, summary, artifact, output)
+        .accept_agent_with_evidence(workspace_id, input, output)
         .context("failed to accept agent workspace")?;
 
     println!("Accepted agent workspace");
@@ -654,6 +757,28 @@ fn accept_agent(
         shell_quote(&acceptance.patch_path)
     );
     Ok(())
+}
+
+fn command_input(options: CommandEvidenceOptions) -> Result<CommandEvidenceInput> {
+    let command_text = match (&options.command, &options.command_file) {
+        (Some(command), _) => command.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read command file {}", path.display()))?,
+        (None, None) => anyhow::bail!("either --command or --command-file is required"),
+    };
+    let command_file = options
+        .command_file
+        .map(|path| path.to_string_lossy().to_string());
+
+    Ok(CommandEvidenceInput {
+        command: command_text,
+        command_label: options.label,
+        command_file,
+        cwd: options.cwd,
+        exit_code: options.exit_code,
+        summary: options.summary,
+        artifact_path: options.artifact,
+    })
 }
 
 fn export_legacy_git_patch(root: PathBuf, publication_id: &str, output: PathBuf) -> Result<()> {
