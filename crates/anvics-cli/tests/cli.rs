@@ -770,6 +770,40 @@ fn command_run_records_artifacts_and_review_evidence() {
     let stdout_path = value_after_prefix(&command, "stdout: ");
     assert_eq!(fs::read_to_string(stdout_path).unwrap(), "verified\n");
 
+    #[cfg(not(feature = "vfs-fuse"))]
+    {
+        let auto_command = anvics(
+            dir.path(),
+            &[
+                "command",
+                "run",
+                "--workspace",
+                &workspace,
+                "--label",
+                "auto read",
+                "--summary",
+                "Read through auto projection",
+                "--projection",
+                "auto",
+                "--",
+                "cat",
+                "app.txt",
+            ],
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("projection: materialized_dir"))
+        .stdout(predicate::str::contains("projection_fallback_reason:"))
+        .get_output()
+        .stdout
+        .clone();
+        let auto_command_event = value_after_prefix(&auto_command, "Ran command ");
+        anvics(dir.path(), &["command", "show", &auto_command_event])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"projection_fallback_reason\""));
+    }
+
     anvics(dir.path(), &["command", "show", &command_event])
         .assert()
         .success()

@@ -3,11 +3,11 @@ use anvics_core::{
     AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
     CommandPolicyClass, CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
     NativePublication, NativePublicationId, ObjectId, OverlayEntry, PolicyOverride,
-    PolicyOverrideId, ProjectionCapabilities, ProjectionKind, RelatedWork, RepositoryEvent,
-    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
-    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
-    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
-    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork,
+    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
+    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
+    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
+    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -65,6 +65,8 @@ pub enum StoreError {
     EmptyCommandArgv,
     #[error("command cwd must stay inside workspace: {0}")]
     InvalidCommandCwd(String),
+    #[error("projection unavailable: {0}")]
+    ProjectionUnavailable(String),
     #[error("command {id} failed with exit code {exit_code}")]
     CommandFailed { id: String, exit_code: i32 },
     #[error("publication blocked by {finding_count} unresolved secret-risk finding(s); rerun with --allow-secret-risk --override-reason <reason> to proceed")]
@@ -86,6 +88,8 @@ pub enum StoreError {
     Time(#[from] time::error::Format),
     #[error(transparent)]
     Walk(#[from] ignore::Error),
+    #[error(transparent)]
+    Vfs(#[from] anvics_vfs::VfsError),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -120,6 +124,8 @@ pub struct CommandRunInput {
     pub timeout_seconds: Option<u64>,
     pub summary: String,
     pub artifact_path: Option<String>,
+    pub projection: ProjectionRequest,
+    pub mount_root: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +141,14 @@ struct WorkspaceProjection {
     kind: ProjectionKind,
     root_path: PathBuf,
     capabilities: ProjectionCapabilities,
+    fallback_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedProjection {
+    projection: WorkspaceProjection,
+    #[allow(dead_code)]
+    mounted_workspace: Option<anvics_vfs::MountedWorkspace>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -165,6 +179,7 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("sessions"))?;
         fs::create_dir_all(anvics_dir.join("command-events"))?;
         fs::create_dir_all(anvics_dir.join("artifacts/commands"))?;
+        fs::create_dir_all(anvics_dir.join("mounts"))?;
         fs::create_dir_all(anvics_dir.join("risks"))?;
         fs::create_dir_all(anvics_dir.join("policy-overrides"))?;
 
@@ -493,13 +508,20 @@ impl AnvicsStore {
             input.argv.clone()
         };
 
-        let projection = self.resolve_workspace_projection(&workspace)?;
+        let command_event_id = CommandEventId::new();
+        let resolved_projection = self.resolve_workspace_projection(
+            &workspace,
+            &input.projection,
+            input.mount_root.as_deref(),
+            command_event_id.as_str(),
+        )?;
+        let projection = &resolved_projection.projection;
         debug_assert!(projection.capabilities.readable);
         debug_assert!(projection.capabilities.writable);
         debug_assert!(projection.capabilities.file_effects);
         let command_policy_class = classify_command_policy(&argv);
         let before_files = workspace_file_map(&projection.root_path)?;
-        let cwd = self.resolve_projection_cwd(&projection, input.cwd.as_deref())?;
+        let cwd = self.resolve_projection_cwd(projection, input.cwd.as_deref())?;
         let cwd_display = cwd.to_string_lossy().to_string();
         let projection_root = projection.root_path.to_string_lossy().to_string();
         let timeout = Duration::from_secs(
@@ -507,7 +529,6 @@ impl AnvicsStore {
                 .timeout_seconds
                 .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS),
         );
-        let command_event_id = CommandEventId::new();
         let artifact_dir = self.command_artifact_dir(command_event_id.as_str());
         fs::create_dir_all(&artifact_dir)?;
         let stdout_path = artifact_dir.join("stdout.txt");
@@ -536,6 +557,7 @@ impl AnvicsStore {
             projection_kind: Some(projection.kind.clone()),
             projection_root: Some(projection_root),
             projection_capabilities: Some(projection.capabilities.clone()),
+            projection_fallback_reason: projection.fallback_reason.clone(),
             command_policy_class: Some(command_policy_class.clone()),
             file_effects: Vec::new(),
             started_at,
@@ -558,6 +580,23 @@ impl AnvicsStore {
         command_event.finished_at = Some(now_rfc3339()?);
         let after_files = workspace_file_map(&projection.root_path)?;
         command_event.file_effects = diff_file_maps(&before_files, &after_files);
+        if let Some(mounted_workspace) = &resolved_projection.mounted_workspace {
+            mounted_workspace.persist_to_path(Path::new(&workspace.materialized_path))?;
+            let mounted_effects = mounted_workspace.changed_paths();
+            if !mounted_effects.is_empty() {
+                command_event.file_effects = mounted_effects
+                    .into_iter()
+                    .map(|effect| ChangedPath {
+                        path: effect.path,
+                        status: match effect.status {
+                            anvics_vfs::VfsFileEffectStatus::Added => ChangeStatus::Added,
+                            anvics_vfs::VfsFileEffectStatus::Modified => ChangeStatus::Modified,
+                            anvics_vfs::VfsFileEffectStatus::Deleted => ChangeStatus::Deleted,
+                        },
+                    })
+                    .collect();
+            }
+        }
         fs::write(&stdout_path, execution.stdout)?;
         fs::write(&stderr_path, execution.stderr)?;
         write_json_pretty(
@@ -1391,6 +1430,38 @@ impl AnvicsStore {
     fn resolve_workspace_projection(
         &self,
         workspace: &WorkspaceView,
+        request: &ProjectionRequest,
+        mount_root: Option<&str>,
+        command_event_id: &str,
+    ) -> Result<ResolvedProjection> {
+        match request {
+            ProjectionRequest::MaterializedDir => self
+                .resolve_materialized_projection(workspace, None)
+                .map(|projection| ResolvedProjection {
+                    projection,
+                    mounted_workspace: None,
+                }),
+            ProjectionRequest::FuseMount => {
+                self.resolve_fuse_projection(workspace, mount_root, command_event_id, false)
+            }
+            ProjectionRequest::Auto => {
+                match self.resolve_fuse_projection(workspace, mount_root, command_event_id, true) {
+                    Ok(projection) => Ok(projection),
+                    Err(error) => self
+                        .resolve_materialized_projection(workspace, Some(error.to_string()))
+                        .map(|projection| ResolvedProjection {
+                            projection,
+                            mounted_workspace: None,
+                        }),
+                }
+            }
+        }
+    }
+
+    fn resolve_materialized_projection(
+        &self,
+        workspace: &WorkspaceView,
+        fallback_reason: Option<String>,
     ) -> Result<WorkspaceProjection> {
         let root_path = PathBuf::from(&workspace.materialized_path).canonicalize()?;
         Ok(WorkspaceProjection {
@@ -1403,6 +1474,42 @@ impl AnvicsStore {
                 writable: true,
                 file_effects: true,
             },
+            fallback_reason,
+        })
+    }
+
+    fn resolve_fuse_projection(
+        &self,
+        workspace: &WorkspaceView,
+        mount_root: Option<&str>,
+        command_event_id: &str,
+        _allow_auto_fallback: bool,
+    ) -> Result<ResolvedProjection> {
+        let workspace_root = PathBuf::from(&workspace.materialized_path).canonicalize()?;
+        let mount_base = match mount_root {
+            Some(root) if !root.trim().is_empty() => PathBuf::from(root),
+            _ => self.anvics_dir.join("mounts"),
+        };
+        fs::create_dir_all(&mount_base)?;
+        let mount_path = mount_base.join(command_event_id);
+        let mounted_workspace = anvics_vfs::mount_workspace(&workspace_root, &mount_path)
+            .map_err(|error| StoreError::ProjectionUnavailable(error.to_string()))?;
+        let root_path = mounted_workspace.mount_path().canonicalize()?;
+
+        Ok(ResolvedProjection {
+            projection: WorkspaceProjection {
+                workspace_id: workspace.id.clone(),
+                thread_id: workspace.thread_id.clone(),
+                kind: ProjectionKind::FuseMount,
+                root_path,
+                capabilities: ProjectionCapabilities {
+                    readable: true,
+                    writable: true,
+                    file_effects: true,
+                },
+                fallback_reason: None,
+            },
+            mounted_workspace: Some(mounted_workspace),
         })
     }
 
@@ -3389,6 +3496,8 @@ mod tests {
                 timeout_seconds: Some(10),
                 summary: "Read app.txt".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
             })
             .unwrap();
 
@@ -3439,6 +3548,8 @@ mod tests {
                 timeout_seconds: Some(10),
                 summary: "ok".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
             })
             .unwrap_err();
 
@@ -3457,8 +3568,14 @@ mod tests {
             .unwrap();
 
         let projection = store
-            .resolve_workspace_projection(&preparation.workspace)
+            .resolve_workspace_projection(
+                &preparation.workspace,
+                &ProjectionRequest::MaterializedDir,
+                None,
+                "test-command",
+            )
             .unwrap();
+        let projection = projection.projection;
 
         assert_eq!(projection.workspace_id, preparation.workspace.id);
         assert_eq!(projection.thread_id, preparation.thread.id);
@@ -3487,8 +3604,55 @@ mod tests {
             timeout_seconds: Some(10),
             summary: "Missing workspace".to_owned(),
             artifact_path: None,
+            projection: ProjectionRequest::MaterializedDir,
+            mount_root: None,
         });
         assert!(matches!(missing, Err(StoreError::WorkspaceNotFound(_))));
+    }
+
+    #[test]
+    fn auto_projection_falls_back_without_fuse_feature() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Auto projection".to_owned(), "Read file".to_owned())
+            .unwrap();
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["cat".to_owned(), "app.txt".to_owned()],
+                command_file: None,
+                command_label: "read app".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Read app through auto projection".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::Auto,
+                mount_root: None,
+            })
+            .unwrap();
+
+        #[cfg(not(feature = "vfs-fuse"))]
+        {
+            assert_eq!(
+                result.command_event.projection_kind,
+                Some(ProjectionKind::MaterializedDir)
+            );
+            assert!(result
+                .command_event
+                .projection_fallback_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("FUSE support is not compiled"));
+        }
+        #[cfg(feature = "vfs-fuse")]
+        {
+            assert!(result.command_event.projection_kind.is_some());
+        }
     }
 
     #[test]
@@ -3518,6 +3682,8 @@ mod tests {
                 timeout_seconds: Some(10),
                 summary: "Edited files through projection".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
             })
             .unwrap();
 
@@ -3598,6 +3764,8 @@ mod tests {
                 timeout_seconds: Some(10),
                 summary: "Edited app.txt before failing".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
             })
             .unwrap();
 
@@ -3673,6 +3841,8 @@ mod tests {
                 timeout_seconds: Some(0),
                 summary: "Timed out".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
             })
             .unwrap();
 
@@ -4203,6 +4373,8 @@ mod tests {
                     timeout_seconds: Some(10),
                     summary: "Verified accepted app.txt".to_owned(),
                     artifact_path: None,
+                    projection: ProjectionRequest::MaterializedDir,
+                    mount_root: None,
                 },
                 None,
             )
@@ -4238,6 +4410,8 @@ mod tests {
                     timeout_seconds: Some(10),
                     summary: "Verification failed".to_owned(),
                     artifact_path: None,
+                    projection: ProjectionRequest::MaterializedDir,
+                    mount_root: None,
                 },
                 None,
             )
@@ -4282,6 +4456,8 @@ mod tests {
                     timeout_seconds: Some(10),
                     summary: "Command emitted fixture secret".to_owned(),
                     artifact_path: None,
+                    projection: ProjectionRequest::MaterializedDir,
+                    mount_root: None,
                 },
                 None,
                 PublicationOptions::default(),

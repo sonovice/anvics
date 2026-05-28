@@ -191,6 +191,10 @@ enum CommandRunCommand {
         artifact: Option<String>,
         #[arg(long)]
         command_file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = ProjectionSelection::MaterializedDir)]
+        projection: ProjectionSelection,
+        #[arg(long)]
+        mount_root: Option<PathBuf>,
         #[arg(last = true)]
         argv: Vec<String>,
     },
@@ -261,6 +265,23 @@ impl From<WorkspaceDiffFormat> for ApiWorkspaceDiffFormat {
         match format {
             WorkspaceDiffFormat::Summary => Self::Summary,
             WorkspaceDiffFormat::Patch => Self::Patch,
+        }
+    }
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ProjectionSelection {
+    MaterializedDir,
+    FuseMount,
+    Auto,
+}
+
+impl From<ProjectionSelection> for anvics_core::ProjectionRequest {
+    fn from(selection: ProjectionSelection) -> Self {
+        match selection {
+            ProjectionSelection::MaterializedDir => Self::MaterializedDir,
+            ProjectionSelection::FuseMount => Self::FuseMount,
+            ProjectionSelection::Auto => Self::Auto,
         }
     }
 }
@@ -340,6 +361,10 @@ enum AgentCommand {
         run_summary: Option<String>,
         #[arg(long)]
         run_timeout_seconds: Option<u64>,
+        #[arg(long, value_enum, default_value_t = ProjectionSelection::MaterializedDir)]
+        projection: ProjectionSelection,
+        #[arg(long)]
+        mount_root: Option<PathBuf>,
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long)]
@@ -414,6 +439,8 @@ struct CommandRunOptions {
     timeout_seconds: Option<u64>,
     summary: String,
     artifact: Option<String>,
+    projection: ProjectionSelection,
+    mount_root: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -428,6 +455,8 @@ struct AgentAcceptOptions {
     run_label: Option<String>,
     run_summary: Option<String>,
     run_timeout_seconds: Option<u64>,
+    projection: ProjectionSelection,
+    mount_root: Option<PathBuf>,
     allow_secret_risk: bool,
     override_reason: Option<String>,
     argv: Vec<String>,
@@ -616,6 +645,8 @@ fn main() -> Result<()> {
                     timeout_seconds,
                     artifact,
                     command_file,
+                    projection,
+                    mount_root,
                     argv,
                 },
         } => {
@@ -628,6 +659,8 @@ fn main() -> Result<()> {
                 timeout_seconds,
                 summary,
                 artifact,
+                projection,
+                mount_root,
             };
             if let Some(socket) = daemon {
                 run_command_via_daemon(root, socket, options)
@@ -813,6 +846,8 @@ fn main() -> Result<()> {
                     run_label,
                     run_summary,
                     run_timeout_seconds,
+                    projection,
+                    mount_root,
                     output,
                     allow_secret_risk,
                     override_reason,
@@ -830,6 +865,8 @@ fn main() -> Result<()> {
                 run_label,
                 run_summary,
                 run_timeout_seconds,
+                projection,
+                mount_root,
                 allow_secret_risk,
                 override_reason,
                 argv,
@@ -1410,6 +1447,8 @@ fn run_command_via_daemon(
             timeout_seconds: input.timeout_seconds,
             summary: input.summary,
             artifact_path: input.artifact_path,
+            projection: input.projection,
+            mount_root: input.mount_root,
         },
     )? {
         ApiResult::CommandRun {
@@ -1465,6 +1504,9 @@ fn print_command_run(
             capabilities.readable, capabilities.writable, capabilities.file_effects
         );
     }
+    if let Some(reason) = &command_event.projection_fallback_reason {
+        println!("projection_fallback_reason: {reason}");
+    }
     if let Some(policy_class) = &command_event.command_policy_class {
         println!("policy: {}", command_policy_class_label(policy_class));
     }
@@ -1488,6 +1530,7 @@ fn print_command_run(
 fn projection_kind_label(kind: &anvics_core::ProjectionKind) -> &'static str {
     match kind {
         anvics_core::ProjectionKind::MaterializedDir => "materialized_dir",
+        anvics_core::ProjectionKind::FuseMount => "fuse_mount",
     }
 }
 
@@ -2251,6 +2294,8 @@ fn accept_agent_via_daemon(
             timeout_seconds: input.timeout_seconds,
             summary: input.summary,
             artifact_path: input.artifact_path,
+            projection: input.projection,
+            mount_root: input.mount_root,
             output_path: output.map(|path| path.to_string_lossy().to_string()),
             allow_secret_risk,
             override_reason,
@@ -2357,6 +2402,10 @@ fn command_run_input(options: CommandRunOptions) -> Result<CommandRunInput> {
         timeout_seconds: options.timeout_seconds,
         summary: options.summary,
         artifact_path: options.artifact,
+        projection: options.projection.into(),
+        mount_root: options
+            .mount_root
+            .map(|path| path.to_string_lossy().to_string()),
     })
 }
 
@@ -2382,6 +2431,10 @@ fn agent_accept_run_input(
         timeout_seconds: options.run_timeout_seconds,
         summary,
         artifact_path: options.artifact,
+        projection: options.projection.into(),
+        mount_root: options
+            .mount_root
+            .map(|path| path.to_string_lossy().to_string()),
     })
 }
 

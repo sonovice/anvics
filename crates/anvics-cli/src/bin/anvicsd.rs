@@ -215,6 +215,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             timeout_seconds,
             summary,
             artifact_path,
+            projection,
+            mount_root,
         } => {
             let result = AnvicsStore::open(&repo)?.run_command(CommandRunInput {
                 workspace_id: workspace,
@@ -225,6 +227,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 timeout_seconds,
                 summary,
                 artifact_path,
+                projection,
+                mount_root,
             })?;
             Ok(ApiResult::CommandRun {
                 command_event: Box::new(result.command_event),
@@ -345,6 +349,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             timeout_seconds,
             summary,
             artifact_path,
+            projection,
+            mount_root,
             output_path,
             allow_secret_risk,
             override_reason,
@@ -359,6 +365,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                     timeout_seconds,
                     summary,
                     artifact_path,
+                    projection,
+                    mount_root,
                 },
                 output_path.map(PathBuf::from),
                 PublicationOptions {

@@ -1,8 +1,8 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, ChangedPath,
-    CommandEvent, CoordinationStatus, EvidenceRecord, NativePublication, RepositoryEvent,
-    RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread,
-    WorkspaceView,
+    CommandEvent, CoordinationStatus, EvidenceRecord, NativePublication, ProjectionRequest,
+    RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot,
+    WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +76,9 @@ pub enum ApiMethod {
         timeout_seconds: Option<u64>,
         summary: String,
         artifact_path: Option<String>,
+        #[serde(default)]
+        projection: ProjectionRequest,
+        mount_root: Option<String>,
     },
     CommandShow {
         id: String,
@@ -123,6 +126,9 @@ pub enum ApiMethod {
         timeout_seconds: Option<u64>,
         summary: String,
         artifact_path: Option<String>,
+        #[serde(default)]
+        projection: ProjectionRequest,
+        mount_root: Option<String>,
         output_path: Option<String>,
         allow_secret_risk: bool,
         override_reason: Option<String>,
@@ -395,6 +401,8 @@ mod tests {
                 timeout_seconds: Some(120),
                 summary: "ok".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
             },
             ApiMethod::CommandShow {
                 id: "command-1".to_owned(),
@@ -477,6 +485,8 @@ mod tests {
                 timeout_seconds: Some(120),
                 summary: "ok".to_owned(),
                 artifact_path: None,
+                projection: ProjectionRequest::Auto,
+                mount_root: Some("/tmp/anvics-mounts".to_owned()),
                 output_path: Some("accepted.patch".to_owned()),
                 allow_secret_risk: true,
                 override_reason: Some("fixture false positive".to_owned()),
@@ -502,6 +512,34 @@ mod tests {
                     .unwrap(),
                 request
             );
+        }
+    }
+
+    #[test]
+    fn command_run_request_defaults_projection_for_old_clients() {
+        let json = r#"{
+            "id": 7,
+            "repo": "/tmp/repo",
+            "method": {
+                "method": "command_run",
+                "workspace": "workspace-1",
+                "argv": ["true"],
+                "command_file": null,
+                "command_label": "verify",
+                "cwd": null,
+                "timeout_seconds": null,
+                "summary": "ok",
+                "artifact_path": null,
+                "mount_root": null
+            }
+        }"#;
+
+        let request: ApiRequest = serde_json::from_str(json).unwrap();
+        match request.method {
+            ApiMethod::CommandRun { projection, .. } => {
+                assert_eq!(projection, ProjectionRequest::MaterializedDir);
+            }
+            _ => panic!("expected command run request"),
         }
     }
 
@@ -583,6 +621,7 @@ mod tests {
                 writable: true,
                 file_effects: true,
             }),
+            projection_fallback_reason: None,
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
             file_effects: vec![ChangedPath {
                 path: "app.txt".to_owned(),

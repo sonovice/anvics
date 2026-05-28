@@ -192,6 +192,16 @@ pub struct OverlayEntry {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionKind {
     MaterializedDir,
+    FuseMount,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionRequest {
+    #[default]
+    MaterializedDir,
+    FuseMount,
+    Auto,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -291,6 +301,8 @@ pub struct CommandEvent {
     pub projection_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_capabilities: Option<ProjectionCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_fallback_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -584,6 +596,7 @@ mod tests {
                 writable: true,
                 file_effects: true,
             }),
+            projection_fallback_reason: None,
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
             file_effects: vec![ChangedPath {
                 path: "app.txt".to_owned(),
@@ -799,7 +812,24 @@ mod tests {
         assert_eq!(event.projection_kind, None);
         assert_eq!(event.projection_root, None);
         assert_eq!(event.projection_capabilities, None);
+        assert_eq!(event.projection_fallback_reason, None);
         assert_eq!(event.command_policy_class, None);
         assert!(event.file_effects.is_empty());
+    }
+
+    #[test]
+    fn projection_request_and_fuse_kind_round_trip_as_json() {
+        assert_eq!(
+            serde_json::from_str::<ProjectionRequest>("\"fuse_mount\"").unwrap(),
+            ProjectionRequest::FuseMount
+        );
+        assert_eq!(
+            serde_json::to_string(&ProjectionRequest::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ProjectionKind>("\"fuse_mount\"").unwrap(),
+            ProjectionKind::FuseMount
+        );
     }
 }

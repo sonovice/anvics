@@ -1,5 +1,5 @@
 [package]
-name = "anvics-store"
+name = "anvics-vfs"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,18 +7,12 @@ repository.workspace = true
 
 [features]
 default = []
-vfs-fuse = ["anvics-vfs/fuse"]
+fuse = ["dep:fuser"]
 
 [dependencies]
-anvics-core = { path = "../anvics-core" }
-anvics-vfs = { path = "../anvics-vfs" }
-anyhow.workspace = true
 blake3.workspace = true
-ignore.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+fuser = { workspace = true, optional = true }
 thiserror.workspace = true
-time.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
