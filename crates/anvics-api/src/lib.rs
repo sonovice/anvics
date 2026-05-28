@@ -578,6 +578,12 @@ mod tests {
             stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
             projection_kind: Some(ProjectionKind::MaterializedDir),
             projection_root: Some(".anvics/workspaces/example/files".to_owned()),
+            projection_capabilities: Some(ProjectionCapabilities {
+                readable: true,
+                writable: true,
+                file_effects: true,
+            }),
+            command_policy_class: Some(CommandPolicyClass::ReadOnly),
             file_effects: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -607,6 +613,7 @@ mod tests {
                 artifact_path: None,
                 stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
+                command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),
                     status: ChangeStatus::Modified,

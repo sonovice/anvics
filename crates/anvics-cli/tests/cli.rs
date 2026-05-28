@@ -756,6 +756,10 @@ fn command_run_records_artifacts_and_review_evidence() {
     .stdout(predicate::str::contains("Ran command"))
     .stdout(predicate::str::contains("exit_code: 0"))
     .stdout(predicate::str::contains("projection: materialized_dir"))
+    .stdout(predicate::str::contains(
+        "projection_capabilities: readable=true writable=true file_effects=true",
+    ))
+    .stdout(predicate::str::contains("policy: mutating"))
     .stdout(predicate::str::contains("file_effects:"))
     .stdout(predicate::str::contains("- Modified: app.txt"))
     .stdout(predicate::str::contains("stdout: "))
@@ -774,6 +778,10 @@ fn command_run_records_artifacts_and_review_evidence() {
         ))
         .stdout(predicate::str::contains(
             "\"projection_kind\": \"materialized_dir\"",
+        ))
+        .stdout(predicate::str::contains("\"projection_capabilities\""))
+        .stdout(predicate::str::contains(
+            "\"command_policy_class\": \"mutating\"",
         ))
         .stdout(predicate::str::contains("\"path\": \"app.txt\""));
     anvics(
@@ -797,6 +805,7 @@ fn command_run_records_artifacts_and_review_evidence() {
     .success()
     .stdout(predicate::str::contains("anvics-run:"))
     .stdout(predicate::str::contains("stdout:"))
+    .stdout(predicate::str::contains("policy: mutating"))
     .stdout(predicate::str::contains("file effects: modified `app.txt`"))
     .stdout(predicate::str::contains("Verified app.txt contents"));
 }

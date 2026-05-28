@@ -1,13 +1,13 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
     AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
-    CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication,
-    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionKind,
-    RelatedWork, RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId,
-    RepositoryManifest, ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan,
-    RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry,
-    TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView,
-    WorkspaceViewId,
+    CommandPolicyClass, CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
+    NativePublication, NativePublicationId, ObjectId, OverlayEntry, PolicyOverride,
+    PolicyOverrideId, ProjectionCapabilities, ProjectionKind, RelatedWork, RepositoryEvent,
+    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
+    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
+    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
+    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -134,8 +134,7 @@ struct WorkspaceProjection {
     thread_id: WorkThreadId,
     kind: ProjectionKind,
     root_path: PathBuf,
-    supports_writes: bool,
-    supports_file_effects: bool,
+    capabilities: ProjectionCapabilities,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -495,8 +494,10 @@ impl AnvicsStore {
         };
 
         let projection = self.resolve_workspace_projection(&workspace)?;
-        debug_assert!(projection.supports_writes);
-        debug_assert!(projection.supports_file_effects);
+        debug_assert!(projection.capabilities.readable);
+        debug_assert!(projection.capabilities.writable);
+        debug_assert!(projection.capabilities.file_effects);
+        let command_policy_class = classify_command_policy(&argv);
         let before_files = workspace_file_map(&projection.root_path)?;
         let cwd = self.resolve_projection_cwd(&projection, input.cwd.as_deref())?;
         let cwd_display = cwd.to_string_lossy().to_string();
@@ -534,6 +535,8 @@ impl AnvicsStore {
             stderr_path: Some(stderr_path.to_string_lossy().to_string()),
             projection_kind: Some(projection.kind.clone()),
             projection_root: Some(projection_root),
+            projection_capabilities: Some(projection.capabilities.clone()),
+            command_policy_class: Some(command_policy_class.clone()),
             file_effects: Vec::new(),
             started_at,
             finished_at: None,
@@ -1395,8 +1398,11 @@ impl AnvicsStore {
             thread_id: workspace.thread_id.clone(),
             kind: ProjectionKind::MaterializedDir,
             root_path,
-            supports_writes: true,
-            supports_file_effects: true,
+            capabilities: ProjectionCapabilities {
+                readable: true,
+                writable: true,
+                file_effects: true,
+            },
         })
     }
 
@@ -1848,13 +1854,16 @@ impl AnvicsStore {
         });
         let mut summaries = Vec::new();
         for record in records {
-            let file_effects = match &record.command_event_id {
-                Some(command_event_id) => self
-                    .show_command_event(command_event_id.as_str())
-                    .map(|event| event.file_effects)
-                    .unwrap_or_default(),
-                None => Vec::new(),
+            let command_event = match &record.command_event_id {
+                Some(command_event_id) => self.show_command_event(command_event_id.as_str()).ok(),
+                None => None,
             };
+            let command_policy_class = command_event
+                .as_ref()
+                .and_then(|event| event.command_policy_class.clone());
+            let file_effects = command_event
+                .map(|event| event.file_effects)
+                .unwrap_or_default();
             summaries.push(EvidenceSummary {
                 id: record.id,
                 command_event_id: record.command_event_id,
@@ -1867,6 +1876,7 @@ impl AnvicsStore {
                 artifact_path: record.artifact_path,
                 stdout_path: record.stdout_path,
                 stderr_path: record.stderr_path,
+                command_policy_class,
                 file_effects,
             });
         }
@@ -2283,6 +2293,136 @@ fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+fn classify_command_policy(argv: &[String]) -> CommandPolicyClass {
+    let Some(program) = argv.first().map(|value| value.as_str()) else {
+        return CommandPolicyClass::Unknown;
+    };
+    let program_name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    let shell_command = if matches!(program_name, "sh" | "bash" | "zsh") && argv.len() >= 3 {
+        argv.last().map(String::as_str)
+    } else {
+        None
+    };
+
+    if let Some(command) = shell_command {
+        return classify_shell_command(command);
+    }
+
+    if matches!(
+        program_name,
+        "rm" | "rmdir" | "unlink" | "trash" | "shred" | "dd"
+    ) {
+        return CommandPolicyClass::Destructive;
+    }
+    if matches!(
+        program_name,
+        "sudo" | "su" | "doas" | "docker" | "podman" | "osascript" | "open"
+    ) {
+        return CommandPolicyClass::HostEscapeRisk;
+    }
+    if matches!(
+        program_name,
+        "curl" | "wget" | "ssh" | "scp" | "sftp" | "nc" | "netcat" | "gh" | "git"
+    ) {
+        return CommandPolicyClass::Networked;
+    }
+    if matches!(
+        program_name,
+        "vim" | "vi" | "nano" | "emacs" | "less" | "more" | "top" | "htop"
+    ) {
+        return CommandPolicyClass::Interactive;
+    }
+    if matches!(
+        program_name,
+        "touch" | "mkdir" | "cp" | "mv" | "tee" | "sed" | "perl" | "python" | "python3" | "node"
+    ) {
+        return CommandPolicyClass::Mutating;
+    }
+    if matches!(
+        program_name,
+        "cat"
+            | "grep"
+            | "rg"
+            | "ls"
+            | "pwd"
+            | "head"
+            | "tail"
+            | "wc"
+            | "find"
+            | "test"
+            | "true"
+            | "false"
+    ) {
+        return CommandPolicyClass::ReadOnly;
+    }
+
+    CommandPolicyClass::Unknown
+}
+
+fn classify_shell_command(command: &str) -> CommandPolicyClass {
+    let command = command.trim();
+    if contains_shell_word(command, "rm")
+        || contains_shell_word(command, "rmdir")
+        || contains_shell_word(command, "unlink")
+    {
+        return CommandPolicyClass::Destructive;
+    }
+    if contains_shell_word(command, "sudo")
+        || contains_shell_word(command, "docker")
+        || contains_shell_word(command, "podman")
+        || contains_shell_word(command, "osascript")
+    {
+        return CommandPolicyClass::HostEscapeRisk;
+    }
+    if contains_shell_word(command, "curl")
+        || contains_shell_word(command, "wget")
+        || contains_shell_word(command, "ssh")
+        || contains_shell_word(command, "scp")
+        || contains_shell_word(command, "gh")
+        || contains_shell_word(command, "git")
+    {
+        return CommandPolicyClass::Networked;
+    }
+    if contains_shell_word(command, "vim")
+        || contains_shell_word(command, "nano")
+        || contains_shell_word(command, "less")
+        || contains_shell_word(command, "more")
+    {
+        return CommandPolicyClass::Interactive;
+    }
+    if command.contains('>')
+        || command.contains(">>")
+        || contains_shell_word(command, "touch")
+        || contains_shell_word(command, "mkdir")
+        || contains_shell_word(command, "cp")
+        || contains_shell_word(command, "mv")
+        || contains_shell_word(command, "tee")
+        || command.contains(" -i")
+    {
+        return CommandPolicyClass::Mutating;
+    }
+    if contains_shell_word(command, "cat")
+        || contains_shell_word(command, "grep")
+        || contains_shell_word(command, "rg")
+        || contains_shell_word(command, "ls")
+        || contains_shell_word(command, "pwd")
+        || contains_shell_word(command, "test")
+    {
+        return CommandPolicyClass::ReadOnly;
+    }
+
+    CommandPolicyClass::Unknown
+}
+
+fn contains_shell_word(command: &str, word: &str) -> bool {
+    command
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .any(|part| part == word)
+}
+
 fn append_event_at(
     anvics_dir: &Path,
     kind: RepositoryEventKind,
@@ -2582,6 +2722,12 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
     {
         text.push_str(&format!(" (stderr: `{stderr}`)"));
     }
+    if let Some(policy_class) = &evidence.command_policy_class {
+        text.push_str(&format!(
+            " (policy: {})",
+            command_policy_class_label(policy_class)
+        ));
+    }
     if !evidence.file_effects.is_empty() {
         let effects = evidence
             .file_effects
@@ -2592,6 +2738,18 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
         text.push_str(&format!(" (file effects: {effects})"));
     }
     text
+}
+
+fn command_policy_class_label(policy_class: &CommandPolicyClass) -> &'static str {
+    match policy_class {
+        CommandPolicyClass::ReadOnly => "read_only",
+        CommandPolicyClass::Mutating => "mutating",
+        CommandPolicyClass::Destructive => "destructive",
+        CommandPolicyClass::Networked => "networked",
+        CommandPolicyClass::HostEscapeRisk => "host_escape_risk",
+        CommandPolicyClass::Interactive => "interactive",
+        CommandPolicyClass::Unknown => "unknown",
+    }
 }
 
 fn change_status_label(status: &ChangeStatus) -> &'static str {
@@ -3311,8 +3469,14 @@ mod tests {
                 .canonicalize()
                 .unwrap()
         );
-        assert!(projection.supports_writes);
-        assert!(projection.supports_file_effects);
+        assert_eq!(
+            projection.capabilities,
+            ProjectionCapabilities {
+                readable: true,
+                writable: true,
+                file_effects: true,
+            }
+        );
 
         let missing = store.run_command(CommandRunInput {
             workspace_id: "missing-workspace".to_owned(),
@@ -3389,6 +3553,18 @@ mod tests {
             ]
         );
         assert_eq!(
+            result.command_event.projection_capabilities,
+            Some(ProjectionCapabilities {
+                readable: true,
+                writable: true,
+                file_effects: true,
+            })
+        );
+        assert_eq!(
+            result.command_event.command_policy_class,
+            Some(CommandPolicyClass::Destructive)
+        );
+        assert_eq!(
             result.evidence.command_event_id,
             Some(result.command_event.id)
         );
@@ -3431,6 +3607,18 @@ mod tests {
             Some(ProjectionKind::MaterializedDir)
         );
         assert_eq!(
+            result.command_event.projection_capabilities,
+            Some(ProjectionCapabilities {
+                readable: true,
+                writable: true,
+                file_effects: true,
+            })
+        );
+        assert_eq!(
+            result.command_event.command_policy_class,
+            Some(CommandPolicyClass::Mutating)
+        );
+        assert_eq!(
             result.command_event.file_effects,
             vec![ChangedPath {
                 path: "app.txt".to_owned(),
@@ -3438,6 +3626,30 @@ mod tests {
             }]
         );
         assert_eq!(result.evidence.exit_code, 7);
+    }
+
+    #[test]
+    fn command_policy_classifier_reports_coarse_classes() {
+        assert_eq!(
+            classify_command_policy(&["cat".to_owned(), "app.txt".to_owned()]),
+            CommandPolicyClass::ReadOnly
+        );
+        assert_eq!(
+            classify_command_policy(&[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf x > app.txt".to_owned()
+            ]),
+            CommandPolicyClass::Mutating
+        );
+        assert_eq!(
+            classify_command_policy(&["rm".to_owned(), "app.txt".to_owned()]),
+            CommandPolicyClass::Destructive
+        );
+        assert_eq!(
+            classify_command_policy(&["mystery-tool".to_owned()]),
+            CommandPolicyClass::Unknown
+        );
     }
 
     #[test]

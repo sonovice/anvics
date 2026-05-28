@@ -1459,6 +1459,15 @@ fn print_command_run(
     if let Some(root) = &command_event.projection_root {
         println!("projection_root: {root}");
     }
+    if let Some(capabilities) = &command_event.projection_capabilities {
+        println!(
+            "projection_capabilities: readable={} writable={} file_effects={}",
+            capabilities.readable, capabilities.writable, capabilities.file_effects
+        );
+    }
+    if let Some(policy_class) = &command_event.command_policy_class {
+        println!("policy: {}", command_policy_class_label(policy_class));
+    }
     if command_event.file_effects.is_empty() {
         println!("file_effects: none");
     } else {
@@ -1479,6 +1488,18 @@ fn print_command_run(
 fn projection_kind_label(kind: &anvics_core::ProjectionKind) -> &'static str {
     match kind {
         anvics_core::ProjectionKind::MaterializedDir => "materialized_dir",
+    }
+}
+
+fn command_policy_class_label(policy_class: &anvics_core::CommandPolicyClass) -> &'static str {
+    match policy_class {
+        anvics_core::CommandPolicyClass::ReadOnly => "read_only",
+        anvics_core::CommandPolicyClass::Mutating => "mutating",
+        anvics_core::CommandPolicyClass::Destructive => "destructive",
+        anvics_core::CommandPolicyClass::Networked => "networked",
+        anvics_core::CommandPolicyClass::HostEscapeRisk => "host_escape_risk",
+        anvics_core::CommandPolicyClass::Interactive => "interactive",
+        anvics_core::CommandPolicyClass::Unknown => "unknown",
     }
 }
 

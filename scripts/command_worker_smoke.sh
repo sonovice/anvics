@@ -44,7 +44,7 @@ printf '%s\n' "$accept_output"
 review="$(printf '%s\n' "$accept_output" | value_after_prefix "review: ")"
 patch="$(printf '%s\n' "$accept_output" | value_after_prefix "patch: ")"
 
-anvics review show "$review" --format markdown | grep -E 'anvics-run:|stdout:|verify app|file effects: modified `app.txt`'
+anvics review show "$review" --format markdown | grep -E 'anvics-run:|stdout:|verify app|policy: mutating|file effects: modified `app.txt`'
 anvics agent status --thread "$thread" | grep 'publication_status: published'
 anvics events list --since 0 | grep -E 'CommandStarted|CommandFinished|LegacyPatchExported'
 
