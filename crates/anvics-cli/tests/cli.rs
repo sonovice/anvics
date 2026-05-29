@@ -28,6 +28,10 @@ fn repo_doctor_reports_config_classification_and_daemon_matches() {
         "[generated]\ntracked = [\"src/generated/**\"]\nuntracked = [\"dist/**\"]\n\n[ignore]\npaths = [\"cache/**\"]\n\n[evidence]\ncandidate_paths = [\"reports/**\"]\n",
     )
     .unwrap();
+    fs::create_dir_all(dir.path().join("src/generated")).unwrap();
+    fs::write(dir.path().join("src/generated/client.rs"), "old\n").unwrap();
+    fs::create_dir_all(dir.path().join("dist")).unwrap();
+    fs::write(dir.path().join("dist/bundle.js"), "old\n").unwrap();
     anvics(dir.path(), &["repo", "init"]).assert().success();
 
     anvics(
@@ -77,6 +81,49 @@ fn repo_doctor_reports_config_classification_and_daemon_matches() {
     .stdout(predicate::str::contains(
         "- src/generated/client.rs: generated_tracked",
     ));
+
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Classified diff",
+            "--task",
+            "Edit generated and dist files",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/src/generated/client.rs"), "new\n").unwrap();
+    fs::write(format!("{workspace_path}/dist/bundle.js"), "new\n").unwrap();
+
+    anvics(dir.path(), &["workspace", "diff", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Modified: src/generated/client.rs (generated_tracked)",
+        ))
+        .stdout(predicate::str::contains(
+            "Modified: dist/bundle.js (generated_untracked)",
+        ));
+    daemon_anvics(dir.path(), &socket, &["workspace", "diff", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Modified: src/generated/client.rs (generated_tracked)",
+        ))
+        .stdout(predicate::str::contains(
+            "Modified: dist/bundle.js (generated_untracked)",
+        ));
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
@@ -2465,7 +2512,8 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
         .success()
         .stdout(predicate::str::contains("Added: added.txt"))
         .stdout(predicate::str::contains("Deleted: deleted.txt"))
-        .stdout(predicate::str::contains("Modified: modified.txt"));
+        .stdout(predicate::str::contains("Modified: modified.txt"))
+        .stdout(predicate::str::contains("(source)"));
     daemon_anvics(
         dir.path(),
         &socket,

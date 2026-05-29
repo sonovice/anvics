@@ -1386,10 +1386,10 @@ fn diff_workspace(root: PathBuf, workspace_id: &str, format: WorkspaceDiffFormat
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     match format {
         WorkspaceDiffFormat::Summary => {
-            let changed_paths = store
-                .workspace_diff(workspace_id)
-                .with_context(|| format!("failed to diff workspace {workspace_id}"))?;
-            print_workspace_diff_summary(&changed_paths);
+            let file_effects = store
+                .workspace_file_effects(workspace_id)
+                .with_context(|| format!("failed to classify workspace diff {workspace_id}"))?;
+            print_workspace_effect_summary(&file_effects);
         }
         WorkspaceDiffFormat::Patch => {
             let patch = store
@@ -1413,14 +1413,22 @@ fn diff_workspace_via_daemon(
         ApiMethod::WorkspaceDiff {
             id,
             format: format.clone().into(),
+            classify: matches!(format, WorkspaceDiffFormat::Summary),
         },
     )? {
         ApiResult::WorkspaceDiff {
             changed_paths,
+            file_effects,
             patch,
         } => {
             match format {
-                WorkspaceDiffFormat::Summary => print_workspace_diff_summary(&changed_paths),
+                WorkspaceDiffFormat::Summary => {
+                    if file_effects.is_empty() {
+                        print_workspace_diff_summary(&changed_paths)
+                    } else {
+                        print_workspace_effect_summary(&file_effects)
+                    }
+                }
                 WorkspaceDiffFormat::Patch => print!("{}", patch.unwrap_or_default()),
             }
             Ok(())
@@ -1436,6 +1444,22 @@ fn print_workspace_diff_summary(changed_paths: &[anvics_core::ChangedPath]) {
     }
     for path in changed_paths {
         println!("{:?}: {}", path.status, path.path);
+    }
+}
+
+fn print_workspace_effect_summary(file_effects: &[anvics_core::FileEffect]) {
+    if file_effects.is_empty() {
+        println!("No workspace changes");
+        return;
+    }
+    for effect in file_effects {
+        let labels = effect
+            .labels
+            .iter()
+            .map(file_effect_label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{:?}: {} ({labels})", effect.status, effect.path);
     }
 }
 

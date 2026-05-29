@@ -155,15 +155,25 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 changed_paths,
             })
         }
-        ApiMethod::WorkspaceDiff { id, format } => {
+        ApiMethod::WorkspaceDiff {
+            id,
+            format,
+            classify,
+        } => {
             let store = AnvicsStore::open(&repo)?;
             let changed_paths = store.workspace_diff(&id)?;
+            let file_effects = if classify {
+                store.workspace_file_effects(&id)?
+            } else {
+                Vec::new()
+            };
             let patch = match format {
                 anvics_api::WorkspaceDiffFormat::Summary => None,
                 anvics_api::WorkspaceDiffFormat::Patch => Some(store.workspace_diff_patch(&id)?),
             };
             Ok(ApiResult::WorkspaceDiff {
                 changed_paths,
+                file_effects,
                 patch,
             })
         }

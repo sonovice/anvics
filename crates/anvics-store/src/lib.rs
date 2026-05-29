@@ -471,6 +471,12 @@ impl AnvicsStore {
         Ok(diff_file_maps(&base_files, &workspace_files))
     }
 
+    pub fn workspace_file_effects(&self, id: &str) -> Result<Vec<FileEffect>> {
+        let changed_paths = self.workspace_diff(id)?;
+        let config = self.repository_config()?;
+        Ok(propose_file_effect_set(&changed_paths, &config)?.effects)
+    }
+
     pub fn workspace_diff_patch(&self, id: &str) -> Result<String> {
         let workspace = self.show_workspace(id)?;
         let workspace_root = Path::new(&workspace.materialized_path);

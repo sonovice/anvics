@@ -251,6 +251,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - A workspace's modified `anvics.toml` must not reinterpret its own review. Config edits are reviewed as config changes first, then affect later accepted work after publication.
 - MVP 0.28 exposes the same classification through `repo doctor`, including daemon-backed operation, so config behavior is visible before review time.
 - MVP 0.29 persists classified `FileEffect`s in `ReviewProjection`. Reviews show all effects, while `ChangeUnit`s remain the smaller source-control set.
+- MVP 0.30 makes `workspace diff` show the same classification labels before review, so agents can notice generated/cache/evidence paths while still working.
 - Classification layers: config, policy, tools, humans, agent claims.
 - Built-in classification labels:
   - `source`

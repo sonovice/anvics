@@ -322,6 +322,7 @@ Current status:
 - Review classification uses the canonical repo-root `anvics.toml`; a workspace edit to `anvics.toml` is reviewed as a config change but does not reinterpret that same review.
 - MVP 0.28 adds `anvics repo doctor --path <path>` so operators and agents can inspect active config patterns and see how paths will classify before creating a review.
 - MVP 0.29 stores classified `FileEffect`s on `ReviewProjection` and renders a File Effects section so filtered cache/generated/evidence outputs remain visible without becoming `ChangeUnit`s.
+- MVP 0.30 makes `workspace diff` summary output classification-aware, including daemon-backed calls, so agents see source/generated/cache/evidence labels before finishing.
 
 Crates:
 

@@ -1,9 +1,9 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
     AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision,
-    CoordinationStatus, EvidenceRecord, NativePublication, ProjectionRequest, RepoDoctorReport,
-    RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot,
-    WorkThread, WorkspaceView,
+    CoordinationStatus, EvidenceRecord, FileEffect, NativePublication, ProjectionRequest,
+    RepoDoctorReport, RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan,
+    SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,8 @@ pub enum ApiMethod {
     WorkspaceDiff {
         id: String,
         format: WorkspaceDiffFormat,
+        #[serde(default)]
+        classify: bool,
     },
     WorkspaceSnapshot {
         id: String,
@@ -279,6 +281,8 @@ pub enum ApiResult {
     },
     WorkspaceDiff {
         changed_paths: Vec<ChangedPath>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_effects: Vec<FileEffect>,
         patch: Option<String>,
     },
     WorkspaceSnapshot {
@@ -400,6 +404,7 @@ mod tests {
             ApiMethod::WorkspaceDiff {
                 id: "workspace-1".to_owned(),
                 format: WorkspaceDiffFormat::Patch,
+                classify: true,
             },
             ApiMethod::WorkspaceSnapshot {
                 id: "workspace-1".to_owned(),
@@ -876,6 +881,12 @@ mod tests {
                 changed_paths: vec![ChangedPath {
                     path: "app.txt".to_owned(),
                     status: ChangeStatus::Modified,
+                }],
+                file_effects: vec![FileEffect {
+                    path: "app.txt".to_owned(),
+                    status: ChangeStatus::Modified,
+                    labels: vec![FileEffectLabel::Source],
+                    provenance: FileEffectProvenance::Heuristic,
                 }],
                 patch: Some("diff --git a/app.txt b/app.txt\n".to_owned()),
             },

@@ -218,6 +218,7 @@ Use `--projection auto` when testing VFS behavior without making FUSE availabili
 
 - The agent edited only the workspace path.
 - The agent used Anvics `workspace diff` rather than Git status or Git diff inside the workspace.
+- `workspace diff` showed classification labels such as `source`, `generated_tracked`, `generated_untracked`, `cache`, or `evidence_candidate` when relevant.
 - No Git branch, worktree, or commit was needed.
 - Evidence is a short summary, not a transcript dump.
 - Secret-like values are not copied into evidence summaries or review notes.
