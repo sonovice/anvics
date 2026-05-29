@@ -655,6 +655,7 @@ mod tests {
                 file_effects: true,
             }),
             projection_fallback_reason: None,
+            command_executor: Some(CommandExecutorKind::InProcess),
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
             command_policy_override_reason: None,
             runtime_metrics: Some(CommandRuntimeMetrics {
@@ -703,6 +704,7 @@ mod tests {
                     projection_files: 1,
                     projection_bytes: 12,
                 }),
+                command_executor: Some(CommandExecutorKind::InProcess),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 command_policy_override_reason: None,
                 file_effects: vec![ChangedPath {

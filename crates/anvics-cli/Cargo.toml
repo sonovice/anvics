@@ -25,6 +25,10 @@ serde_json.workspace = true
 name = "anvicsd"
 path = "src/bin/anvicsd.rs"
 
+[[bin]]
+name = "anvics-worker"
+path = "src/bin/anvics-worker.rs"
+
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true

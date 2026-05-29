@@ -1612,6 +1612,9 @@ fn print_command_run(
     if let Some(reason) = &command_event.projection_fallback_reason {
         println!("projection_fallback_reason: {reason}");
     }
+    if let Some(executor) = &command_event.command_executor {
+        println!("command_executor: {}", command_executor_label(executor));
+    }
     if let Some(policy_class) = &command_event.command_policy_class {
         println!("policy: {}", command_policy_class_label(policy_class));
     }
@@ -1658,6 +1661,13 @@ fn projection_kind_label(kind: &anvics_core::ProjectionKind) -> &'static str {
     match kind {
         anvics_core::ProjectionKind::MaterializedDir => "materialized_dir",
         anvics_core::ProjectionKind::FuseMount => "fuse_mount",
+    }
+}
+
+fn command_executor_label(executor: &anvics_core::CommandExecutorKind) -> &'static str {
+    match executor {
+        anvics_core::CommandExecutorKind::InProcess => "in_process",
+        anvics_core::CommandExecutorKind::Worker => "worker",
     }
 }
 

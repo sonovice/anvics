@@ -242,6 +242,29 @@ pub struct CommandPolicyDecision {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandExecutorKind {
+    InProcess,
+    Worker,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommandWorkerRequest {
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommandWorkerResponse {
+    pub exit_code: i32,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EvidenceRecord {
     pub id: EvidenceRecordId,
     pub thread_id: WorkThreadId,
@@ -290,6 +313,8 @@ pub struct EvidenceSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_metrics: Option<CommandRuntimeMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_executor: Option<CommandExecutorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_override_reason: Option<String>,
@@ -327,6 +352,8 @@ pub struct CommandEvent {
     pub projection_capabilities: Option<ProjectionCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_executor: Option<CommandExecutorKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -647,6 +674,7 @@ mod tests {
                 file_effects: true,
             }),
             projection_fallback_reason: None,
+            command_executor: Some(CommandExecutorKind::InProcess),
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
             runtime_metrics: Some(CommandRuntimeMetrics {
                 projection_setup_ms: 1,
@@ -695,6 +723,7 @@ mod tests {
                     projection_files: 1,
                     projection_bytes: 12,
                 }),
+                command_executor: Some(CommandExecutorKind::InProcess),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 command_policy_override_reason: Some("audited test override".to_owned()),
                 file_effects: vec![ChangedPath {
@@ -882,6 +911,7 @@ mod tests {
         assert_eq!(event.projection_root, None);
         assert_eq!(event.projection_capabilities, None);
         assert_eq!(event.projection_fallback_reason, None);
+        assert_eq!(event.command_executor, None);
         assert_eq!(event.command_policy_class, None);
         assert_eq!(event.command_policy_override_reason, None);
         assert_eq!(event.runtime_metrics, None);

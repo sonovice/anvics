@@ -845,6 +845,7 @@ fn command_run_records_artifacts_and_review_evidence() {
     .stdout(predicate::str::contains("Ran command"))
     .stdout(predicate::str::contains("exit_code: 0"))
     .stdout(predicate::str::contains("projection: materialized_dir"))
+    .stdout(predicate::str::contains("command_executor: in_process"))
     .stdout(predicate::str::contains(
         "projection_capabilities: readable=true writable=true file_effects=true",
     ))
@@ -911,6 +912,9 @@ fn command_run_records_artifacts_and_review_evidence() {
         .stdout(predicate::str::contains("\"projection_capabilities\""))
         .stdout(predicate::str::contains("\"runtime_metrics\""))
         .stdout(predicate::str::contains(
+            "\"command_executor\": \"in_process\"",
+        ))
+        .stdout(predicate::str::contains(
             "\"command_policy_class\": \"mutating\"",
         ))
         .stdout(predicate::str::contains("\"path\": \"app.txt\""));
@@ -936,9 +940,96 @@ fn command_run_records_artifacts_and_review_evidence() {
     .stdout(predicate::str::contains("anvics-run:"))
     .stdout(predicate::str::contains("stdout:"))
     .stdout(predicate::str::contains("policy: mutating"))
+    .stdout(predicate::str::contains("executor: in_process"))
     .stdout(predicate::str::contains("runtime: setup="))
     .stdout(predicate::str::contains("file effects: modified `app.txt`"))
     .stdout(predicate::str::contains("Verified app.txt contents"));
+}
+
+#[test]
+fn command_run_can_execute_through_worker_process() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Worker",
+            "--task",
+            "Run verification through anvics-worker",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let worker = assert_cmd::cargo::cargo_bin("anvics-worker");
+
+    let output = Command::cargo_bin("anvics")
+        .unwrap()
+        .env("ANVICS_COMMAND_EXECUTOR", "worker")
+        .env("ANVICS_WORKER_BIN", worker)
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "worker verify",
+            "--summary",
+            "Worker verified and changed app.txt",
+            "--",
+            "sh",
+            "-c",
+            "printf 'worker\\n' > app.txt && cat app.txt",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("command_executor: worker"))
+        .stdout(predicate::str::contains("- Modified: app.txt"))
+        .get_output()
+        .stdout
+        .clone();
+    let command_event = value_after_prefix(&output, "Ran command ");
+    let stdout_path = value_after_prefix(&output, "stdout: ");
+    assert_eq!(fs::read_to_string(stdout_path).unwrap(), "worker\n");
+
+    anvics(dir.path(), &["command", "show", &command_event])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"command_executor\": \"worker\""));
+    anvics(
+        dir.path(),
+        &["workspace", "snapshot", &workspace, "--message", "worker"],
+    )
+    .assert()
+    .success();
+    let review_output = anvics(dir.path(), &["review", "create", "--thread", &thread])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = value_after_prefix(&review_output, "Created review ");
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("executor: worker"));
 }
 
 #[test]

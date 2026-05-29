@@ -235,6 +235,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Start with coarse top-level command policy classes before claiming syscall-level control: read-only, mutating, destructive, networked, host-escape-risk, and interactive.
 - MVP 0.21 makes coarse command policy operational: networked, host-escape-risk, and interactive commands are blocked by default and require an explicit audited operator override reason.
 - MVP 0.22 closes the command-file gap: Anvics-run command files are classified from their contents before execution, and operators can preview classification with `command classify` without creating evidence.
+- MVP 0.24 introduces `anvics-worker` as an opt-in local command executor while keeping in-process execution as the default. This proves the worker protocol and provenance field without changing the user-facing command workflow.
 - Destructive and unknown commands still run by default in MVP 0.21 because the execution surface is an isolated workspace and repo-specific policy is not mature enough yet.
 - Policy classification is an operational gate and evidence signal, not a guarantee that Anvics is a sandbox.
 

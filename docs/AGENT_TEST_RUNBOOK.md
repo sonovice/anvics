@@ -12,6 +12,7 @@ scripts/live_agent_packet_smoke.sh
 scripts/daemon_agent_smoke.sh
 scripts/coordination_smoke.sh
 scripts/command_worker_smoke.sh
+scripts/command_worker_process_smoke.sh
 scripts/secret_risk_smoke.sh
 scripts/agent_launch_prompt_smoke.sh
 scripts/dogfood_trial_prepare.sh
@@ -29,6 +30,8 @@ scripts/live_agent_trial_prepare.sh
 `coordination_smoke.sh` prepares two agent workspaces, enters both sessions, records one known change, and shows the other agent the related active work before it edits.
 
 `command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
+
+`command_worker_process_smoke.sh` runs the same acceptance loop through the opt-in `anvics-worker` process executor and verifies that review evidence records `executor: worker`.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
 

@@ -277,6 +277,11 @@ Scope:
 - MVP 0.22 hardening:
   - policy-scan Anvics-run command files before execution
   - expose `command classify` for non-mutating policy preview
+- MVP 0.24 worker executor spike:
+  - add an `anvics-worker` binary
+  - keep in-process execution as the default
+  - allow opt-in worker execution with `ANVICS_COMMAND_EXECUTOR=worker`
+  - record the executor on `CommandEvent` and review evidence
 - `workspace.run_command`.
 - Local `anvics-worker` process.
 - Command spec:

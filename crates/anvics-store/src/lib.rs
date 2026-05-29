@@ -1,14 +1,15 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
     AgentSession, AgentSessionId, AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath,
-    CommandEvent, CommandEventId, CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics,
-    CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication,
-    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId,
-    ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork, RepositoryEvent,
-    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
-    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
-    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
-    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    CommandEvent, CommandEventId, CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision,
+    CommandRuntimeMetrics, CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus,
+    EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
+    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
+    ProjectionKind, ProjectionRequest, RelatedWork, RepositoryEvent, RepositoryEventId,
+    RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
+    RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
+    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
+    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -68,6 +69,8 @@ pub enum StoreError {
     InvalidCommandCwd(String),
     #[error("projection unavailable: {0}")]
     ProjectionUnavailable(String),
+    #[error("command worker failed: {0}")]
+    CommandWorkerFailed(String),
     #[error("command {id} failed with exit code {exit_code}")]
     CommandFailed { id: String, exit_code: i32 },
     #[error("command policy blocked {policy_class:?}; rerun with --allow-command-risk --command-risk-reason <reason> to proceed")]
@@ -582,6 +585,7 @@ impl AnvicsStore {
             projection_root: Some(projection_root),
             projection_capabilities: Some(projection.capabilities.clone()),
             projection_fallback_reason: projection.fallback_reason.clone(),
+            command_executor: None,
             command_policy_class: Some(command_policy_class.clone()),
             command_policy_override_reason: command_policy_override_reason.clone(),
             runtime_metrics: Some(CommandRuntimeMetrics {
@@ -606,10 +610,11 @@ impl AnvicsStore {
         )?;
 
         let started = Instant::now();
-        let execution = execute_local_command(&argv, &cwd, timeout)?;
+        let execution = execute_command(&argv, &cwd, timeout)?;
         command_event.exit_code = Some(execution.exit_code);
         command_event.timed_out = execution.timed_out;
-        command_event.duration_ms = elapsed_ms(started);
+        command_event.duration_ms = execution.duration_ms.unwrap_or_else(|| elapsed_ms(started));
+        command_event.command_executor = Some(execution.executor);
         command_event.finished_at = Some(now_rfc3339()?);
         let reconcile_started = Instant::now();
         let after_files = workspace_file_map(&projection.root_path)?;
@@ -2065,6 +2070,9 @@ impl AnvicsStore {
             let runtime_metrics = command_event
                 .as_ref()
                 .and_then(|event| event.runtime_metrics.clone());
+            let command_executor = command_event
+                .as_ref()
+                .and_then(|event| event.command_executor.clone());
             let command_policy_override_reason = command_event
                 .as_ref()
                 .and_then(|event| event.command_policy_override_reason.clone());
@@ -2085,6 +2093,7 @@ impl AnvicsStore {
                 stderr_path: record.stderr_path,
                 projection_kind,
                 runtime_metrics,
+                command_executor,
                 command_policy_class,
                 command_policy_override_reason,
                 file_effects,
@@ -2457,8 +2466,18 @@ fn redact_line(line: &str) -> String {
 struct LocalCommandOutput {
     exit_code: i32,
     timed_out: bool,
+    duration_ms: Option<u64>,
+    executor: CommandExecutorKind,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+fn execute_command(argv: &[String], cwd: &Path, timeout: Duration) -> Result<LocalCommandOutput> {
+    if std::env::var("ANVICS_COMMAND_EXECUTOR").ok().as_deref() == Some("worker") {
+        execute_worker_command(argv, cwd, timeout)
+    } else {
+        execute_local_command(argv, cwd, timeout)
+    }
 }
 
 fn execute_local_command(
@@ -2496,8 +2515,51 @@ fn execute_local_command(
     Ok(LocalCommandOutput {
         exit_code,
         timed_out,
+        duration_ms: Some(elapsed_ms(started)),
+        executor: CommandExecutorKind::InProcess,
         stdout: output.stdout,
         stderr: output.stderr,
+    })
+}
+
+fn execute_worker_command(
+    argv: &[String],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<LocalCommandOutput> {
+    let worker = std::env::var("ANVICS_WORKER_BIN").unwrap_or_else(|_| "anvics-worker".to_owned());
+    let request = CommandWorkerRequest {
+        argv: argv.to_vec(),
+        cwd: cwd.to_string_lossy().to_string(),
+        timeout_seconds: timeout.as_secs(),
+    };
+    let mut child = Command::new(worker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            StoreError::CommandWorkerFailed("worker stdin was unavailable".to_owned())
+        })?;
+        serde_json::to_writer(&mut stdin, &request)?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(StoreError::CommandWorkerFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    let response: CommandWorkerResponse = serde_json::from_slice(&output.stdout)?;
+    Ok(LocalCommandOutput {
+        exit_code: response.exit_code,
+        timed_out: response.timed_out,
+        duration_ms: Some(response.duration_ms),
+        executor: CommandExecutorKind::Worker,
+        stdout: response.stdout,
+        stderr: response.stderr,
     })
 }
 
@@ -3068,6 +3130,12 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
             command_policy_class_label(policy_class)
         ));
     }
+    if let Some(executor) = &evidence.command_executor {
+        text.push_str(&format!(
+            " (executor: {})",
+            command_executor_label(executor)
+        ));
+    }
     if let Some(reason) = evidence
         .command_policy_override_reason
         .as_deref()
@@ -3108,6 +3176,13 @@ fn projection_kind_label(kind: &ProjectionKind) -> &'static str {
     match kind {
         ProjectionKind::MaterializedDir => "materialized_dir",
         ProjectionKind::FuseMount => "fuse_mount",
+    }
+}
+
+fn command_executor_label(executor: &CommandExecutorKind) -> &'static str {
+    match executor {
+        CommandExecutorKind::InProcess => "in_process",
+        CommandExecutorKind::Worker => "worker",
     }
 }
 
