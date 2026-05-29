@@ -212,6 +212,16 @@ pub struct ProjectionCapabilities {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommandRuntimeMetrics {
+    pub projection_setup_ms: u64,
+    pub command_ms: u64,
+    pub reconcile_ms: u64,
+    pub cleanup_ms: u64,
+    pub projection_files: u64,
+    pub projection_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandPolicyClass {
     ReadOnly,
@@ -270,6 +280,8 @@ pub struct EvidenceSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_kind: Option<ProjectionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_metrics: Option<CommandRuntimeMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<ChangedPath>,
@@ -307,6 +319,8 @@ pub struct CommandEvent {
     pub projection_fallback_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_metrics: Option<CommandRuntimeMetrics>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<ChangedPath>,
     pub started_at: String,
@@ -600,6 +614,14 @@ mod tests {
             }),
             projection_fallback_reason: None,
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
+            runtime_metrics: Some(CommandRuntimeMetrics {
+                projection_setup_ms: 1,
+                command_ms: 12,
+                reconcile_ms: 2,
+                cleanup_ms: 0,
+                projection_files: 1,
+                projection_bytes: 12,
+            }),
             file_effects: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -630,6 +652,14 @@ mod tests {
                 stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
                 projection_kind: Some(ProjectionKind::MaterializedDir),
+                runtime_metrics: Some(CommandRuntimeMetrics {
+                    projection_setup_ms: 1,
+                    command_ms: 12,
+                    reconcile_ms: 2,
+                    cleanup_ms: 0,
+                    projection_files: 1,
+                    projection_bytes: 12,
+                }),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),
@@ -817,6 +847,7 @@ mod tests {
         assert_eq!(event.projection_capabilities, None);
         assert_eq!(event.projection_fallback_reason, None);
         assert_eq!(event.command_policy_class, None);
+        assert_eq!(event.runtime_metrics, None);
         assert!(event.file_effects.is_empty());
     }
 

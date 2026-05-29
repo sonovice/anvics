@@ -1510,6 +1510,14 @@ fn print_command_run(
     if let Some(policy_class) = &command_event.command_policy_class {
         println!("policy: {}", command_policy_class_label(policy_class));
     }
+    if let Some(metrics) = &command_event.runtime_metrics {
+        println!("projection_setup_ms: {}", metrics.projection_setup_ms);
+        println!("command_ms: {}", metrics.command_ms);
+        println!("reconcile_ms: {}", metrics.reconcile_ms);
+        println!("cleanup_ms: {}", metrics.cleanup_ms);
+        println!("projection_files: {}", metrics.projection_files);
+        println!("projection_bytes: {}", metrics.projection_bytes);
+    }
     if command_event.file_effects.is_empty() {
         println!("file_effects: none");
     } else {

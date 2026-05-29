@@ -623,6 +623,14 @@ mod tests {
             }),
             projection_fallback_reason: None,
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
+            runtime_metrics: Some(CommandRuntimeMetrics {
+                projection_setup_ms: 1,
+                command_ms: 3,
+                reconcile_ms: 1,
+                cleanup_ms: 0,
+                projection_files: 1,
+                projection_bytes: 12,
+            }),
             file_effects: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -653,6 +661,14 @@ mod tests {
                 stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
                 projection_kind: Some(ProjectionKind::MaterializedDir),
+                runtime_metrics: Some(CommandRuntimeMetrics {
+                    projection_setup_ms: 1,
+                    command_ms: 3,
+                    reconcile_ms: 1,
+                    cleanup_ms: 0,
+                    projection_files: 1,
+                    projection_bytes: 12,
+                }),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),

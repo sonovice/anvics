@@ -760,6 +760,12 @@ fn command_run_records_artifacts_and_review_evidence() {
         "projection_capabilities: readable=true writable=true file_effects=true",
     ))
     .stdout(predicate::str::contains("policy: mutating"))
+    .stdout(predicate::str::contains("projection_setup_ms: "))
+    .stdout(predicate::str::contains("command_ms: "))
+    .stdout(predicate::str::contains("reconcile_ms: "))
+    .stdout(predicate::str::contains("cleanup_ms: "))
+    .stdout(predicate::str::contains("projection_files: 1"))
+    .stdout(predicate::str::contains("projection_bytes: 5"))
     .stdout(predicate::str::contains("file_effects:"))
     .stdout(predicate::str::contains("- Modified: app.txt"))
     .stdout(predicate::str::contains("stdout: "))
@@ -814,6 +820,7 @@ fn command_run_records_artifacts_and_review_evidence() {
             "\"projection_kind\": \"materialized_dir\"",
         ))
         .stdout(predicate::str::contains("\"projection_capabilities\""))
+        .stdout(predicate::str::contains("\"runtime_metrics\""))
         .stdout(predicate::str::contains(
             "\"command_policy_class\": \"mutating\"",
         ))
@@ -840,6 +847,7 @@ fn command_run_records_artifacts_and_review_evidence() {
     .stdout(predicate::str::contains("anvics-run:"))
     .stdout(predicate::str::contains("stdout:"))
     .stdout(predicate::str::contains("policy: mutating"))
+    .stdout(predicate::str::contains("runtime: setup="))
     .stdout(predicate::str::contains("file effects: modified `app.txt`"))
     .stdout(predicate::str::contains("Verified app.txt contents"));
 }
@@ -1665,6 +1673,7 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     .success()
     .stdout(predicate::str::contains("daemon verify"))
     .stdout(predicate::str::contains("anvics-run:"))
+    .stdout(predicate::str::contains("runtime: setup="))
     .stdout(predicate::str::contains("Modified: `modified.txt`"));
     daemon_anvics(
         dir.path(),

@@ -1,13 +1,14 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
     AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
-    CommandPolicyClass, CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
-    NativePublication, NativePublicationId, ObjectId, OverlayEntry, PolicyOverride,
-    PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork,
-    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
-    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
-    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
-    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    CommandPolicyClass, CommandRuntimeMetrics, CoordinationStatus, EvidenceRecord,
+    EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId, ObjectId,
+    OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities, ProjectionKind,
+    ProjectionRequest, RelatedWork, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
+    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, RiskFinding,
+    RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
+    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
+    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -509,18 +510,21 @@ impl AnvicsStore {
         };
 
         let command_event_id = CommandEventId::new();
+        let projection_setup_started = Instant::now();
         let resolved_projection = self.resolve_workspace_projection(
             &workspace,
             &input.projection,
             input.mount_root.as_deref(),
             command_event_id.as_str(),
         )?;
+        let projection_setup_ms = elapsed_ms(projection_setup_started);
         let projection = &resolved_projection.projection;
         debug_assert!(projection.capabilities.readable);
         debug_assert!(projection.capabilities.writable);
         debug_assert!(projection.capabilities.file_effects);
         let command_policy_class = classify_command_policy(&argv);
         let before_files = workspace_file_map(&projection.root_path)?;
+        let projection_stats = workspace_file_stats(&projection.root_path)?;
         let cwd = self.resolve_projection_cwd(projection, input.cwd.as_deref())?;
         let cwd_display = cwd.to_string_lossy().to_string();
         let projection_root = projection.root_path.to_string_lossy().to_string();
@@ -559,6 +563,14 @@ impl AnvicsStore {
             projection_capabilities: Some(projection.capabilities.clone()),
             projection_fallback_reason: projection.fallback_reason.clone(),
             command_policy_class: Some(command_policy_class.clone()),
+            runtime_metrics: Some(CommandRuntimeMetrics {
+                projection_setup_ms,
+                command_ms: 0,
+                reconcile_ms: 0,
+                cleanup_ms: 0,
+                projection_files: projection_stats.file_count,
+                projection_bytes: projection_stats.byte_count,
+            }),
             file_effects: Vec::new(),
             started_at,
             finished_at: None,
@@ -576,8 +588,9 @@ impl AnvicsStore {
         let execution = execute_local_command(&argv, &cwd, timeout)?;
         command_event.exit_code = Some(execution.exit_code);
         command_event.timed_out = execution.timed_out;
-        command_event.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        command_event.duration_ms = elapsed_ms(started);
         command_event.finished_at = Some(now_rfc3339()?);
+        let reconcile_started = Instant::now();
         let after_files = workspace_file_map(&projection.root_path)?;
         command_event.file_effects = diff_file_maps(&before_files, &after_files);
         if let Some(mounted_workspace) = &resolved_projection.mounted_workspace {
@@ -597,8 +610,27 @@ impl AnvicsStore {
                     .collect();
             }
         }
+        let reconcile_ms = elapsed_ms(reconcile_started);
         fs::write(&stdout_path, execution.stdout)?;
         fs::write(&stderr_path, execution.stderr)?;
+
+        let mount_cleanup_path = resolved_projection
+            .mounted_workspace
+            .as_ref()
+            .map(|workspace| workspace.mount_path().to_path_buf());
+        drop(resolved_projection);
+        let cleanup_started = Instant::now();
+        if let Some(path) = mount_cleanup_path {
+            remove_empty_mount_dir(&path)?;
+        }
+        let cleanup_ms = elapsed_ms(cleanup_started);
+
+        if let Some(metrics) = &mut command_event.runtime_metrics {
+            metrics.command_ms = command_event.duration_ms;
+            metrics.reconcile_ms = reconcile_ms;
+            metrics.cleanup_ms = cleanup_ms;
+        }
+
         write_json_pretty(
             self.command_event_path(command_event.id.as_str()),
             &command_event,
@@ -623,15 +655,6 @@ impl AnvicsStore {
                 stderr_path: command_event.stderr_path.clone(),
             },
         )?;
-
-        let mount_cleanup_path = resolved_projection
-            .mounted_workspace
-            .as_ref()
-            .map(|workspace| workspace.mount_path().to_path_buf());
-        drop(resolved_projection);
-        if let Some(path) = mount_cleanup_path {
-            remove_empty_mount_dir(&path)?;
-        }
 
         Ok(CommandRunResult {
             command_event,
@@ -1980,6 +2003,9 @@ impl AnvicsStore {
             let projection_kind = command_event
                 .as_ref()
                 .and_then(|event| event.projection_kind.clone());
+            let runtime_metrics = command_event
+                .as_ref()
+                .and_then(|event| event.runtime_metrics.clone());
             let file_effects = command_event
                 .map(|event| event.file_effects)
                 .unwrap_or_default();
@@ -1996,6 +2022,7 @@ impl AnvicsStore {
                 stdout_path: record.stdout_path,
                 stderr_path: record.stderr_path,
                 projection_kind,
+                runtime_metrics,
                 command_policy_class,
                 file_effects,
             });
@@ -2163,6 +2190,10 @@ fn remove_empty_mount_dir(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
         Err(error) => Err(StoreError::Io(error)),
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
@@ -2631,6 +2662,24 @@ fn workspace_file_map(source_root: &Path) -> Result<BTreeMap<String, ObjectId>> 
     Ok(files)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkspaceFileStats {
+    file_count: u64,
+    byte_count: u64,
+}
+
+fn workspace_file_stats(source_root: &Path) -> Result<WorkspaceFileStats> {
+    let mut stats = WorkspaceFileStats {
+        file_count: 0,
+        byte_count: 0,
+    };
+    for file in collect_files(source_root)? {
+        stats.file_count += 1;
+        stats.byte_count = stats.byte_count.saturating_add(fs::metadata(file)?.len());
+    }
+    Ok(stats)
+}
+
 fn is_skipped(path: &Path) -> bool {
     path.components().any(|component| {
         let Component::Normal(name) = component else {
@@ -2861,6 +2910,17 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
         text.push_str(&format!(
             " (projection: {})",
             projection_kind_label(projection_kind)
+        ));
+    }
+    if let Some(metrics) = &evidence.runtime_metrics {
+        text.push_str(&format!(
+            " (runtime: setup={}ms command={}ms reconcile={}ms cleanup={}ms files={} bytes={})",
+            metrics.projection_setup_ms,
+            metrics.command_ms,
+            metrics.reconcile_ms,
+            metrics.cleanup_ms,
+            metrics.projection_files,
+            metrics.projection_bytes
         ));
     }
     if !evidence.file_effects.is_empty() {
@@ -3683,6 +3743,7 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("FUSE support is not compiled"));
+            assert!(result.command_event.runtime_metrics.is_some());
         }
         #[cfg(feature = "vfs-fuse")]
         {
@@ -3765,6 +3826,10 @@ mod tests {
             result.command_event.command_policy_class,
             Some(CommandPolicyClass::Destructive)
         );
+        let metrics = result.command_event.runtime_metrics.as_ref().unwrap();
+        assert_eq!(metrics.projection_files, 2);
+        assert_eq!(metrics.projection_bytes, 12);
+        assert_eq!(metrics.command_ms, result.command_event.duration_ms);
         assert_eq!(
             result.evidence.command_event_id,
             Some(result.command_event.id)
@@ -3821,6 +3886,10 @@ mod tests {
             result.command_event.command_policy_class,
             Some(CommandPolicyClass::Mutating)
         );
+        let metrics = result.command_event.runtime_metrics.as_ref().unwrap();
+        assert_eq!(metrics.projection_files, 1);
+        assert_eq!(metrics.projection_bytes, 5);
+        assert_eq!(metrics.command_ms, result.command_event.duration_ms);
         assert_eq!(
             result.command_event.file_effects,
             vec![ChangedPath {
@@ -3967,6 +4036,29 @@ mod tests {
             "changed\n"
         );
         assert!(!Path::new(second.command_event.projection_root.as_ref().unwrap()).exists());
+
+        let auto = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["cat".to_owned(), "app.txt".to_owned()],
+                command_file: None,
+                command_label: "auto fuse readback".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Auto used FUSE when available".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::Auto,
+                mount_root: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            auto.command_event.projection_kind,
+            Some(ProjectionKind::FuseMount)
+        );
+        assert_eq!(auto.command_event.projection_fallback_reason, None);
+        assert!(auto.command_event.runtime_metrics.is_some());
+        assert!(!Path::new(auto.command_event.projection_root.as_ref().unwrap()).exists());
     }
 
     #[cfg(feature = "vfs-fuse")]
@@ -4018,6 +4110,7 @@ mod tests {
             }]
         );
         assert_eq!(result.evidence.exit_code, 7);
+        assert!(result.command_event.runtime_metrics.is_some());
         assert_eq!(
             fs::read_to_string(Path::new(&preparation.workspace.materialized_path).join("app.txt"))
                 .unwrap(),
