@@ -270,6 +270,10 @@ Scope:
   - networked
   - host-escape-risk
   - interactive
+- MVP 0.21 policy gates:
+  - allow read-only, mutating, destructive, and unknown by default
+  - block networked, host-escape-risk, and interactive by default
+  - allow an audited operator override with an explicit reason
 - `workspace.run_command`.
 - Local `anvics-worker` process.
 - Command spec:

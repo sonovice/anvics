@@ -79,6 +79,9 @@ pub enum ApiMethod {
         #[serde(default)]
         projection: ProjectionRequest,
         mount_root: Option<String>,
+        #[serde(default)]
+        allow_command_risk: bool,
+        command_risk_reason: Option<String>,
     },
     CommandShow {
         id: String,
@@ -132,6 +135,9 @@ pub enum ApiMethod {
         output_path: Option<String>,
         allow_secret_risk: bool,
         override_reason: Option<String>,
+        #[serde(default)]
+        allow_command_risk: bool,
+        command_risk_reason: Option<String>,
     },
     AgentPacket {
         thread: String,
@@ -403,6 +409,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::MaterializedDir,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             },
             ApiMethod::CommandShow {
                 id: "command-1".to_owned(),
@@ -487,6 +495,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::Auto,
                 mount_root: Some("/tmp/anvics-mounts".to_owned()),
+                allow_command_risk: true,
+                command_risk_reason: Some("operator approved network verification".to_owned()),
                 output_path: Some("accepted.patch".to_owned()),
                 allow_secret_risk: true,
                 override_reason: Some("fixture false positive".to_owned()),
@@ -623,6 +633,7 @@ mod tests {
             }),
             projection_fallback_reason: None,
             command_policy_class: Some(CommandPolicyClass::ReadOnly),
+            command_policy_override_reason: None,
             runtime_metrics: Some(CommandRuntimeMetrics {
                 projection_setup_ms: 1,
                 command_ms: 3,
@@ -670,6 +681,7 @@ mod tests {
                     projection_bytes: 12,
                 }),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
+                command_policy_override_reason: None,
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),
                     status: ChangeStatus::Modified,

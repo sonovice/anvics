@@ -104,6 +104,8 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
      -- sh -c "cat app.txt"
    ```
 
+   Anvics blocks networked, host-escape-risk, and interactive verification commands by default. If the operator intentionally approves that risk, add `--allow-command-risk --command-risk-reason "<reason>"` to the `agent accept` or `command run` invocation. This records an audited override on the command event; it is not a sandbox.
+
    If Anvics cannot run the verification command, fall back to externally-reported evidence:
 
    ```sh
@@ -202,6 +204,7 @@ Use `--projection auto` when testing VFS behavior without making FUSE availabili
 - Evidence is a short summary, not a transcript dump.
 - Secret-like values are not copied into evidence summaries or review notes.
 - The review shows changed paths and evidence.
+- Risky operator-run commands are blocked unless an explicit command-risk override reason is recorded.
 - Secret-risk findings block publication unless an operator records an explicit override reason.
 - Publication points to the accepted native snapshot.
 - The exported patch applies to a clean copy of the base files with `git apply`.

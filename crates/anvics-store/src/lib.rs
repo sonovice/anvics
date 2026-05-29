@@ -70,10 +70,16 @@ pub enum StoreError {
     ProjectionUnavailable(String),
     #[error("command {id} failed with exit code {exit_code}")]
     CommandFailed { id: String, exit_code: i32 },
+    #[error("command policy blocked {policy_class:?}; rerun with --allow-command-risk --command-risk-reason <reason> to proceed")]
+    CommandPolicyBlocked { policy_class: CommandPolicyClass },
     #[error("publication blocked by {finding_count} unresolved secret-risk finding(s); rerun with --allow-secret-risk --override-reason <reason> to proceed")]
     PublicationBlockedSecretRisk { finding_count: usize },
     #[error("override reason must not be empty")]
     EmptyOverrideReason,
+    #[error("command risk reason must not be empty")]
+    EmptyCommandRiskReason,
+    #[error("--command-risk-reason requires --allow-command-risk")]
+    CommandRiskReasonWithoutOverride,
     #[error("review {review_id} does not belong to thread {thread_id}")]
     ReviewThreadMismatch {
         review_id: String,
@@ -127,6 +133,8 @@ pub struct CommandRunInput {
     pub artifact_path: Option<String>,
     pub projection: ProjectionRequest,
     pub mount_root: Option<String>,
+    pub allow_command_risk: bool,
+    pub command_risk_reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +516,9 @@ impl AnvicsStore {
             }
             input.argv.clone()
         };
+        let command_policy_class = classify_command_policy(&argv);
+        let command_policy_override_reason =
+            command_policy_override_reason(&command_policy_class, &input)?;
 
         let command_event_id = CommandEventId::new();
         let projection_setup_started = Instant::now();
@@ -522,7 +533,6 @@ impl AnvicsStore {
         debug_assert!(projection.capabilities.readable);
         debug_assert!(projection.capabilities.writable);
         debug_assert!(projection.capabilities.file_effects);
-        let command_policy_class = classify_command_policy(&argv);
         let before_files = workspace_file_map(&projection.root_path)?;
         let projection_stats = workspace_file_stats(&projection.root_path)?;
         let cwd = self.resolve_projection_cwd(projection, input.cwd.as_deref())?;
@@ -563,6 +573,7 @@ impl AnvicsStore {
             projection_capabilities: Some(projection.capabilities.clone()),
             projection_fallback_reason: projection.fallback_reason.clone(),
             command_policy_class: Some(command_policy_class.clone()),
+            command_policy_override_reason: command_policy_override_reason.clone(),
             runtime_metrics: Some(CommandRuntimeMetrics {
                 projection_setup_ms,
                 command_ms: 0,
@@ -2006,6 +2017,9 @@ impl AnvicsStore {
             let runtime_metrics = command_event
                 .as_ref()
                 .and_then(|event| event.runtime_metrics.clone());
+            let command_policy_override_reason = command_event
+                .as_ref()
+                .and_then(|event| event.command_policy_override_reason.clone());
             let file_effects = command_event
                 .map(|event| event.file_effects)
                 .unwrap_or_default();
@@ -2024,6 +2038,7 @@ impl AnvicsStore {
                 projection_kind,
                 runtime_metrics,
                 command_policy_class,
+                command_policy_override_reason,
                 file_effects,
             });
         }
@@ -2522,6 +2537,40 @@ fn classify_command_policy(argv: &[String]) -> CommandPolicyClass {
     CommandPolicyClass::Unknown
 }
 
+fn command_policy_override_reason(
+    policy_class: &CommandPolicyClass,
+    input: &CommandRunInput,
+) -> Result<Option<String>> {
+    if !input.allow_command_risk {
+        if input.command_risk_reason.is_some() {
+            return Err(StoreError::CommandRiskReasonWithoutOverride);
+        }
+        if command_policy_requires_override(policy_class) {
+            return Err(StoreError::CommandPolicyBlocked {
+                policy_class: policy_class.clone(),
+            });
+        }
+        return Ok(None);
+    }
+
+    let reason = input
+        .command_risk_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .ok_or(StoreError::EmptyCommandRiskReason)?;
+    Ok(Some(reason.to_owned()))
+}
+
+fn command_policy_requires_override(policy_class: &CommandPolicyClass) -> bool {
+    matches!(
+        policy_class,
+        CommandPolicyClass::Networked
+            | CommandPolicyClass::HostEscapeRisk
+            | CommandPolicyClass::Interactive
+    )
+}
+
 fn classify_shell_command(command: &str) -> CommandPolicyClass {
     let command = command.trim();
     if contains_shell_word(command, "rm")
@@ -2905,6 +2954,13 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
             " (policy: {})",
             command_policy_class_label(policy_class)
         ));
+    }
+    if let Some(reason) = evidence
+        .command_policy_override_reason
+        .as_deref()
+        .filter(|reason| !reason.trim().is_empty())
+    {
+        text.push_str(&format!(" (command policy override: {reason})"));
     }
     if let Some(projection_kind) = &evidence.projection_kind {
         text.push_str(&format!(
@@ -3593,6 +3649,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::MaterializedDir,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -3645,6 +3703,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::MaterializedDir,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap_err();
 
@@ -3701,6 +3761,8 @@ mod tests {
             artifact_path: None,
             projection: ProjectionRequest::MaterializedDir,
             mount_root: None,
+            allow_command_risk: false,
+            command_risk_reason: None,
         });
         assert!(matches!(missing, Err(StoreError::WorkspaceNotFound(_))));
     }
@@ -3728,6 +3790,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::Auto,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -3780,6 +3844,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::MaterializedDir,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -3866,6 +3932,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::MaterializedDir,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -3925,6 +3993,146 @@ mod tests {
     }
 
     #[test]
+    fn command_policy_blocks_risky_classes_without_artifacts() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Policy".to_owned(), "Check risky command".to_owned())
+            .unwrap();
+
+        for (argv, expected) in [
+            (
+                vec!["curl".to_owned(), "https://example.com".to_owned()],
+                CommandPolicyClass::Networked,
+            ),
+            (
+                vec!["docker".to_owned(), "ps".to_owned()],
+                CommandPolicyClass::HostEscapeRisk,
+            ),
+            (vec!["vim".to_owned()], CommandPolicyClass::Interactive),
+        ] {
+            let err = store
+                .run_command(CommandRunInput {
+                    workspace_id: preparation.workspace.id.to_string(),
+                    argv,
+                    command_file: None,
+                    command_label: "risky".to_owned(),
+                    cwd: None,
+                    timeout_seconds: Some(10),
+                    summary: "Risky command".to_owned(),
+                    artifact_path: None,
+                    projection: ProjectionRequest::MaterializedDir,
+                    mount_root: None,
+                    allow_command_risk: false,
+                    command_risk_reason: None,
+                })
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                StoreError::CommandPolicyBlocked { policy_class } if policy_class == expected
+            ));
+        }
+
+        assert!(
+            read_json_dir::<CommandEvent>(store.anvics_dir.join("command-events"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            read_json_dir::<EvidenceRecord>(store.anvics_dir.join("evidence"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.events_since(0).unwrap().iter().all(|event| {
+            event.kind != RepositoryEventKind::CommandStarted
+                && event.kind != RepositoryEventKind::EvidenceAttached
+        }));
+    }
+
+    #[test]
+    fn command_policy_override_requires_reason_and_records_metadata() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Policy".to_owned(), "Allow risky command".to_owned())
+            .unwrap();
+
+        let empty_reason = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["git".to_owned(), "--version".to_owned()],
+                command_file: None,
+                command_label: "git version".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Allowed git version".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
+                allow_command_risk: true,
+                command_risk_reason: Some("   ".to_owned()),
+            })
+            .unwrap_err();
+        assert!(matches!(empty_reason, StoreError::EmptyCommandRiskReason));
+
+        let reason_without_flag = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["true".to_owned()],
+                command_file: None,
+                command_label: "true".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Reason without flag".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: Some("not needed".to_owned()),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            reason_without_flag,
+            StoreError::CommandRiskReasonWithoutOverride
+        ));
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec!["git".to_owned(), "--version".to_owned()],
+                command_file: None,
+                command_label: "git version".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Allowed git version".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
+                allow_command_risk: true,
+                command_risk_reason: Some("Operator approved version check".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            result.command_event.command_policy_class,
+            Some(CommandPolicyClass::Networked)
+        );
+        assert_eq!(
+            result
+                .command_event
+                .command_policy_override_reason
+                .as_deref(),
+            Some("Operator approved version check")
+        );
+    }
+
+    #[test]
     fn command_run_timeout_records_failed_command_event() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -3947,6 +4155,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::MaterializedDir,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -3989,6 +4199,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::FuseMount,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -4026,6 +4238,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::FuseMount,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -4049,6 +4263,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::Auto,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -4094,6 +4310,8 @@ mod tests {
                 artifact_path: None,
                 projection: ProjectionRequest::FuseMount,
                 mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
             })
             .unwrap();
 
@@ -4644,6 +4862,8 @@ mod tests {
                     artifact_path: None,
                     projection: ProjectionRequest::MaterializedDir,
                     mount_root: None,
+                    allow_command_risk: false,
+                    command_risk_reason: None,
                 },
                 None,
             )
@@ -4681,6 +4901,8 @@ mod tests {
                     artifact_path: None,
                     projection: ProjectionRequest::MaterializedDir,
                     mount_root: None,
+                    allow_command_risk: false,
+                    command_risk_reason: None,
                 },
                 None,
             )
@@ -4727,6 +4949,8 @@ mod tests {
                     artifact_path: None,
                     projection: ProjectionRequest::MaterializedDir,
                     mount_root: None,
+                    allow_command_risk: false,
+                    command_risk_reason: None,
                 },
                 None,
                 PublicationOptions::default(),

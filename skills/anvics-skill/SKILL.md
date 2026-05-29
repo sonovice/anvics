@@ -56,6 +56,7 @@ Every write belongs to the current thread and workspace.
 - If another thread touches the same path or hunk, record the overlap before continuing.
 - Before finishing, run `coordination status` and summarize any potential clashes in evidence or review notes.
 - When the operator explicitly asks you to accept with verification, prefer `agent accept --run-label ... --run-summary ... -- <program> [args...]` so Anvics records command provenance and artifacts itself.
+- Risky operator-run verification commands may be blocked by command policy. Do not add override flags yourself unless the operator explicitly approves the command risk and provides the reason.
 - Do not run `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.
 
 Do not use commits as scratchpad history. Keep failed or abandoned attempts attached to the thread as summarized evidence.
@@ -74,6 +75,12 @@ Attach enough evidence for review, but keep it compact.
 - Record uncertainty and unverified areas directly.
 
 Evidence should support review. It should not become a second codebase made of logs.
+
+## Command Policy
+
+Anvics classifies Anvics-run commands before execution. Read-only, mutating, destructive, and unknown commands are allowed by default inside the isolated workspace. Networked, host-escape-risk, and interactive commands are blocked unless the operator explicitly approves them with `--allow-command-risk --command-risk-reason "<reason>"`.
+
+This is a provenance and workflow gate, not a sandbox. If a blocked command seems necessary, report the exact command and why it is needed, then wait for the operator.
 
 ## Review And Publish
 

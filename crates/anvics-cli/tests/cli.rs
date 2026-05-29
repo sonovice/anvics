@@ -853,6 +853,156 @@ fn command_run_records_artifacts_and_review_evidence() {
 }
 
 #[test]
+fn command_policy_blocks_risky_commands_and_records_override() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Policy Gate",
+            "--task",
+            "Verify command policy behavior",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+
+    for (program, expected) in [
+        ("curl", "Networked"),
+        ("docker", "HostEscapeRisk"),
+        ("vim", "Interactive"),
+    ] {
+        anvics(
+            dir.path(),
+            &[
+                "command",
+                "run",
+                "--workspace",
+                &workspace,
+                "--label",
+                "blocked",
+                "--summary",
+                "Blocked command should not run",
+                "--",
+                program,
+                "--version",
+            ],
+        )
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("command policy blocked"))
+        .stderr(predicate::str::contains(expected));
+    }
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence_count: 0"));
+    anvics(dir.path(), &["events", "list", "--since", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CommandStarted").not())
+        .stdout(predicate::str::contains("EvidenceAttached").not());
+
+    anvics(
+        dir.path(),
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "git version",
+            "--summary",
+            "Operator approved checking the Git binary version",
+            "--allow-command-risk",
+            "--command-risk-reason",
+            "Operator approved local binary version check",
+            "--",
+            "git",
+            "--version",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains(
+        "command_policy_override: Operator approved local binary version check",
+    ));
+
+    let command = anvics(
+        dir.path(),
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "git version second",
+            "--summary",
+            "Operator approved checking the Git binary version again",
+            "--allow-command-risk",
+            "--command-risk-reason",
+            "Operator approved local binary version check",
+            "--",
+            "git",
+            "--version",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let command_event = value_after_prefix(&command, "Ran command ");
+    anvics(dir.path(), &["command", "show", &command_event])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"command_policy_class\": \"networked\"",
+        ))
+        .stdout(predicate::str::contains(
+            "\"command_policy_override_reason\": \"Operator approved local binary version check\"",
+        ));
+
+    anvics(
+        dir.path(),
+        &["workspace", "snapshot", &workspace, "--message", "policy"],
+    )
+    .assert()
+    .success();
+    let review_output = anvics(dir.path(), &["review", "create", "--thread", &thread])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review = value_after_prefix(&review_output, "Created review ");
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains(
+        "command policy override: Operator approved local binary version check",
+    ));
+}
+
+#[test]
 fn agent_accept_with_command_run_exports_patch_and_failed_run_does_not_publish() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -984,6 +1134,64 @@ fn agent_accept_with_command_run_exports_patch_and_failed_run_does_not_publish()
         .assert()
         .success()
         .stdout(predicate::str::contains("publication_status: published"));
+}
+
+#[test]
+fn agent_accept_blocks_risky_command_before_publication() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Risky Accept",
+            "--task",
+            "Try a risky verification command",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "changed\n").unwrap();
+
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "network verify",
+            "--run-summary",
+            "Network verification should be blocked",
+            "--",
+            "curl",
+            "https://example.com",
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("Networked"));
+    anvics(dir.path(), &["agent", "status", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence_count: 0"))
+        .stdout(predicate::str::contains("reviews: none"))
+        .stdout(predicate::str::contains("publication_status: unpublished"));
 }
 
 #[cfg(feature = "vfs-fuse")]
@@ -1574,6 +1782,181 @@ fn daemon_backed_secret_risk_blocks_and_override_publishes() {
     .assert()
     .success()
     .stdout(predicate::str::contains("Created publication"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn daemon_backed_command_policy_matches_direct_cli() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+
+    daemon_anvics(dir.path(), &socket, &["repo", "init"])
+        .assert()
+        .success();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["snapshot", "create", "--message", "base"],
+    )
+    .assert()
+    .success();
+    let prepare = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Daemon Policy",
+            "--task",
+            "Verify daemon command policy behavior",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&prepare, "thread: ");
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "blocked docker",
+            "--summary",
+            "Host escape command should be blocked",
+            "--",
+            "docker",
+            "ps",
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("daemon error"))
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("HostEscapeRisk"));
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "status", "--thread", &thread],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("evidence_count: 0"));
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "git version",
+            "--summary",
+            "Operator approved checking Git version through daemon",
+            "--allow-command-risk",
+            "--command-risk-reason",
+            "Operator approved daemon version check",
+            "--",
+            "git",
+            "--version",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains(
+        "command_policy_override: Operator approved daemon version check",
+    ));
+
+    fs::write(format!("{workspace_path}/app.txt"), "daemon accepted\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "network accept",
+            "--run-summary",
+            "Network verification should be blocked",
+            "--",
+            "curl",
+            "https://example.com",
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("daemon error"))
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("Networked"));
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "status", "--thread", &thread],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("publication_status: unpublished"));
+
+    let patch_path = dir.path().join("daemon-policy.patch");
+    let accept = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "git version accept",
+            "--run-summary",
+            "Operator approved risky verification while accepting",
+            "--allow-command-risk",
+            "--command-risk-reason",
+            "Operator approved daemon accept version check",
+            "--output",
+            patch_path.to_str().unwrap(),
+            "--",
+            "git",
+            "--version",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Accepted agent workspace"))
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&accept, "review: ");
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains(
+        "command policy override: Operator approved daemon accept version check",
+    ));
+    assert!(patch_path.exists());
 
     daemon.kill().unwrap();
     daemon.wait().unwrap();

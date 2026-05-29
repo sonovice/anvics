@@ -217,6 +217,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             artifact_path,
             projection,
             mount_root,
+            allow_command_risk,
+            command_risk_reason,
         } => {
             let result = AnvicsStore::open(&repo)?.run_command(CommandRunInput {
                 workspace_id: workspace,
@@ -229,6 +231,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 artifact_path,
                 projection,
                 mount_root,
+                allow_command_risk,
+                command_risk_reason,
             })?;
             Ok(ApiResult::CommandRun {
                 command_event: Box::new(result.command_event),
@@ -354,6 +358,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             output_path,
             allow_secret_risk,
             override_reason,
+            allow_command_risk,
+            command_risk_reason,
         } => {
             let acceptance = AnvicsStore::open(&repo)?.accept_agent_with_command_run_and_options(
                 CommandRunInput {
@@ -367,6 +373,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                     artifact_path,
                     projection,
                     mount_root,
+                    allow_command_risk,
+                    command_risk_reason,
                 },
                 output_path.map(PathBuf::from),
                 PublicationOptions {

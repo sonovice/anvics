@@ -175,6 +175,7 @@ enum EvidenceCommand {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum CommandRunCommand {
     Run {
         #[arg(long)]
@@ -195,6 +196,10 @@ enum CommandRunCommand {
         projection: ProjectionSelection,
         #[arg(long)]
         mount_root: Option<PathBuf>,
+        #[arg(long)]
+        allow_command_risk: bool,
+        #[arg(long)]
+        command_risk_reason: Option<String>,
         #[arg(last = true)]
         argv: Vec<String>,
     },
@@ -371,6 +376,10 @@ enum AgentCommand {
         allow_secret_risk: bool,
         #[arg(long)]
         override_reason: Option<String>,
+        #[arg(long)]
+        allow_command_risk: bool,
+        #[arg(long)]
+        command_risk_reason: Option<String>,
         #[arg(last = true)]
         argv: Vec<String>,
     },
@@ -441,6 +450,8 @@ struct CommandRunOptions {
     artifact: Option<String>,
     projection: ProjectionSelection,
     mount_root: Option<PathBuf>,
+    allow_command_risk: bool,
+    command_risk_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -459,6 +470,8 @@ struct AgentAcceptOptions {
     mount_root: Option<PathBuf>,
     allow_secret_risk: bool,
     override_reason: Option<String>,
+    allow_command_risk: bool,
+    command_risk_reason: Option<String>,
     argv: Vec<String>,
 }
 
@@ -647,6 +660,8 @@ fn main() -> Result<()> {
                     command_file,
                     projection,
                     mount_root,
+                    allow_command_risk,
+                    command_risk_reason,
                     argv,
                 },
         } => {
@@ -661,6 +676,8 @@ fn main() -> Result<()> {
                 artifact,
                 projection,
                 mount_root,
+                allow_command_risk,
+                command_risk_reason,
             };
             if let Some(socket) = daemon {
                 run_command_via_daemon(root, socket, options)
@@ -851,6 +868,8 @@ fn main() -> Result<()> {
                     output,
                     allow_secret_risk,
                     override_reason,
+                    allow_command_risk,
+                    command_risk_reason,
                     argv,
                 },
         } => {
@@ -869,6 +888,8 @@ fn main() -> Result<()> {
                 mount_root,
                 allow_secret_risk,
                 override_reason,
+                allow_command_risk,
+                command_risk_reason,
                 argv,
             };
             if let Some(socket) = daemon {
@@ -1449,6 +1470,8 @@ fn run_command_via_daemon(
             artifact_path: input.artifact_path,
             projection: input.projection,
             mount_root: input.mount_root,
+            allow_command_risk: input.allow_command_risk,
+            command_risk_reason: input.command_risk_reason,
         },
     )? {
         ApiResult::CommandRun {
@@ -1509,6 +1532,9 @@ fn print_command_run(
     }
     if let Some(policy_class) = &command_event.command_policy_class {
         println!("policy: {}", command_policy_class_label(policy_class));
+    }
+    if let Some(reason) = &command_event.command_policy_override_reason {
+        println!("command_policy_override: {reason}");
     }
     if let Some(metrics) = &command_event.runtime_metrics {
         println!("projection_setup_ms: {}", metrics.projection_setup_ms);
@@ -2307,6 +2333,8 @@ fn accept_agent_via_daemon(
             output_path: output.map(|path| path.to_string_lossy().to_string()),
             allow_secret_risk,
             override_reason,
+            allow_command_risk: input.allow_command_risk,
+            command_risk_reason: input.command_risk_reason,
         }
     } else {
         let input = accept_command_input(options)?;
@@ -2414,6 +2442,8 @@ fn command_run_input(options: CommandRunOptions) -> Result<CommandRunInput> {
         mount_root: options
             .mount_root
             .map(|path| path.to_string_lossy().to_string()),
+        allow_command_risk: options.allow_command_risk,
+        command_risk_reason: options.command_risk_reason,
     })
 }
 
@@ -2443,6 +2473,8 @@ fn agent_accept_run_input(
         mount_root: options
             .mount_root
             .map(|path| path.to_string_lossy().to_string()),
+        allow_command_risk: options.allow_command_risk,
+        command_risk_reason: options.command_risk_reason,
     })
 }
 

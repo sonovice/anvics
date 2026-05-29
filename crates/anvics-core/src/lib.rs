@@ -283,6 +283,8 @@ pub struct EvidenceSummary {
     pub runtime_metrics: Option<CommandRuntimeMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_policy_override_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<ChangedPath>,
 }
@@ -319,6 +321,8 @@ pub struct CommandEvent {
     pub projection_fallback_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_policy_override_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_metrics: Option<CommandRuntimeMetrics>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -622,6 +626,7 @@ mod tests {
                 projection_files: 1,
                 projection_bytes: 12,
             }),
+            command_policy_override_reason: Some("audited test override".to_owned()),
             file_effects: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -661,6 +666,7 @@ mod tests {
                     projection_bytes: 12,
                 }),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
+                command_policy_override_reason: Some("audited test override".to_owned()),
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),
                     status: ChangeStatus::Modified,
@@ -847,6 +853,7 @@ mod tests {
         assert_eq!(event.projection_capabilities, None);
         assert_eq!(event.projection_fallback_reason, None);
         assert_eq!(event.command_policy_class, None);
+        assert_eq!(event.command_policy_override_reason, None);
         assert_eq!(event.runtime_metrics, None);
         assert!(event.file_effects.is_empty());
     }

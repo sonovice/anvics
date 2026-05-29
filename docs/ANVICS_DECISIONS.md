@@ -233,6 +233,8 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Command policy can cover cwd, env rules, secrets, network, timeout, output size, allowed command patterns, source write capture, evidence artifact rules.
 - Command/proxy execution should own workspace resolution, optional mount lifecycle, file-effect summaries, evidence attachment, and cleanup where possible.
 - Start with coarse top-level command policy classes before claiming syscall-level control: read-only, mutating, destructive, networked, host-escape-risk, and interactive.
+- MVP 0.21 makes coarse command policy operational: networked, host-escape-risk, and interactive commands are blocked by default and require an explicit audited operator override reason.
+- Destructive and unknown commands still run by default in MVP 0.21 because the execution surface is an isolated workspace and repo-specific policy is not mature enough yet.
 - Policy classification is an operational gate and evidence signal, not a guarantee that Anvics is a sandbox.
 
 ## File Effects And Change Units
