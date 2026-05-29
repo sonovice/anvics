@@ -298,6 +298,21 @@ impl From<ProjectionSelection> for anvics_core::ProjectionRequest {
     }
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum AgentLaunchToolSelection {
+    Generic,
+    Codex,
+}
+
+impl From<AgentLaunchToolSelection> for anvics_core::AgentLaunchTool {
+    fn from(selection: AgentLaunchToolSelection) -> Self {
+        match selection {
+            AgentLaunchToolSelection::Generic => Self::Generic,
+            AgentLaunchToolSelection::Codex => Self::Codex,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
     Prepare {
@@ -325,6 +340,12 @@ enum AgentCommand {
     Packet {
         #[arg(long)]
         thread: String,
+    },
+    LaunchPrompt {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long, value_enum, default_value_t = AgentLaunchToolSelection::Generic)]
+        tool: AgentLaunchToolSelection,
     },
     Status {
         #[arg(long)]
@@ -833,6 +854,15 @@ fn main() -> Result<()> {
                 show_agent_packet_via_daemon(root, socket, thread)
             } else {
                 show_agent_packet(root, &thread)
+            }
+        }
+        CliCommand::Agent {
+            command: AgentCommand::LaunchPrompt { workspace, tool },
+        } => {
+            if let Some(socket) = daemon {
+                show_agent_launch_prompt_via_daemon(root, socket, workspace, tool)
+            } else {
+                show_agent_launch_prompt(root, &workspace, tool)
             }
         }
         CliCommand::Agent {
@@ -1951,6 +1981,70 @@ fn show_agent_packet_via_daemon(root: PathBuf, socket: PathBuf, thread: String) 
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn show_agent_launch_prompt(
+    root: PathBuf,
+    workspace_id: &str,
+    tool: AgentLaunchToolSelection,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let prompt = store
+        .agent_launch_prompt(workspace_id, tool.into())
+        .context("failed to render agent launch prompt")?;
+
+    print_agent_launch_prompt(prompt);
+    Ok(())
+}
+
+fn show_agent_launch_prompt_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    tool: AgentLaunchToolSelection,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentLaunchPrompt {
+            workspace,
+            tool: tool.into(),
+        },
+    )? {
+        ApiResult::AgentLaunchPrompt { prompt } => {
+            print_agent_launch_prompt(*prompt);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_launch_prompt(prompt: anvics_core::AgentLaunchPrompt) {
+    println!("tool: {}", agent_launch_tool_label(&prompt.tool));
+    println!("thread: {}", prompt.thread_id);
+    println!("workspace: {}", prompt.workspace_id);
+    println!("repo_path: {}", prompt.repo_path);
+    println!("workspace_path: {}", prompt.workspace_path);
+    println!("packet: {}", prompt.packet_path);
+    match &prompt.skill_path {
+        Some(path) => println!("skill: {path}"),
+        None => println!("skill: none"),
+    }
+    if let Some(command) = &prompt.command {
+        println!("\n## Copy-Paste Command\n");
+        println!("```sh");
+        println!("{command}");
+        println!("```");
+    }
+    println!("\n## Prompt\n");
+    println!("{}", prompt.prompt);
+}
+
+fn agent_launch_tool_label(tool: &anvics_core::AgentLaunchTool) -> &'static str {
+    match tool {
+        anvics_core::AgentLaunchTool::Generic => "generic",
+        anvics_core::AgentLaunchTool::Codex => "codex",
     }
 }
 

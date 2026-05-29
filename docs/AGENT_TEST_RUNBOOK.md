@@ -13,6 +13,7 @@ scripts/daemon_agent_smoke.sh
 scripts/coordination_smoke.sh
 scripts/command_worker_smoke.sh
 scripts/secret_risk_smoke.sh
+scripts/agent_launch_prompt_smoke.sh
 scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
 ```
@@ -30,6 +31,8 @@ scripts/live_agent_trial_prepare.sh
 `command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
+
+`agent_launch_prompt_smoke.sh` verifies the operator prompt for external agent CLIs, including Codex's non-Git workspace flag.
 
 `dogfood_trial_prepare.sh` creates a disposable copy of the Anvics repo, prepares two realistic agent packets, and writes `.anvics/dogfood-trial-manifest.env` for a real dogfood run.
 
@@ -73,10 +76,13 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
 
    ```sh
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent packet --thread "<thread-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent launch-prompt --workspace "<workspace-id>" --tool codex
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent status --thread "<thread-id>"
    ```
 
-4. Open the printed packet path, then paste this prompt into Codex, Claude, Cursor, or another agent CLI:
+4. For Codex CLI, use the generated `agent launch-prompt --tool codex` command. It includes `--skip-git-repo-check` because Anvics workspaces are not Git worktrees and may not contain a `.git` directory.
+
+   For Claude, Cursor, or another agent CLI, open the printed packet path, then paste this prompt:
 
    ```text
    You are working inside an Anvics task packet.
@@ -86,6 +92,7 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
 
    Read the Anvics skill path named in the packet, then follow the skill and packet exactly.
    Work only inside the workspace path listed in the packet.
+   This workspace may not be a Git repository; use the tool's non-Git workspace mode if it has one.
    Run the packet's agent enter command before editing.
    Use the packet's workspace diff command instead of Git status or Git diff.
    Run coordination status before finishing and report any potential clashes.

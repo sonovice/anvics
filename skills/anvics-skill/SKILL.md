@@ -7,6 +7,8 @@ description: Use this when working in an Anvics repository. Guides agents to use
 
 Use Anvics as the source-control interface. Treat the filesystem as a compatibility view for tools that require paths.
 
+An Anvics workspace may not be a Git repository. If your CLI complains about a missing Git repository, use the tool's non-Git workspace option and continue with the packet's Anvics commands.
+
 ## Core Workflow
 
 1. Create or join a `thread` for the task.

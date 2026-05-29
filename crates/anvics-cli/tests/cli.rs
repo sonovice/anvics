@@ -432,6 +432,95 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
 }
 
 #[test]
+fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    fs::create_dir_all(dir.path().join("skills/anvics-skill")).unwrap();
+    fs::write(
+        dir.path().join("skills/anvics-skill/SKILL.md"),
+        "# Anvics\n",
+    )
+    .unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Launch Prompt",
+            "--task",
+            "Edit app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare_output, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare_output, "workspace_path: ");
+    let packet = value_after_prefix(&prepare_output, "packet: ");
+
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "launch-prompt",
+            "--workspace",
+            &workspace,
+            "--tool",
+            "codex",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--skip-git-repo-check"))
+    .stdout(predicate::str::contains("--cd"))
+    .stdout(predicate::str::contains(&workspace_path))
+    .stdout(predicate::str::contains(&packet))
+    .stdout(predicate::str::contains("skills/anvics-skill/SKILL.md"))
+    .stdout(predicate::str::contains("not Git worktrees"))
+    .stdout(predicate::str::contains("workspace diff"));
+
+    anvics(
+        dir.path(),
+        &["agent", "launch-prompt", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("## Prompt"))
+    .stdout(predicate::str::contains("--skip-git-repo-check").not());
+
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "launch-prompt",
+            "--workspace",
+            &workspace,
+            "--tool",
+            "codex",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--skip-git-repo-check"))
+    .stdout(predicate::str::contains(&workspace_path))
+    .stdout(predicate::str::contains(&packet));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn agent_accept_publishes_and_exports_patch() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();

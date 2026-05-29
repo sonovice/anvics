@@ -290,6 +290,12 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 .to_string();
             Ok(ApiResult::AgentPacket { path })
         }
+        ApiMethod::AgentLaunchPrompt { workspace, tool } => {
+            let prompt = AnvicsStore::open(&repo)?.agent_launch_prompt(&workspace, tool)?;
+            Ok(ApiResult::AgentLaunchPrompt {
+                prompt: Box::new(prompt),
+            })
+        }
         ApiMethod::AgentFinish {
             workspace,
             command,

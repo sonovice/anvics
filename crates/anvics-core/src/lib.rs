@@ -504,6 +504,28 @@ pub struct AgentPreparation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchTool {
+    Generic,
+    Codex,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentLaunchPrompt {
+    pub tool: AgentLaunchTool,
+    pub thread_id: WorkThreadId,
+    pub workspace_id: WorkspaceViewId,
+    pub repo_path: String,
+    pub workspace_path: String,
+    pub packet_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_path: Option<String>,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AgentFinish {
     pub evidence: EvidenceRecord,
     pub workspace: WorkspaceView,

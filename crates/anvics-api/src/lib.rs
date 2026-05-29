@@ -1,8 +1,9 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, ChangedPath,
-    CommandEvent, CommandPolicyDecision, CoordinationStatus, EvidenceRecord, NativePublication,
-    ProjectionRequest, RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding,
-    RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
+    AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
+    AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision,
+    CoordinationStatus, EvidenceRecord, NativePublication, ProjectionRequest, RepositoryEvent,
+    RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread,
+    WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +146,10 @@ pub enum ApiMethod {
     },
     AgentPacket {
         thread: String,
+    },
+    AgentLaunchPrompt {
+        workspace: String,
+        tool: AgentLaunchTool,
     },
     AgentFinish {
         workspace: String,
@@ -310,6 +315,9 @@ pub enum ApiResult {
     AgentPacket {
         path: String,
     },
+    AgentLaunchPrompt {
+        prompt: Box<AgentLaunchPrompt>,
+    },
     AgentFinish {
         finish: Box<AgentFinish>,
     },
@@ -471,6 +479,10 @@ mod tests {
             },
             ApiMethod::AgentPacket {
                 thread: "thread-1".to_owned(),
+            },
+            ApiMethod::AgentLaunchPrompt {
+                workspace: "workspace-1".to_owned(),
+                tool: AgentLaunchTool::Codex,
             },
             ApiMethod::AgentFinish {
                 workspace: "workspace-1".to_owned(),
@@ -729,6 +741,20 @@ mod tests {
             workspace: workspace.clone(),
             packet_path: ".anvics/agent-packets/thread.md".to_owned(),
         };
+        let launch_prompt = AgentLaunchPrompt {
+            tool: AgentLaunchTool::Codex,
+            thread_id: thread.id.clone(),
+            workspace_id: workspace.id.clone(),
+            repo_path: "/tmp/repo".to_owned(),
+            workspace_path: "/tmp/repo/.anvics/workspaces/workspace/files".to_owned(),
+            packet_path: ".anvics/agent-packets/thread.md".to_owned(),
+            skill_path: Some(
+                "/tmp/repo/.anvics/workspaces/workspace/files/skills/anvics-skill/SKILL.md"
+                    .to_owned(),
+            ),
+            prompt: "Read the packet.".to_owned(),
+            command: Some("codex exec --skip-git-repo-check".to_owned()),
+        };
         let finish = AgentFinish {
             evidence: evidence.clone(),
             workspace: workspace.clone(),
@@ -863,6 +889,9 @@ mod tests {
             },
             ApiResult::AgentPacket {
                 path: ".anvics/agent-packets/thread.md".to_owned(),
+            },
+            ApiResult::AgentLaunchPrompt {
+                prompt: Box::new(launch_prompt),
             },
             ApiResult::AgentFinish {
                 finish: Box::new(finish),

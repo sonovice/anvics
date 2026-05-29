@@ -92,6 +92,8 @@ print_prompt() {
   local workspace_path="$4"
   local packet="$5"
   local verify="$6"
+  local launch_prompt
+  launch_prompt="$(anvics agent launch-prompt --workspace "$workspace" --tool codex)"
 
   cat <<EOF
 
@@ -102,7 +104,11 @@ workspace_path: $workspace_path
 packet: $packet
 suggested_verify: $verify
 
-Paste this prompt into the external agent:
+Generated Codex CLI launch guidance:
+
+$launch_prompt
+
+Generic prompt for another external agent:
 
 You are working inside an Anvics dogfood task packet.
 
@@ -113,6 +119,7 @@ Before editing, read the Anvics skill at:
 $workspace_path/skills/anvics-skill/SKILL.md
 
 Follow the skill and packet exactly. Work only inside the workspace path listed in the packet.
+This workspace may not be a Git repository; if your agent CLI requires it, use its non-Git workspace flag.
 Run the packet's agent enter command before editing.
 Use the packet's workspace diff command instead of Git status or Git diff.
 Run coordination status before finishing and report any potential clashes.
@@ -142,7 +149,7 @@ cat <<EOF
 
 Manifest: $manifest
 
-Success checklist for this MVP 0.14 validation:
+Success checklist for this Anvics dogfood validation:
 
 - Each agent confirms it read the Anvics skill from its workspace.
 - Each agent edits only the workspace path from the packet.
@@ -157,5 +164,5 @@ After agents finish, accept the chosen workspace with:
 scripts/live_agent_trial_verify.sh "$target_repo" \\
   <accepted-thread-id> <accepted-workspace-id> "<verification command>" <exit-code> "<summary>"
 
-Record the actual run in docs/trials/0003-anvics-dogfood.md using docs/trials/0003-anvics-dogfood-template.md.
+Record the actual run under docs/trials/ after the live run completes.
 EOF
