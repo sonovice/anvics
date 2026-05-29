@@ -31,10 +31,11 @@ If you spawn or delegate to another agent, pass along the Anvics context before 
 - The path to this skill.
 - The task packet path when one exists.
 - The repository path, thread id, workspace id, and workspace path.
+- The packet's Anvics command prefix, especially when `anvics` is not installed on `PATH`.
 - The packet's `agent enter`, `agent context-pack`, `workspace diff`, and `coordination status` commands.
 - The rule that the workspace path is the only editable area.
 
-Each subagent must read this skill, run `agent enter` with its own agent name before editing, use `agent context-pack` when it needs a refreshed brief, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask subagents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
+Each subagent must read this skill, use the packet's Anvics command prefix, run `agent enter` with its own agent name before editing, use `agent context-pack` when it needs a refreshed brief, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask subagents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
 
 ## Source Access
 
@@ -52,6 +53,7 @@ Use a filesystem workspace only when a compiler, test runner, formatter, languag
 Every write belongs to the current thread and workspace.
 
 - Start by running the packet's `agent enter` command.
+- Use the packet's Anvics command prefix exactly. If it is unavailable, report that blocker instead of switching to Git.
 - Use structured patch/write APIs when possible.
 - Refresh task, diff, and coordination context with the packet's `agent context-pack` command when useful.
 - Inspect local changes with the packet's `workspace diff` command.

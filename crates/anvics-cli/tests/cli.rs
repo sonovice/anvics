@@ -394,6 +394,9 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains(&workspace));
     assert!(packet_text.contains("Modify, add, and delete files"));
     assert!(packet_text.contains("anvics --repo"));
+    assert!(packet_text.contains("## Anvics CLI"));
+    assert!(packet_text.contains("Use this command prefix"));
+    assert!(packet_text.contains("If the command is unavailable"));
     assert!(packet_text.contains("only editable area"));
     assert!(packet_text.contains("## Anvics Skill"));
     assert!(packet_text.contains("skills/anvics-skill/SKILL.md"));
@@ -594,6 +597,8 @@ fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
     .stdout(predicate::str::contains(&packet))
     .stdout(predicate::str::contains("skills/anvics-skill/SKILL.md"))
     .stdout(predicate::str::contains("not Git worktrees"))
+    .stdout(predicate::str::contains("Anvics command prefix"))
+    .stdout(predicate::str::contains("write-enabled sandbox mode"))
     .stdout(predicate::str::contains("agent context-pack"))
     .stdout(predicate::str::contains("workspace diff"));
 

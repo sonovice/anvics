@@ -22,6 +22,8 @@ shell_quote() {
   printf "%q" "$1"
 }
 
+export ANVICS_AGENT_COMMAND="cargo run -q -p anvics-cli --bin anvics --manifest-path $(shell_quote "$repo_root/Cargo.toml") --"
+
 mkdir -p "$target_repo"
 if command -v rsync >/dev/null 2>&1; then
   rsync -a \
@@ -94,7 +96,7 @@ print_prompt() {
   local verify="$6"
   local context_pack_command
   local launch_prompt
-  context_pack_command="anvics --repo $(shell_quote "$target_repo") agent context-pack --workspace $workspace"
+  context_pack_command="$ANVICS_AGENT_COMMAND --repo $(shell_quote "$target_repo") agent context-pack --workspace $workspace"
   launch_prompt="$(anvics agent launch-prompt --workspace "$workspace" --tool codex)"
 
   cat <<EOF
@@ -125,6 +127,8 @@ $context_pack_command
 
 Follow the skill and packet exactly. Work only inside the workspace path listed in the packet.
 This workspace may not be a Git repository; if your agent CLI requires it, use its non-Git workspace flag.
+Make sure your agent shell can run the Anvics command prefix printed in the packet.
+If your Codex CLI defaults to a read-only sandbox, launch with an operator-approved write-enabled sandbox mode for this disposable workspace.
 Run the packet's agent enter command before editing.
 Use the packet's context-pack command if you need a compact refreshed brief.
 Use the packet's workspace diff command instead of Git status or Git diff.

@@ -109,6 +109,8 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
 
 4. For Codex CLI, use the generated `agent launch-prompt --tool codex` command. It includes `--skip-git-repo-check` because Anvics workspaces are not Git worktrees and may not contain a `.git` directory.
 
+   The launched agent must also be able to run the Anvics command prefix printed in the packet. If `anvics` is not installed on `PATH`, prepare the packet with `ANVICS_AGENT_COMMAND="<exact command prefix>"` so generated commands use that prefix. If Codex defaults to a read-only sandbox, choose an operator-approved write-enabled sandbox mode for the disposable workspace before launching.
+
    For Claude, Cursor, or another agent CLI, open the printed packet path, then paste this prompt:
 
    ```text
@@ -120,6 +122,7 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    Read the Anvics skill path named in the packet, then follow the skill and packet exactly.
    Work only inside the workspace path listed in the packet.
    This workspace may not be a Git repository; use the tool's non-Git workspace mode if it has one.
+   Use the Anvics command prefix printed in the packet. Do not guess with Git if the command is unavailable.
    Run the packet's agent enter command before editing.
    Use the packet's workspace diff command instead of Git status or Git diff.
    Run coordination status before finishing and report any potential clashes.

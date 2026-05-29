@@ -3287,9 +3287,18 @@ fn wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
     pattern_index == pattern.len()
 }
 
+fn agent_command_prefix() -> String {
+    std::env::var("ANVICS_AGENT_COMMAND")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "anvics".to_owned())
+}
+
 fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &WorkspaceView) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
+    let anvics = agent_command_prefix();
     let skill_path = Path::new(&workspace.materialized_path).join("skills/anvics-skill/SKILL.md");
     let skill_section = if skill_path.exists() {
         format!(
@@ -3300,7 +3309,7 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
         "\n## Anvics Skill\n\nIf this repository provides `skills/anvics-skill/SKILL.md`, read it before editing and follow it as the source-control workflow guide.\n".to_owned()
     };
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n{skill_section}\n## Task\n\n{}\n\n## Instructions\n\n- Read the Anvics skill above before editing when it is available.\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- This workspace may not be a Git repository. Use Anvics commands even if your CLI normally expects Git.\n- Use `anvics --repo {repo} agent context-pack --workspace {}` to refresh task context when you need a compact briefing.\n- Use `anvics --repo {repo} workspace diff {}` to inspect workspace changes; do not use Git status or Git diff inside the workspace.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- Before finishing, run `anvics --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- If you spawn subagents, give them this packet, the Anvics skill path, the repository path, the workspace id/path, the context-pack command, and these same agent-run commands.\n- Do not run operator-only commands such as `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent-Run Commands\n\nRun these commands as the working agent.\n\n### Enter The Workspace\n\n```sh\nanvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n### Refresh Context\n\n```sh\nanvics --repo {repo} agent context-pack --workspace {}\n```\n\n### Inspect Workspace Changes\n\n```sh\nanvics --repo {repo} workspace diff {}\n```\n\n### Check Coordination Before Finishing\n\n```sh\nanvics --repo {repo} coordination status --workspace {}\n```\n\n### Optional Agent Finish\n\nRun this only when asked to record self-reported evidence before operator acceptance.\n\n```sh\nanvics --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n\n## Operator-Run Commands\n\nThese commands accept, publish, or export work. Do not run them as an agent unless the operator explicitly asks you to.\n\n### Launch Prompt For External Agent CLIs\n\n```sh\nanvics --repo {repo} agent launch-prompt --workspace {} --tool codex\n```\n\n### Accept With Anvics-Run Verification\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\n### Accept With Externally-Run Verification\n\n```sh\nanvics --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n",
+        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n{skill_section}\n## Anvics CLI\n\nUse this command prefix for Anvics operations in this packet:\n\n```sh\n{anvics}\n```\n\nIf the command is unavailable, do not guess with Git. Report the missing Anvics command to the operator.\n\n## Task\n\n{}\n\n## Instructions\n\n- Read the Anvics skill above before editing when it is available.\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- This workspace may not be a Git repository. Use Anvics commands even if your CLI normally expects Git.\n- Use `{anvics} --repo {repo} agent context-pack --workspace {}` to refresh task context when you need a compact briefing.\n- Use `{anvics} --repo {repo} workspace diff {}` to inspect workspace changes; do not use Git status or Git diff inside the workspace.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- Before finishing, run `{anvics} --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- If you spawn subagents, give them this packet, the Anvics skill path, the repository path, the workspace id/path, the Anvics command prefix, the context-pack command, and these same agent-run commands.\n- Do not run operator-only commands such as `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent-Run Commands\n\nRun these commands as the working agent.\n\n### Enter The Workspace\n\n```sh\n{anvics} --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n### Refresh Context\n\n```sh\n{anvics} --repo {repo} agent context-pack --workspace {}\n```\n\n### Inspect Workspace Changes\n\n```sh\n{anvics} --repo {repo} workspace diff {}\n```\n\n### Check Coordination Before Finishing\n\n```sh\n{anvics} --repo {repo} coordination status --workspace {}\n```\n\n### Optional Agent Finish\n\nRun this only when asked to record self-reported evidence before operator acceptance.\n\n```sh\n{anvics} --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n\n## Operator-Run Commands\n\nThese commands accept, publish, or export work. Do not run them as an agent unless the operator explicitly asks you to.\n\n### Launch Prompt For External Agent CLIs\n\n```sh\n{anvics} --repo {repo} agent launch-prompt --workspace {} --tool codex\n```\n\n### Accept With Anvics-Run Verification\n\n```sh\n{anvics} --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\n### Accept With Externally-Run Verification\n\n```sh\n{anvics} --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n",
         thread.id,
         workspace.id,
         repo_root.display(),
@@ -3327,6 +3336,7 @@ fn render_agent_launch_prompt(
     packet_path: &Path,
     skill_path: Option<&str>,
 ) -> String {
+    let anvics = agent_command_prefix();
     let skill_instruction = match skill_path {
         Some(path) => format!("Read the Anvics skill before editing:\n{path}\n"),
         None => {
@@ -3335,7 +3345,7 @@ fn render_agent_launch_prompt(
         }
     };
     let context_pack_command = format!(
-        "anvics --repo {} agent context-pack --workspace {}",
+        "{anvics} --repo {} agent context-pack --workspace {}",
         shell_quote(&display_path(repo_root)),
         workspace.id
     );
@@ -3345,6 +3355,7 @@ fn render_agent_launch_prompt(
 Read the packet at:\n{packet_path}\n\n\
 {skill_instruction}\n\
 Refresh the Anvics context pack when you need current task, diff, and coordination context:\n{context_pack_command}\n\n\
+Anvics command prefix:\n{anvics}\n\n\
 Repository path:\n{repo}\n\n\
 Thread id:\n{thread_id}\n\n\
 Task title:\n{title}\n\n\
@@ -3352,6 +3363,8 @@ Workspace id:\n{workspace_id}\n\n\
 Workspace path:\n{workspace_path}\n\n\
 Anvics workspaces are not Git worktrees and may not contain a `.git` directory. \
 Use the Anvics commands in the packet instead of Git status, Git diff, branches, worktrees, commits, or pushes.\n\n\
+Codex launch note: the agent process must have write access to the workspace and must be able to run the Anvics command prefix above. \
+If your Codex CLI defaults to a read-only sandbox, choose an operator-approved write-enabled sandbox mode before launching.\n\n\
 Follow the skill and packet exactly. Work only inside the workspace path above. \
 Run the packet's `agent enter` command before editing. Use `agent context-pack` to refresh context and `workspace diff` to inspect changes. \
 Run `coordination status` before finishing and report potential clashes.\n\n\

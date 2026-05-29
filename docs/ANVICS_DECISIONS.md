@@ -33,6 +33,7 @@ This is the compact checkpoint of the grilled Anvics design. It captures the dec
 - MVP 0.31 adds repo instruction templates for `AGENTS.md` and `CLAUDE.md`; these are normal source files, installed only on request, and reviewable through Anvics like any other repo change.
 - MVP 0.32 adds refreshable `ContextPack` generation for a workspace. It is derived context for agents, not a new source of truth.
 - MVP 0.33 makes context packs part of the normal agent guidance in packets and launch prompts. Agents may refresh context; canonical state remains Anvics objects.
+- Agent crash recovery is a product requirement. Session records are not enough; Anvics must be able to salvage useful workspace progress when an external agent exits, crashes, or loses context before finishing.
 
 ## Core Objects
 
@@ -69,6 +70,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Work thread lifecycle: draft, active, paused, blocked, reviewing, accepted, published, superseded, abandoned.
 - Failed/abandoned work is preserved in the work graph but collapsed/summarized by default.
 - Failed work can produce `LearningNote`s, not raw failed traces by default.
+- Unfinished agent progress should remain recoverable from the workspace projection. The near-term design should add explicit checkpoint/status/recover commands before relying on agents to remember to finish.
 
 ## Parallel Work And Worktree Replacement
 

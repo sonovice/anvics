@@ -42,6 +42,8 @@ printf '%s\n' "$codex_prompt" | grep -- "$workspace_path"
 printf '%s\n' "$codex_prompt" | grep -- "$packet"
 printf '%s\n' "$codex_prompt" | grep -- 'skills/anvics-skill/SKILL.md'
 printf '%s\n' "$codex_prompt" | grep -- 'not Git worktrees'
+printf '%s\n' "$codex_prompt" | grep -- 'Anvics command prefix'
+printf '%s\n' "$codex_prompt" | grep -- 'write-enabled sandbox mode'
 printf '%s\n' "$codex_prompt" | grep -- 'agent context-pack'
 printf '%s\n' "$codex_prompt" | grep -- 'workspace diff'
 
