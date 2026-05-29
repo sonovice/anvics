@@ -92,7 +92,9 @@ print_prompt() {
   local workspace_path="$4"
   local packet="$5"
   local verify="$6"
+  local context_pack_command
   local launch_prompt
+  context_pack_command="anvics --repo $(shell_quote "$target_repo") agent context-pack --workspace $workspace"
   launch_prompt="$(anvics agent launch-prompt --workspace "$workspace" --tool codex)"
 
   cat <<EOF
@@ -118,9 +120,13 @@ $packet
 Before editing, read the Anvics skill at:
 $workspace_path/skills/anvics-skill/SKILL.md
 
+Refresh Anvics context when you need current task, diff, and coordination state:
+$context_pack_command
+
 Follow the skill and packet exactly. Work only inside the workspace path listed in the packet.
 This workspace may not be a Git repository; if your agent CLI requires it, use its non-Git workspace flag.
 Run the packet's agent enter command before editing.
+Use the packet's context-pack command if you need a compact refreshed brief.
 Use the packet's workspace diff command instead of Git status or Git diff.
 Run coordination status before finishing and report any potential clashes.
 Do not create a Git branch, Git worktree, or Git commit.
@@ -154,6 +160,7 @@ Success checklist for this Anvics dogfood validation:
 - Each agent confirms it read the Anvics skill from its workspace.
 - Each agent edits only the workspace path from the packet.
 - Each agent runs agent enter before editing.
+- Each agent can refresh context with agent context-pack when needed.
 - Each agent uses workspace diff instead of Git status or Git diff.
 - Each agent runs coordination status before finishing.
 - The accepted workspace can produce a review, publication, and legacy patch.

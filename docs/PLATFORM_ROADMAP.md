@@ -399,6 +399,7 @@ Current status:
 
 - MVP 0.31 adds `anvics agent instructions`, which renders or installs Anvics-aware `AGENTS.md` and `CLAUDE.md` templates with daemon parity. This gives external agents repo-level guidance before they encounter a task packet.
 - MVP 0.32 adds `anvics agent context-pack`, a refreshable workspace briefing with task, packet/skill paths, agent-run commands, classified workspace changes, and coordination status.
+- MVP 0.33 wires context packs into generated packets, launch prompts, dogfood prompts, and the Anvics skill so external agents naturally refresh context instead of relying on stale packet text.
 
 Acceptance criteria:
 

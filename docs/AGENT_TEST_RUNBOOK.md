@@ -233,6 +233,7 @@ Use `--projection auto` when testing VFS behavior without making FUSE availabili
 ## What To Check
 
 - The agent edited only the workspace path.
+- The agent knew how to use `agent context-pack` when it needed refreshed task, diff, or coordination context.
 - The agent used Anvics `workspace diff` rather than Git status or Git diff inside the workspace.
 - `workspace diff` showed classification labels such as `source`, `generated_tracked`, `generated_untracked`, `cache`, or `evidence_candidate` when relevant.
 - No Git branch, worktree, or commit was needed.

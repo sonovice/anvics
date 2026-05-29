@@ -15,13 +15,14 @@ An Anvics workspace may not be a Git repository. If your CLI complains about a m
 2. Inspect the current `snapshot`.
 3. Create or select an isolated `workspace`.
 4. Run `agent enter` for the workspace before editing.
-5. Edit through Anvics APIs when available, or through the workspace path when tools need files.
-6. Run `coordination status` before finishing.
-7. Use `workspace diff` to inspect changed files before finishing; do not rely on Git status or Git diff inside an Anvics workspace.
-8. Create a new `snapshot` at meaningful checkpoints.
-9. Prefer Anvics-run verification when possible; attach compact `evidence`.
-10. Request `review` when the work is ready.
-11. `publish` after acceptance; export to Git only when a legacy system needs it.
+5. Use `agent context-pack` when you need a compact refreshed briefing for task, diff, and coordination state.
+6. Edit through Anvics APIs when available, or through the workspace path when tools need files.
+7. Run `coordination status` before finishing.
+8. Use `workspace diff` to inspect changed files before finishing; do not rely on Git status or Git diff inside an Anvics workspace.
+9. Create a new `snapshot` at meaningful checkpoints.
+10. Prefer Anvics-run verification when possible; attach compact `evidence`.
+11. Request `review` when the work is ready.
+12. `publish` after acceptance; export to Git only when a legacy system needs it.
 
 ## Delegation And Subagents
 
@@ -30,10 +31,10 @@ If you spawn or delegate to another agent, pass along the Anvics context before 
 - The path to this skill.
 - The task packet path when one exists.
 - The repository path, thread id, workspace id, and workspace path.
-- The packet's `agent enter`, `workspace diff`, and `coordination status` commands.
+- The packet's `agent enter`, `agent context-pack`, `workspace diff`, and `coordination status` commands.
 - The rule that the workspace path is the only editable area.
 
-Each subagent must read this skill, run `agent enter` with its own agent name before editing, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask subagents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
+Each subagent must read this skill, run `agent enter` with its own agent name before editing, use `agent context-pack` when it needs a refreshed brief, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask subagents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
 
 ## Source Access
 
@@ -52,6 +53,7 @@ Every write belongs to the current thread and workspace.
 
 - Start by running the packet's `agent enter` command.
 - Use structured patch/write APIs when possible.
+- Refresh task, diff, and coordination context with the packet's `agent context-pack` command when useful.
 - Inspect local changes with the packet's `workspace diff` command.
 - Keep generated-file edits explicit.
 - If the base is stale, refresh or fork the workspace instead of forcing the edit.

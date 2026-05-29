@@ -32,6 +32,7 @@ This is the compact checkpoint of the grilled Anvics design. It captures the dec
 - Team relay/native sync is post-MVP.
 - MVP 0.31 adds repo instruction templates for `AGENTS.md` and `CLAUDE.md`; these are normal source files, installed only on request, and reviewable through Anvics like any other repo change.
 - MVP 0.32 adds refreshable `ContextPack` generation for a workspace. It is derived context for agents, not a new source of truth.
+- MVP 0.33 makes context packs part of the normal agent guidance in packets and launch prompts. Agents may refresh context; canonical state remains Anvics objects.
 
 ## Core Objects
 

@@ -399,6 +399,7 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains("skills/anvics-skill/SKILL.md"));
     assert!(packet_text.contains("Before editing, read and follow the Anvics skill"));
     assert!(packet_text.contains("agent enter"));
+    assert!(packet_text.contains("agent context-pack"));
     assert!(packet_text.contains("coordination status"));
     assert!(packet_text.contains("workspace diff"));
     assert!(packet_text.contains("If you spawn subagents"));
@@ -593,6 +594,7 @@ fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
     .stdout(predicate::str::contains(&packet))
     .stdout(predicate::str::contains("skills/anvics-skill/SKILL.md"))
     .stdout(predicate::str::contains("not Git worktrees"))
+    .stdout(predicate::str::contains("agent context-pack"))
     .stdout(predicate::str::contains("workspace diff"));
 
     anvics(
@@ -622,7 +624,8 @@ fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
     .success()
     .stdout(predicate::str::contains("--skip-git-repo-check"))
     .stdout(predicate::str::contains(&workspace_path))
-    .stdout(predicate::str::contains(&packet));
+    .stdout(predicate::str::contains(&packet))
+    .stdout(predicate::str::contains("agent context-pack"));
 
     daemon.kill().unwrap();
     daemon.wait().unwrap();
