@@ -396,6 +396,8 @@ pub struct ReviewProjection {
     pub final_snapshot: SourceSnapshotId,
     pub changed_paths: Vec<ChangedPath>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_effects: Vec<FileEffect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub change_units: Vec<ChangeUnit>,
     pub overlap_notes: Vec<String>,
     pub evidence: Vec<EvidenceSummary>,
@@ -773,6 +775,12 @@ mod tests {
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
+            }],
+            file_effects: vec![FileEffect {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+                labels: vec![FileEffectLabel::Source],
+                provenance: FileEffectProvenance::Heuristic,
             }],
             change_units: vec![ChangeUnit {
                 id: ChangeUnitId::new(),

@@ -691,6 +691,12 @@ mod tests {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
             }],
+            file_effects: vec![FileEffect {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+                labels: vec![FileEffectLabel::Source],
+                provenance: FileEffectProvenance::Heuristic,
+            }],
             change_units: vec![ChangeUnit {
                 id: ChangeUnitId::new(),
                 path: "app.txt".to_owned(),

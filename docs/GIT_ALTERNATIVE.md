@@ -656,6 +656,8 @@ The first implementation should apply root `anvics.toml` conservatively: use acc
 
 Generated paths should be split by intent. Tracked generated source can be part of native publications, but agents should normally modify the generator/schema/template and rerun generation rather than editing generated files directly. Direct edits to tracked generated source should require explicit rationale and policy approval. Untracked generated outputs stay out of source changes. Evidence candidate paths can produce attach suggestions, with retention and sharing controlled by evidence policy.
 
+Reviews should show both layers: the full classified `FileEffect` list for transparency, and the smaller `ChangeUnit` list for source-control decisions. That keeps generated output, cache changes, and evidence candidates visible without forcing every tool artifact into the source-change model.
+
 ### Agent Adoption Layer
 
 The system should include a small skill/instruction package for agents.

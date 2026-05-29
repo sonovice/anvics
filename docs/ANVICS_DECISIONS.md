@@ -250,6 +250,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - MVP 0.27 reads optional root `anvics.toml` for generated, ignored/cache, and evidence-candidate path classification.
 - A workspace's modified `anvics.toml` must not reinterpret its own review. Config edits are reviewed as config changes first, then affect later accepted work after publication.
 - MVP 0.28 exposes the same classification through `repo doctor`, including daemon-backed operation, so config behavior is visible before review time.
+- MVP 0.29 persists classified `FileEffect`s in `ReviewProjection`. Reviews show all effects, while `ChangeUnit`s remain the smaller source-control set.
 - Classification layers: config, policy, tools, humans, agent claims.
 - Built-in classification labels:
   - `source`
@@ -265,7 +266,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Everything else is repo/plugin-defined.
 - Only source-relevant effects become `ChangeUnit`s.
 - Cache/ignored output stays out of source changes.
-- Evidence candidates become `EvidenceArtifact` suggestions.
+- Evidence candidates become compact review suggestions, not automatic artifact ingestion.
 - Unknown/sensitive/out-of-scope effects are gated before publication.
 - Anvics mechanically proposes `ChangeUnit`s, agents refine, policy/humans gate unresolved or sensitive cases.
 

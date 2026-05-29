@@ -793,6 +793,7 @@ impl AnvicsStore {
         let overlap_notes = self.overlap_notes(&thread, &changed_paths)?;
         let repository_config = self.repository_config()?;
         let file_effect_set = propose_file_effect_set(&changed_paths, &repository_config)?;
+        let file_effects = file_effect_set.effects.clone();
         let change_units = propose_change_units(&file_effect_set);
 
         let review = ReviewProjection {
@@ -801,6 +802,7 @@ impl AnvicsStore {
             base_snapshot: thread.base_snapshot.clone(),
             final_snapshot,
             changed_paths,
+            file_effects,
             change_units,
             overlap_notes,
             evidence,
@@ -3305,6 +3307,25 @@ fn render_review(
         }
     }
 
+    markdown.push_str("\n## File Effects\n\n");
+    if review.file_effects.is_empty() {
+        markdown.push_str("- No classified file effects recorded.\n");
+    } else {
+        for effect in &review.file_effects {
+            let labels = effect
+                .labels
+                .iter()
+                .map(file_effect_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let note = file_effect_review_note(effect);
+            markdown.push_str(&format!(
+                "- {:?}: `{}` ({labels}) - {note}\n",
+                effect.status, effect.path
+            ));
+        }
+    }
+
     markdown.push_str("\n## Evidence\n\n");
     if review.evidence.is_empty() {
         markdown.push_str("- No evidence attached.\n");
@@ -3393,6 +3414,31 @@ fn render_review(
     ));
 
     markdown
+}
+
+fn file_effect_review_note(effect: &FileEffect) -> &'static str {
+    if effect
+        .labels
+        .iter()
+        .any(|label| matches!(label, FileEffectLabel::EvidenceCandidate))
+    {
+        "evidence candidate; attach compactly if useful"
+    } else if effect.labels.iter().any(|label| {
+        matches!(
+            label,
+            FileEffectLabel::Cache | FileEffectLabel::GeneratedUntracked
+        )
+    }) {
+        "excluded from ChangeUnits"
+    } else if effect
+        .labels
+        .iter()
+        .any(|label| matches!(label, FileEffectLabel::GeneratedTracked))
+    {
+        "proposed ChangeUnit; generated source may need rationale"
+    } else {
+        "proposed ChangeUnit"
+    }
 }
 
 fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
@@ -4176,6 +4222,14 @@ mod tests {
             .changed_paths
             .iter()
             .any(|path| path.path == "reports/test.txt"));
+        assert!(review.file_effects.iter().any(|effect| {
+            effect.path == "dist/bundle.js"
+                && effect.labels == vec![FileEffectLabel::GeneratedUntracked]
+        }));
+        assert!(review.file_effects.iter().any(|effect| {
+            effect.path == "reports/test.txt"
+                && effect.labels == vec![FileEffectLabel::EvidenceCandidate]
+        }));
 
         let units = review
             .change_units
@@ -4202,9 +4256,17 @@ mod tests {
             .any(|unit| unit.path == "reports/test.txt"));
 
         let markdown = store.review_markdown(review.id.as_str()).unwrap();
+        assert!(markdown.contains("## File Effects"));
         assert!(markdown.contains("`src/generated/client.rs` (generated_tracked)"));
+        assert!(markdown.contains("generated source may need rationale"));
+        assert!(markdown.contains("`reports/test.txt` (evidence_candidate)"));
+        assert!(markdown.contains("evidence candidate; attach compactly if useful"));
+        assert!(markdown.contains("`dist/bundle.js` (generated_untracked)"));
+        assert!(markdown.contains("excluded from ChangeUnits"));
         assert!(markdown.contains("`src.rs` (source)"));
-        assert!(!markdown.contains("`dist/bundle.js` ("));
+        assert!(
+            !markdown.contains("`dist/bundle.js` (generated_untracked) - modified dist/bundle.js")
+        );
     }
 
     #[test]
