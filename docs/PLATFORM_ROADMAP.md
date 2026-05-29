@@ -320,6 +320,7 @@ Current status:
 - Cache/evidence-like outputs are filtered out of proposed `ChangeUnit`s; source, config, lockfile, binary, generated, and unknown paths remain reviewable.
 - MVP 0.27 adds optional root `anvics.toml` classification for `generated.tracked`, `generated.untracked`, `ignore.paths`, and `evidence.candidate_paths`.
 - Review classification uses the canonical repo-root `anvics.toml`; a workspace edit to `anvics.toml` is reviewed as a config change but does not reinterpret that same review.
+- MVP 0.28 adds `anvics repo doctor --path <path>` so operators and agents can inspect active config patterns and see how paths will classify before creating a review.
 
 Crates:
 

@@ -21,6 +21,67 @@ fn repo_init_creates_layout() {
 }
 
 #[test]
+fn repo_doctor_reports_config_classification_and_daemon_matches() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("anvics.toml"),
+        "[generated]\ntracked = [\"src/generated/**\"]\nuntracked = [\"dist/**\"]\n\n[ignore]\npaths = [\"cache/**\"]\n\n[evidence]\ncandidate_paths = [\"reports/**\"]\n",
+    )
+    .unwrap();
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+
+    anvics(
+        dir.path(),
+        &[
+            "repo",
+            "doctor",
+            "--path",
+            "src/generated/client.rs",
+            "--path",
+            "dist/bundle.js",
+            "--path",
+            "reports/test.txt",
+            "--path",
+            "src/lib.rs",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Anvics repo doctor"))
+    .stdout(predicate::str::contains("config_present: true"))
+    .stdout(predicate::str::contains(
+        "generated_tracked: src/generated/**",
+    ))
+    .stdout(predicate::str::contains(
+        "- src/generated/client.rs: generated_tracked",
+    ))
+    .stdout(predicate::str::contains(
+        "- dist/bundle.js: generated_untracked",
+    ))
+    .stdout(predicate::str::contains(
+        "- reports/test.txt: evidence_candidate",
+    ))
+    .stdout(predicate::str::contains("- src/lib.rs: source"))
+    .stdout(predicate::str::contains("accepted repo-root anvics.toml"));
+
+    let socket_dir = tempdir().unwrap();
+    let socket = socket_dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["repo", "doctor", "--path", "src/generated/client.rs"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "- src/generated/client.rs: generated_tracked",
+    ));
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn snapshot_create_list_show() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "hello").unwrap();

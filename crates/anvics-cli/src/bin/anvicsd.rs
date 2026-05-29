@@ -108,6 +108,10 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             };
             Ok(status)
         }
+        ApiMethod::RepoDoctor { paths } => {
+            let report = AnvicsStore::open(&repo)?.repo_doctor(paths)?;
+            Ok(ApiResult::RepoDoctor { report })
+        }
         ApiMethod::SnapshotCreate { message } => {
             let snapshot = AnvicsStore::open(&repo)?.create_snapshot(message)?;
             Ok(ApiResult::SnapshotCreate { snapshot })

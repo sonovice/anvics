@@ -1,9 +1,9 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
     AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision,
-    CoordinationStatus, EvidenceRecord, NativePublication, ProjectionRequest, RepositoryEvent,
-    RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread,
-    WorkspaceView,
+    CoordinationStatus, EvidenceRecord, NativePublication, ProjectionRequest, RepoDoctorReport,
+    RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot,
+    WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,9 @@ pub enum ApiMethod {
     Ping,
     RepoInit,
     RepoStatus,
+    RepoDoctor {
+        paths: Vec<String>,
+    },
     SnapshotCreate {
         message: Option<String>,
     },
@@ -246,6 +249,9 @@ pub enum ApiResult {
         initialized: bool,
         manifest: Option<RepositoryManifest>,
     },
+    RepoDoctor {
+        report: RepoDoctorReport,
+    },
     SnapshotCreate {
         snapshot: SourceSnapshot,
     },
@@ -367,6 +373,9 @@ mod tests {
             ApiMethod::Ping,
             ApiMethod::RepoInit,
             ApiMethod::RepoStatus,
+            ApiMethod::RepoDoctor {
+                paths: vec!["src/lib.rs".to_owned()],
+            },
             ApiMethod::SnapshotCreate {
                 message: Some("base".to_owned()),
             },
@@ -814,6 +823,22 @@ mod tests {
             ApiResult::RepoStatus {
                 initialized: true,
                 manifest: Some(manifest),
+            },
+            ApiResult::RepoDoctor {
+                report: RepoDoctorReport {
+                    config_present: true,
+                    config_path: Some("anvics.toml".to_owned()),
+                    generated_tracked: vec!["src/generated/**".to_owned()],
+                    generated_untracked: vec!["dist/**".to_owned()],
+                    ignore_paths: vec!["target/**".to_owned()],
+                    evidence_candidate_paths: vec!["reports/**".to_owned()],
+                    classified_paths: vec![FileEffectClassification {
+                        path: "src/lib.rs".to_owned(),
+                        labels: vec![FileEffectLabel::Source],
+                        provenance: FileEffectProvenance::Heuristic,
+                    }],
+                    notes: vec!["ok".to_owned()],
+                },
             },
             ApiResult::SnapshotCreate {
                 snapshot: snapshot.clone(),

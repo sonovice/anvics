@@ -202,7 +202,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
   2. heuristics/plugins
   3. agent suggestions
 - Source-tree `anvics.toml` is optional but encouraged.
-- `anvics repo init` and `anvics repo doctor` generate/improve config.
+- `anvics repo init` initializes repo state; `anvics repo doctor` first inspects config and path classification. Generating/improving config remains roadmap.
 - No nested/inherited `anvics.toml` in v1.
 - Private/org/local policy lives in Anvics metadata, not `anvics.toml`.
 - Agents may propose `anvics.toml` edits; config changes are policy-sensitive.
@@ -249,6 +249,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - The first implementation is deliberately mechanical: one proposed `ChangeUnit` per source-relevant path effect, no semantic grouping, no rename identity, and no repo-specific policy parser.
 - MVP 0.27 reads optional root `anvics.toml` for generated, ignored/cache, and evidence-candidate path classification.
 - A workspace's modified `anvics.toml` must not reinterpret its own review. Config edits are reviewed as config changes first, then affect later accepted work after publication.
+- MVP 0.28 exposes the same classification through `repo doctor`, including daemon-backed operation, so config behavior is visible before review time.
 - Classification layers: config, policy, tools, humans, agent claims.
 - Built-in classification labels:
   - `source`

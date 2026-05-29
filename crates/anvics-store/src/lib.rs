@@ -4,13 +4,14 @@ use anvics_core::{
     ChangeUnitId, ChangedPath, CommandEvent, CommandEventId, CommandExecutorKind,
     CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics, CommandWorkerRequest,
     CommandWorkerResponse, CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
-    FileEffect, FileEffectLabel, FileEffectProvenance, FileEffectSet, FileEffectSetId,
-    NativePublication, NativePublicationId, ObjectId, OverlayEntry, PolicyOverride,
-    PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork,
-    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
-    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
-    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
-    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    FileEffect, FileEffectClassification, FileEffectLabel, FileEffectProvenance, FileEffectSet,
+    FileEffectSetId, NativePublication, NativePublicationId, ObjectId, OverlayEntry,
+    PolicyOverride, PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest,
+    RelatedWork, RepoDoctorReport, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
+    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, RiskFinding,
+    RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
+    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
+    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -259,6 +260,43 @@ impl AnvicsStore {
 
     pub fn manifest(&self) -> Result<RepositoryManifest> {
         read_json(self.anvics_dir.join("repo.json"))
+    }
+
+    pub fn repo_doctor(&self, paths: Vec<String>) -> Result<RepoDoctorReport> {
+        let config_path = self.root.join("anvics.toml");
+        let config_present = config_path.exists();
+        let config = self.repository_config()?;
+        let classified_paths = paths
+            .into_iter()
+            .map(|path| FileEffectClassification {
+                labels: classify_file_effect_path(&path, &config),
+                path,
+                provenance: FileEffectProvenance::Heuristic,
+            })
+            .collect();
+        let mut notes = Vec::new();
+        if config_present {
+            notes.push("Review classification uses the accepted repo-root anvics.toml.".to_owned());
+            notes.push(
+                "Workspace edits to anvics.toml are reviewed as config changes before affecting later work."
+                    .to_owned(),
+            );
+        } else {
+            notes.push(
+                "No root anvics.toml found; Anvics will use built-in path heuristics.".to_owned(),
+            );
+        }
+
+        Ok(RepoDoctorReport {
+            config_present,
+            config_path: config_present.then(|| config_path.to_string_lossy().to_string()),
+            generated_tracked: config.generated.tracked,
+            generated_untracked: config.generated.untracked,
+            ignore_paths: config.ignore.paths,
+            evidence_candidate_paths: config.evidence.candidate_paths,
+            classified_paths,
+            notes,
+        })
     }
 
     fn repository_config(&self) -> Result<RepositoryConfig> {
@@ -4167,6 +4205,61 @@ mod tests {
         assert!(markdown.contains("`src/generated/client.rs` (generated_tracked)"));
         assert!(markdown.contains("`src.rs` (source)"));
         assert!(!markdown.contains("`dist/bundle.js` ("));
+    }
+
+    #[test]
+    fn repo_doctor_reports_config_and_classifies_paths() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("anvics.toml"),
+            "[generated]\ntracked = [\"src/generated/**\"]\nuntracked = [\"dist/**\"]\n\n[ignore]\npaths = [\"cache/**\"]\n\n[evidence]\ncandidate_paths = [\"reports/**\"]\n",
+        )
+        .unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+
+        let report = store
+            .repo_doctor(vec![
+                "src/generated/client.rs".to_owned(),
+                "dist/bundle.js".to_owned(),
+                "reports/test.txt".to_owned(),
+                "src/lib.rs".to_owned(),
+            ])
+            .unwrap();
+
+        assert!(report.config_present);
+        assert!(report
+            .config_path
+            .as_deref()
+            .unwrap()
+            .ends_with("anvics.toml"));
+        assert_eq!(report.generated_tracked, vec!["src/generated/**"]);
+        assert_eq!(report.generated_untracked, vec!["dist/**"]);
+        assert_eq!(report.ignore_paths, vec!["cache/**"]);
+        assert_eq!(report.evidence_candidate_paths, vec!["reports/**"]);
+        assert_eq!(
+            report
+                .classified_paths
+                .iter()
+                .map(|path| (path.path.as_str(), path.labels.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "src/generated/client.rs",
+                    &[FileEffectLabel::GeneratedTracked][..]
+                ),
+                ("dist/bundle.js", &[FileEffectLabel::GeneratedUntracked][..]),
+                (
+                    "reports/test.txt",
+                    &[FileEffectLabel::EvidenceCandidate][..]
+                ),
+                ("src/lib.rs", &[FileEffectLabel::Source][..]),
+            ]
+        );
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("accepted repo-root anvics.toml")));
     }
 
     #[test]

@@ -67,6 +67,14 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" snapshot create --message base
    ```
 
+   Optional config sanity check:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" repo doctor --path src/lib.rs --path target/debug/app
+   ```
+
+   Use `repo doctor --path <path>` when a task depends on whether a path is source, generated output, cache, or evidence. It reports the accepted root `anvics.toml` interpretation; workspace edits to `anvics.toml` do not affect the same review.
+
 2. Prepare a live-agent packet:
 
    ```sh

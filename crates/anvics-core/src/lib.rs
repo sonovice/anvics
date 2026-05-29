@@ -116,6 +116,25 @@ pub struct RepositoryManifest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RepoDoctorReport {
+    pub config_present: bool,
+    pub config_path: Option<String>,
+    pub generated_tracked: Vec<String>,
+    pub generated_untracked: Vec<String>,
+    pub ignore_paths: Vec<String>,
+    pub evidence_candidate_paths: Vec<String>,
+    pub classified_paths: Vec<FileEffectClassification>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FileEffectClassification {
+    pub path: String,
+    pub labels: Vec<FileEffectLabel>,
+    pub provenance: FileEffectProvenance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SourceSnapshot {
     pub id: SourceSnapshotId,
     pub root_tree: ObjectId,

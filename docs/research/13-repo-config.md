@@ -151,7 +151,7 @@ Evidence candidate paths should not mean "retain everything forever." They shoul
 - Add `SourceRoot` and `PackageBoundary` to the conceptual model.
 - Implement optional `anvics.toml` parsing. MVP 0.27 implements the first narrow read path for review classification: `generated.tracked`, `generated.untracked`, `ignore.paths`, and `evidence.candidate_paths`.
 - Use only canonical root `anvics.toml` for classifying a review. A workspace edit to `anvics.toml` is itself a config change; it should not reinterpret or hide other effects in the same review.
-- Add `anvics repo init` and `anvics repo doctor` flows to generate/improve config.
+- Add `anvics repo doctor` flows to inspect, then later generate/improve config. MVP 0.28 starts with inspection and path classification.
 - Support simple heuristics/plugins for common repo markers.
 - Treat `anvics.toml` edits as policy-sensitive config changes.
 - Distinguish tracked generated source, untracked generated output, and evidence candidate paths.

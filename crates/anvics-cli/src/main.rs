@@ -2,7 +2,7 @@ use anvics_api::{
     ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat,
     WorkspaceDiffFormat as ApiWorkspaceDiffFormat,
 };
-use anvics_core::{CommandWorkerRequest, CommandWorkerResponse};
+use anvics_core::{CommandWorkerRequest, CommandWorkerResponse, FileEffectLabel, RepoDoctorReport};
 use anvics_store::{
     classify_command_policy, AnvicsStore, CommandEvidenceInput, CommandPolicyInput,
     CommandRunInput, PublicationOptions, StoreError,
@@ -94,6 +94,10 @@ enum CliCommand {
 enum RepoCommand {
     Init,
     Status,
+    Doctor {
+        #[arg(long = "path")]
+        paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -550,6 +554,15 @@ fn main() -> Result<()> {
                 repo_status_via_daemon(root, socket)
             } else {
                 repo_status(root)
+            }
+        }
+        CliCommand::Repo {
+            command: RepoCommand::Doctor { paths },
+        } => {
+            if let Some(socket) = daemon {
+                repo_doctor_via_daemon(root, socket, paths)
+            } else {
+                repo_doctor(root, paths)
             }
         }
         CliCommand::Snapshot {
@@ -1038,6 +1051,15 @@ fn repo_status(root: PathBuf) -> Result<()> {
     }
 }
 
+fn repo_doctor(root: PathBuf, paths: Vec<String>) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let report = store
+        .repo_doctor(paths)
+        .context("failed to run repo doctor")?;
+    print_repo_doctor(report);
+    Ok(())
+}
+
 fn init_repo_via_daemon(root: PathBuf, socket: PathBuf) -> Result<()> {
     match daemon_request(&socket, root, ApiMethod::RepoInit)? {
         ApiResult::RepoInit { manifest } => {
@@ -1068,6 +1090,73 @@ fn repo_status_via_daemon(root: PathBuf, socket: PathBuf) -> Result<()> {
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn repo_doctor_via_daemon(root: PathBuf, socket: PathBuf, paths: Vec<String>) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::RepoDoctor { paths })? {
+        ApiResult::RepoDoctor { report } => {
+            print_repo_doctor(report);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_repo_doctor(report: RepoDoctorReport) {
+    println!("Anvics repo doctor");
+    println!("config_present: {}", report.config_present);
+    if let Some(path) = report.config_path {
+        println!("config_path: {path}");
+    }
+    print_pattern_list("generated_tracked", &report.generated_tracked);
+    print_pattern_list("generated_untracked", &report.generated_untracked);
+    print_pattern_list("ignore_paths", &report.ignore_paths);
+    print_pattern_list("evidence_candidate_paths", &report.evidence_candidate_paths);
+
+    if report.classified_paths.is_empty() {
+        println!("classified_paths: none");
+    } else {
+        println!("classified_paths:");
+        for classification in report.classified_paths {
+            let labels = classification
+                .labels
+                .iter()
+                .map(file_effect_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("- {}: {labels}", classification.path);
+        }
+    }
+
+    if !report.notes.is_empty() {
+        println!("notes:");
+        for note in report.notes {
+            println!("- {note}");
+        }
+    }
+}
+
+fn print_pattern_list(label: &str, patterns: &[String]) {
+    if patterns.is_empty() {
+        println!("{label}: none");
+    } else {
+        println!("{}: {}", label, patterns.join(", "));
+    }
+}
+
+fn file_effect_label(label: &FileEffectLabel) -> &'static str {
+    match label {
+        FileEffectLabel::Source => "source",
+        FileEffectLabel::GeneratedTracked => "generated_tracked",
+        FileEffectLabel::GeneratedUntracked => "generated_untracked",
+        FileEffectLabel::EvidenceCandidate => "evidence_candidate",
+        FileEffectLabel::Cache => "cache",
+        FileEffectLabel::Lockfile => "lockfile",
+        FileEffectLabel::Config => "config",
+        FileEffectLabel::SecretRisk => "secret_risk",
+        FileEffectLabel::Binary => "binary",
+        FileEffectLabel::Unknown => "unknown",
     }
 }
 
