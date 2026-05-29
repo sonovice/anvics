@@ -93,7 +93,9 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - `anvics-vfs` owns Anvics' backend abstraction; do not let one crate/platform API define the workspace model.
 - MVP 0.17 proved an opt-in `fuse_mount` backend behind `command run` and `agent accept --run-*`; it is not the default workflow yet.
 - Runtime-owned mounts are preferable to manual agent-managed mounts: Anvics can classify the command, capture file effects, reconcile writes, attach evidence, and clean up the mount.
-- The current FUSE backend is a spike with an in-memory command-session mirror. Production VFS still needs lazy CAS/base hydration, stronger open-file/writeback handling, crash recovery, Windows research, and broader dogfood.
+- MVP 0.20 hardened the spike for common writeback patterns including temp-file rename, file/directory rename, truncate, append, nested create/delete, and delete.
+- Flush/release/fsync are compatibility acknowledgements in the spike, not durability guarantees; persistence remains Anvics' command reconciliation step.
+- The current FUSE backend is a spike with an in-memory command-session mirror. Production VFS still needs lazy CAS/base hydration, crash recovery, Windows research, and broader dogfood.
 - Start with a small mount/capabilities backend trait; keep detailed file-operation plumbing backend-specific until prototypes teach more.
 - Open-file write state, flush/release/fsync behavior, and clean unmount semantics are core prototype risks.
 

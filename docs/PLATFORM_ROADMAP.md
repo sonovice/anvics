@@ -199,10 +199,12 @@ Agentvfs lesson: the right product boundary is not "agents manually manage mount
 
 MVP 0.17 result: Anvics now has an opt-in `fuse_mount` projection behind `command run` and `agent accept --run-*`, feature-gated behind `vfs-fuse`, with `materialized_dir` still the default. The spike proves runtime-owned mount, command execution through the mounted path, changed-path capture, reconciliation back to the materialized workspace, review evidence, and legacy patch export. `--projection auto` can fall back to `materialized_dir` when FUSE support is unavailable.
 
+MVP 0.20 result: the opt-in FUSE projection now handles common editor/tool writeback patterns: temp-file rename, file rename, directory rename with children, truncate, append, nested create/delete, and delete. Flush/release/fsync are compatibility acknowledgements for the in-memory command-session mirror; persistence still happens during Anvics reconciliation, so this is not a crash-safety guarantee. Renames intentionally appear as path-level delete/add effects until Anvics has native rename identity.
+
 Current VFS limitations:
 
 - Mounted state is an in-memory mirror for the command session, not lazy CAS hydration.
-- Open-file write state is enough for basic shell/editor-style writes, not a production crash-recovery state machine.
+- Open-file write state is enough for common shell/editor-style writes, not a production crash-recovery state machine.
 - There is no low-level `workspace mount` command yet.
 - There is no Windows backend yet.
 - The backend is still a spike; it should remain opt-in until repeated dogfood proves that the complexity pays for itself.

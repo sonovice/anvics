@@ -325,6 +325,100 @@ impl MirrorState {
             }
         }
     }
+
+    #[cfg(any(feature = "fuse", test))]
+    fn rename_path(
+        &mut self,
+        from: &Path,
+        to: &Path,
+    ) -> std::result::Result<(), MirrorRenameError> {
+        if from == to {
+            return Ok(());
+        }
+        if from.as_os_str().is_empty() || to.as_os_str().is_empty() {
+            return Err(MirrorRenameError::InvalidInput);
+        }
+
+        let Some(source_entry) = self.entries.get(from).cloned() else {
+            return Err(MirrorRenameError::NotFound);
+        };
+        let Some(to_parent) = to.parent() else {
+            return Err(MirrorRenameError::InvalidInput);
+        };
+        match self.entries.get(to_parent) {
+            Some(MirrorEntry::Directory) => {}
+            Some(MirrorEntry::File { .. }) => return Err(MirrorRenameError::ParentNotDirectory),
+            None => return Err(MirrorRenameError::ParentNotFound),
+        }
+
+        if matches!(source_entry, MirrorEntry::Directory) && to.starts_with(from) {
+            return Err(MirrorRenameError::InvalidInput);
+        }
+
+        if let Some(target_entry) = self.entries.get(to) {
+            match (&source_entry, target_entry) {
+                (MirrorEntry::File { .. }, MirrorEntry::Directory) => {
+                    return Err(MirrorRenameError::TargetIsDirectory);
+                }
+                (MirrorEntry::Directory, MirrorEntry::File { .. }) => {
+                    return Err(MirrorRenameError::TargetIsFile);
+                }
+                (MirrorEntry::Directory, MirrorEntry::Directory)
+                    if self
+                        .entries
+                        .keys()
+                        .any(|candidate| candidate.parent().unwrap_or(Path::new("")) == to) =>
+                {
+                    return Err(MirrorRenameError::TargetNotEmpty);
+                }
+                _ => {}
+            }
+            self.remove_path_recursive(to);
+        }
+
+        let moves: Vec<(PathBuf, PathBuf, MirrorEntry)> = self
+            .entries
+            .iter()
+            .filter_map(|(path, entry)| {
+                if path == from || path.starts_with(from) {
+                    let suffix = path.strip_prefix(from).ok()?;
+                    let new_path = if suffix.as_os_str().is_empty() {
+                        to.to_path_buf()
+                    } else {
+                        to.join(suffix)
+                    };
+                    Some((path.clone(), new_path, entry.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (old_path, _, _) in &moves {
+            self.entries.remove(old_path);
+        }
+        for (old_path, new_path, entry) in moves {
+            if let Some(ino) = self.paths.remove(&old_path) {
+                self.paths.insert(new_path.clone(), ino);
+                self.inodes.insert(ino, new_path.clone());
+            }
+            self.entries.insert(new_path, entry);
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "fuse", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MirrorRenameError {
+    NotFound,
+    ParentNotFound,
+    ParentNotDirectory,
+    TargetIsDirectory,
+    TargetIsFile,
+    TargetNotEmpty,
+    InvalidInput,
 }
 
 #[derive(Clone, Debug)]
@@ -758,6 +852,97 @@ impl fuser::Filesystem for AnvicsFuseFilesystem {
             MirrorEntry::File { .. } => reply.error(fuser::Errno::ENOTDIR),
         }
     }
+
+    fn rename(
+        &self,
+        _req: &fuser::Request,
+        parent: fuser::INodeNo,
+        name: &OsStr,
+        newparent: fuser::INodeNo,
+        newname: &OsStr,
+        flags: fuser::RenameFlags,
+        reply: fuser::ReplyEmpty,
+    ) {
+        if !flags.is_empty() {
+            reply.error(fuser::Errno::EINVAL);
+            return;
+        }
+
+        let mut state = self
+            .mirror
+            .state
+            .lock()
+            .expect("workspace mirror mutex poisoned");
+        let Some(parent_path) = state.path_for_inode(parent.into()) else {
+            reply.error(fuser::Errno::ENOENT);
+            return;
+        };
+        let Some(newparent_path) = state.path_for_inode(newparent.into()) else {
+            reply.error(fuser::Errno::ENOENT);
+            return;
+        };
+
+        let from = if parent_path.as_os_str().is_empty() {
+            PathBuf::from(name)
+        } else {
+            parent_path.join(name)
+        };
+        let to = if newparent_path.as_os_str().is_empty() {
+            PathBuf::from(newname)
+        } else {
+            newparent_path.join(newname)
+        };
+
+        match state.rename_path(&from, &to) {
+            Ok(()) => reply.ok(),
+            Err(MirrorRenameError::NotFound | MirrorRenameError::ParentNotFound) => {
+                reply.error(fuser::Errno::ENOENT)
+            }
+            Err(MirrorRenameError::ParentNotDirectory | MirrorRenameError::TargetIsFile) => {
+                reply.error(fuser::Errno::ENOTDIR)
+            }
+            Err(MirrorRenameError::TargetIsDirectory) => reply.error(fuser::Errno::EISDIR),
+            Err(MirrorRenameError::TargetNotEmpty) => reply.error(fuser::Errno::ENOTEMPTY),
+            Err(MirrorRenameError::InvalidInput) => reply.error(fuser::Errno::EINVAL),
+        }
+    }
+
+    fn flush(
+        &self,
+        _req: &fuser::Request,
+        _ino: fuser::INodeNo,
+        _fh: fuser::FileHandle,
+        _lock_owner: fuser::LockOwner,
+        reply: fuser::ReplyEmpty,
+    ) {
+        // The MVP mirror applies writes synchronously in memory. These callbacks acknowledge
+        // compatibility events; persistence still happens during Anvics reconciliation.
+        reply.ok();
+    }
+
+    fn release(
+        &self,
+        _req: &fuser::Request,
+        _ino: fuser::INodeNo,
+        _fh: fuser::FileHandle,
+        _flags: fuser::OpenFlags,
+        _lock_owner: Option<fuser::LockOwner>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        reply.ok();
+    }
+
+    fn fsync(
+        &self,
+        _req: &fuser::Request,
+        _ino: fuser::INodeNo,
+        _fh: fuser::FileHandle,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        reply.ok();
+    }
 }
 
 #[cfg(feature = "fuse")]
@@ -837,6 +1022,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mirror_rename_reports_path_level_delete_and_add() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("old_dir")).unwrap();
+        fs::write(dir.path().join("old_dir/child.txt"), "child\n").unwrap();
+        fs::write(dir.path().join("old_name.txt"), "file\n").unwrap();
+        let mirror = WorkspaceMirror::from_path(dir.path()).unwrap();
+        {
+            let mut state = mirror.state.lock().unwrap();
+            state
+                .rename_path(Path::new("old_name.txt"), Path::new("new_name.txt"))
+                .unwrap();
+            state
+                .rename_path(Path::new("old_dir"), Path::new("new_dir"))
+                .unwrap();
+        }
+
+        assert_eq!(
+            mirror.changed_paths(),
+            vec![
+                VfsFileEffect {
+                    path: "new_dir/child.txt".to_owned(),
+                    status: VfsFileEffectStatus::Added,
+                },
+                VfsFileEffect {
+                    path: "new_name.txt".to_owned(),
+                    status: VfsFileEffectStatus::Added,
+                },
+                VfsFileEffect {
+                    path: "old_dir/child.txt".to_owned(),
+                    status: VfsFileEffectStatus::Deleted,
+                },
+                VfsFileEffect {
+                    path: "old_name.txt".to_owned(),
+                    status: VfsFileEffectStatus::Deleted,
+                },
+            ]
+        );
+    }
+
     #[cfg(feature = "fuse")]
     #[test]
     fn mounted_workspace_supports_basic_shell_tools_when_enabled() {
@@ -883,5 +1108,94 @@ mod tests {
         );
         assert!(source.path().join("added.txt").exists());
         assert!(!source.path().join("delete.txt").exists());
+    }
+
+    #[cfg(feature = "fuse")]
+    #[test]
+    fn mounted_workspace_persists_writeback_edge_cases_when_enabled() {
+        if std::env::var("ANVICS_RUN_FUSE_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping real FUSE test; set ANVICS_RUN_FUSE_TESTS=1 to run it");
+            return;
+        }
+
+        let source = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("old_dir")).unwrap();
+        fs::write(source.path().join("app.txt"), "base\n").unwrap();
+        fs::write(source.path().join("delete.txt"), "delete\n").unwrap();
+        fs::write(source.path().join("old_name.txt"), "rename me\n").unwrap();
+        fs::write(source.path().join("old_dir/child.txt"), "child\n").unwrap();
+
+        let mounted = mount_workspace(source.path(), mount.path()).unwrap();
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(
+                ": > app.txt && \
+                 printf 'append\\n' >> app.txt && \
+                 printf 'tmp\\n' > temp.tmp && \
+                 mv temp.tmp from_temp.txt && \
+                 mv old_name.txt new_name.txt && \
+                 mv old_dir new_dir && \
+                 mkdir -p transient/nested && \
+                 printf 'gone\\n' > transient/nested/file.txt && \
+                 rm -r transient && \
+                 rm delete.txt",
+            )
+            .current_dir(mounted.mount_path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        mounted.persist_to_path(source.path()).unwrap();
+        assert_eq!(
+            mounted.changed_paths(),
+            vec![
+                VfsFileEffect {
+                    path: "app.txt".to_owned(),
+                    status: VfsFileEffectStatus::Modified,
+                },
+                VfsFileEffect {
+                    path: "delete.txt".to_owned(),
+                    status: VfsFileEffectStatus::Deleted,
+                },
+                VfsFileEffect {
+                    path: "from_temp.txt".to_owned(),
+                    status: VfsFileEffectStatus::Added,
+                },
+                VfsFileEffect {
+                    path: "new_dir/child.txt".to_owned(),
+                    status: VfsFileEffectStatus::Added,
+                },
+                VfsFileEffect {
+                    path: "new_name.txt".to_owned(),
+                    status: VfsFileEffectStatus::Added,
+                },
+                VfsFileEffect {
+                    path: "old_dir/child.txt".to_owned(),
+                    status: VfsFileEffectStatus::Deleted,
+                },
+                VfsFileEffect {
+                    path: "old_name.txt".to_owned(),
+                    status: VfsFileEffectStatus::Deleted,
+                },
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(source.path().join("app.txt")).unwrap(),
+            "append\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source.path().join("from_temp.txt")).unwrap(),
+            "tmp\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source.path().join("new_dir/child.txt")).unwrap(),
+            "child\n"
+        );
+        assert!(source.path().join("new_name.txt").exists());
+        assert!(!source.path().join("old_name.txt").exists());
+        assert!(!source.path().join("old_dir").exists());
+        assert!(!source.path().join("delete.txt").exists());
+        assert!(!source.path().join("transient").exists());
     }
 }

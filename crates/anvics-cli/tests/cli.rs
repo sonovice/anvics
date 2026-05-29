@@ -996,6 +996,9 @@ fn agent_accept_with_fuse_projection_exports_patch() {
 
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    fs::write(dir.path().join("rename_me.txt"), "rename me\n").unwrap();
+    fs::create_dir_all(dir.path().join("old_dir")).unwrap();
+    fs::write(dir.path().join("old_dir/child.txt"), "child\n").unwrap();
 
     anvics(dir.path(), &["repo", "init"]).assert().success();
     anvics(dir.path(), &["snapshot", "create", "--message", "base"])
@@ -1038,7 +1041,7 @@ fn agent_accept_with_fuse_projection_exports_patch() {
             "--",
             "sh",
             "-c",
-            "printf 'accepted through fuse\\n' > app.txt && grep 'accepted through fuse' app.txt",
+            ": > app.txt && printf 'accepted through fuse\\n' >> app.txt && printf 'new\\n' > added.tmp && mv added.tmp added.txt && mv rename_me.txt renamed.txt && mv old_dir new_dir && grep 'accepted through fuse' app.txt",
         ],
     )
     .assert()
@@ -1060,10 +1063,18 @@ fn agent_accept_with_fuse_projection_exports_patch() {
     .stdout(predicate::str::contains("fuse verify"))
     .stdout(predicate::str::contains("anvics-run:"))
     .stdout(predicate::str::contains("projection: fuse_mount"))
-    .stdout(predicate::str::contains("file effects: modified `app.txt`"));
+    .stdout(predicate::str::contains("added `added.txt`"))
+    .stdout(predicate::str::contains("added `new_dir/child.txt`"))
+    .stdout(predicate::str::contains("added `renamed.txt`"))
+    .stdout(predicate::str::contains("deleted `old_dir/child.txt`"))
+    .stdout(predicate::str::contains("deleted `rename_me.txt`"))
+    .stdout(predicate::str::contains("modified `app.txt`"));
 
     let clean = tempdir().unwrap();
     fs::write(clean.path().join("app.txt"), "base\n").unwrap();
+    fs::write(clean.path().join("rename_me.txt"), "rename me\n").unwrap();
+    fs::create_dir_all(clean.path().join("old_dir")).unwrap();
+    fs::write(clean.path().join("old_dir/child.txt"), "child\n").unwrap();
     StdCommand::new("git")
         .args(["init"])
         .current_dir(clean.path())
@@ -1083,6 +1094,20 @@ fn agent_accept_with_fuse_projection_exports_patch() {
         fs::read_to_string(clean.path().join("app.txt")).unwrap(),
         "accepted through fuse\n"
     );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("added.txt")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("renamed.txt")).unwrap(),
+        "rename me\n"
+    );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("new_dir/child.txt")).unwrap(),
+        "child\n"
+    );
+    assert!(!clean.path().join("rename_me.txt").exists());
+    assert!(!clean.path().join("old_dir").exists());
 }
 
 #[test]

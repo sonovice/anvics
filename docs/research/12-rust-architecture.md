@@ -167,7 +167,9 @@ Current spike constraints:
 - The FUSE filesystem is an in-memory mirror of the composed workspace for one command session.
 - Changed files are persisted back into the normal materialized workspace/overlay path after command completion.
 - Mount directories are runtime-owned and cleaned up after successful and failed commands when safe.
-- There is no production open-file state machine, lazy CAS hydration, low-level `workspace mount`, Windows backend, or sandbox guarantee yet.
+- MVP 0.20 covers common writeback behavior: temp-file rename, file and directory rename, truncate, append, nested create/delete, and delete.
+- Flush/release/fsync are acknowledged for compatibility, but durability still comes from post-command reconciliation; there is no production crash-recovery state machine yet.
+- There is no lazy CAS hydration, low-level `workspace mount`, Windows backend, or sandbox guarantee yet.
 
 Clients:
 
