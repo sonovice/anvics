@@ -395,6 +395,10 @@ Scope:
 - Passive command/event attachment.
 - Basic `ContextPack` creation.
 
+Current status:
+
+- MVP 0.31 adds `anvics agent instructions`, which renders or installs Anvics-aware `AGENTS.md` and `CLAUDE.md` templates with daemon parity. This gives external agents repo-level guidance before they encounter a task packet.
+
 Acceptance criteria:
 
 - A shell-based agent can read the skill, create/join a work thread, work in the runtime-provided workspace path, inspect changes, run commands, attach evidence, and request review.

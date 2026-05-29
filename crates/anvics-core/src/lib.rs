@@ -613,6 +613,21 @@ pub enum AgentLaunchTool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInstructionTarget {
+    Agents,
+    Claude,
+    All,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentInstructionFile {
+    pub path: String,
+    pub content: String,
+    pub written: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AgentLaunchPrompt {
     pub tool: AgentLaunchTool,
     pub thread_id: WorkThreadId,
@@ -957,6 +972,18 @@ mod tests {
             serde_json::from_str::<AgentSession>(&serde_json::to_string(&session).unwrap())
                 .unwrap(),
             session
+        );
+        let instruction_file = AgentInstructionFile {
+            path: "AGENTS.md".to_owned(),
+            content: "instructions".to_owned(),
+            written: true,
+        };
+        assert_eq!(
+            serde_json::from_str::<AgentInstructionFile>(
+                &serde_json::to_string(&instruction_file).unwrap()
+            )
+            .unwrap(),
+            instruction_file
         );
         assert_eq!(
             serde_json::from_str::<CoordinationStatus>(

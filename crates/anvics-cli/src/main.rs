@@ -323,6 +323,23 @@ impl From<AgentLaunchToolSelection> for anvics_core::AgentLaunchTool {
     }
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum AgentInstructionTargetSelection {
+    Agents,
+    Claude,
+    All,
+}
+
+impl From<AgentInstructionTargetSelection> for anvics_core::AgentInstructionTarget {
+    fn from(selection: AgentInstructionTargetSelection) -> Self {
+        match selection {
+            AgentInstructionTargetSelection::Agents => Self::Agents,
+            AgentInstructionTargetSelection::Claude => Self::Claude,
+            AgentInstructionTargetSelection::All => Self::All,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
     Prepare {
@@ -356,6 +373,14 @@ enum AgentCommand {
         workspace: String,
         #[arg(long, value_enum, default_value_t = AgentLaunchToolSelection::Generic)]
         tool: AgentLaunchToolSelection,
+    },
+    Instructions {
+        #[arg(long, value_enum, default_value_t = AgentInstructionTargetSelection::All)]
+        target: AgentInstructionTargetSelection,
+        #[arg(long)]
+        install: bool,
+        #[arg(long)]
+        force: bool,
     },
     Status {
         #[arg(long)]
@@ -885,6 +910,20 @@ fn main() -> Result<()> {
                 show_agent_launch_prompt_via_daemon(root, socket, workspace, tool)
             } else {
                 show_agent_launch_prompt(root, &workspace, tool)
+            }
+        }
+        CliCommand::Agent {
+            command:
+                AgentCommand::Instructions {
+                    target,
+                    install,
+                    force,
+                },
+        } => {
+            if let Some(socket) = daemon {
+                agent_instructions_via_daemon(root, socket, target, install, force)
+            } else {
+                agent_instructions(root, target, install, force)
             }
         }
         CliCommand::Agent {
@@ -2228,6 +2267,59 @@ fn agent_launch_tool_label(tool: &anvics_core::AgentLaunchTool) -> &'static str 
     match tool {
         anvics_core::AgentLaunchTool::Generic => "generic",
         anvics_core::AgentLaunchTool::Codex => "codex",
+    }
+}
+
+fn agent_instructions(
+    root: PathBuf,
+    target: AgentInstructionTargetSelection,
+    install: bool,
+    force: bool,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let files = store
+        .agent_instruction_files(target.into(), install, force)
+        .context("failed to render agent instruction templates")?;
+
+    print_agent_instruction_files(&files, install);
+    Ok(())
+}
+
+fn agent_instructions_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    target: AgentInstructionTargetSelection,
+    install: bool,
+    force: bool,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentInstructions {
+            target: target.into(),
+            install,
+            force,
+        },
+    )? {
+        ApiResult::AgentInstructions { files } => {
+            print_agent_instruction_files(&files, install);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_instruction_files(files: &[anvics_core::AgentInstructionFile], install: bool) {
+    for (index, file) in files.iter().enumerate() {
+        if index > 0 && !install {
+            println!();
+        }
+        if install {
+            println!("wrote: {}", file.path);
+        } else {
+            println!("path: {}", file.path);
+            println!("{}", file.content);
+        }
     }
 }
 

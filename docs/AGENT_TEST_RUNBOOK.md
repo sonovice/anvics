@@ -14,6 +14,7 @@ scripts/coordination_smoke.sh
 scripts/command_worker_smoke.sh
 scripts/command_worker_process_smoke.sh
 scripts/secret_risk_smoke.sh
+scripts/agent_instructions_smoke.sh
 scripts/agent_launch_prompt_smoke.sh
 scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
@@ -32,6 +33,8 @@ scripts/live_agent_trial_prepare.sh
 `command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
 
 `command_worker_process_smoke.sh` checks `anvics-worker` protocol health, then runs the same acceptance loop through the opt-in worker process executor and verifies that review evidence records `executor: worker`.
+
+`agent_instructions_smoke.sh` renders and installs `AGENTS.md`/`CLAUDE.md` templates, verifies overwrite protection, and checks that the generated guidance tells external agents to use Anvics instead of Git defaults.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
 
@@ -74,6 +77,15 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    ```
 
    Use `repo doctor --path <path>` when a task depends on whether a path is source, generated output, cache, or evidence. It reports the accepted root `anvics.toml` interpretation; workspace edits to `anvics.toml` do not affect the same review.
+
+   To make a target repo agent-ready before preparing packets, render or install repo-level instructions:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent instructions
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent instructions --install
+   ```
+
+   The install writes `AGENTS.md` and `CLAUDE.md` only when they do not already exist. Use `--force` only when intentionally replacing existing repo guidance.
 
 2. Prepare a live-agent packet:
 

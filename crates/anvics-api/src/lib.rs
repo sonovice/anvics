@@ -1,9 +1,9 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
-    AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision,
-    CoordinationStatus, EvidenceRecord, FileEffect, NativePublication, ProjectionRequest,
-    RepoDoctorReport, RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan,
-    SourceSnapshot, WorkThread, WorkspaceView,
+    AgentAcceptance, AgentFinish, AgentInstructionFile, AgentInstructionTarget, AgentLaunchPrompt,
+    AgentLaunchTool, AgentPreparation, AgentSession, AgentStatus, ChangedPath, CommandEvent,
+    CommandPolicyDecision, CoordinationStatus, EvidenceRecord, FileEffect, NativePublication,
+    ProjectionRequest, RepoDoctorReport, RepositoryEvent, RepositoryManifest, ReviewProjection,
+    RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +155,11 @@ pub enum ApiMethod {
     AgentLaunchPrompt {
         workspace: String,
         tool: AgentLaunchTool,
+    },
+    AgentInstructions {
+        target: AgentInstructionTarget,
+        install: bool,
+        force: bool,
     },
     AgentFinish {
         workspace: String,
@@ -328,6 +333,9 @@ pub enum ApiResult {
     AgentLaunchPrompt {
         prompt: Box<AgentLaunchPrompt>,
     },
+    AgentInstructions {
+        files: Vec<AgentInstructionFile>,
+    },
     AgentFinish {
         finish: Box<AgentFinish>,
     },
@@ -497,6 +505,11 @@ mod tests {
             ApiMethod::AgentLaunchPrompt {
                 workspace: "workspace-1".to_owned(),
                 tool: AgentLaunchTool::Codex,
+            },
+            ApiMethod::AgentInstructions {
+                target: AgentInstructionTarget::All,
+                install: false,
+                force: false,
             },
             ApiMethod::AgentFinish {
                 workspace: "workspace-1".to_owned(),
@@ -785,6 +798,11 @@ mod tests {
             prompt: "Read the packet.".to_owned(),
             command: Some("codex exec --skip-git-repo-check".to_owned()),
         };
+        let instruction_file = AgentInstructionFile {
+            path: "/tmp/repo/AGENTS.md".to_owned(),
+            content: "# Anvics Agent Instructions\n".to_owned(),
+            written: false,
+        };
         let finish = AgentFinish {
             evidence: evidence.clone(),
             workspace: workspace.clone(),
@@ -944,6 +962,9 @@ mod tests {
             },
             ApiResult::AgentLaunchPrompt {
                 prompt: Box::new(launch_prompt),
+            },
+            ApiResult::AgentInstructions {
+                files: vec![instruction_file],
             },
             ApiResult::AgentFinish {
                 finish: Box::new(finish),

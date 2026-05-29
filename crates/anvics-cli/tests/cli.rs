@@ -629,6 +629,65 @@ fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
 }
 
 #[test]
+fn agent_instructions_render_install_and_daemon_matches() {
+    let dir = tempdir().unwrap();
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+
+    anvics(dir.path(), &["agent", "instructions", "--target", "agents"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("path:"))
+        .stdout(predicate::str::contains("AGENTS.md"))
+        .stdout(predicate::str::contains("Anvics Agent Instructions"))
+        .stdout(predicate::str::contains("workspace diff"))
+        .stdout(predicate::str::contains("Do not create Git branches"));
+    assert!(!dir.path().join("AGENTS.md").exists());
+
+    anvics(dir.path(), &["agent", "instructions", "--install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wrote:"))
+        .stdout(predicate::str::contains("AGENTS.md"))
+        .stdout(predicate::str::contains("CLAUDE.md"));
+    assert!(dir.path().join("AGENTS.md").exists());
+    assert!(dir.path().join("CLAUDE.md").exists());
+
+    anvics(dir.path(), &["agent", "instructions", "--install"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "instructions",
+            "--target",
+            "agents",
+            "--install",
+            "--force",
+        ],
+    )
+    .assert()
+    .success();
+
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "instructions", "--target", "claude"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("CLAUDE.md"))
+    .stdout(predicate::str::contains("Anvics Agent Instructions"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn agent_accept_publishes_and_exports_patch() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();

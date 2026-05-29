@@ -30,6 +30,7 @@ This is the compact checkpoint of the grilled Anvics design. It captures the dec
 - MVP 0 conflict handling is overlap detection plus reviewable conflict notes, not semantic auto-resolution.
 - MVP 0 evidence is compact by default: raw artifacts by reference, short review summaries by budget.
 - Team relay/native sync is post-MVP.
+- MVP 0.31 adds repo instruction templates for `AGENTS.md` and `CLAUDE.md`; these are normal source files, installed only on request, and reviewable through Anvics like any other repo change.
 
 ## Core Objects
 

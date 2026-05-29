@@ -310,6 +310,15 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 prompt: Box::new(prompt),
             })
         }
+        ApiMethod::AgentInstructions {
+            target,
+            install,
+            force,
+        } => {
+            let files =
+                AnvicsStore::open(&repo)?.agent_instruction_files(target, install, force)?;
+            Ok(ApiResult::AgentInstructions { files })
+        }
         ApiMethod::AgentFinish {
             workspace,
             command,

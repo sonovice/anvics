@@ -1,17 +1,17 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
-    AgentSession, AgentSessionId, AgentSessionStatus, AgentStatus, ChangeStatus, ChangeUnit,
-    ChangeUnitId, ChangedPath, CommandEvent, CommandEventId, CommandExecutorKind,
-    CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics, CommandWorkerRequest,
-    CommandWorkerResponse, CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
-    FileEffect, FileEffectClassification, FileEffectLabel, FileEffectProvenance, FileEffectSet,
-    FileEffectSetId, NativePublication, NativePublicationId, ObjectId, OverlayEntry,
-    PolicyOverride, PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest,
-    RelatedWork, RepoDoctorReport, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
-    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, RiskFinding,
-    RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
-    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
-    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    AgentAcceptance, AgentFinish, AgentInstructionFile, AgentInstructionTarget, AgentLaunchPrompt,
+    AgentLaunchTool, AgentPreparation, AgentSession, AgentSessionId, AgentSessionStatus,
+    AgentStatus, ChangeStatus, ChangeUnit, ChangeUnitId, ChangedPath, CommandEvent, CommandEventId,
+    CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics,
+    CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus, EvidenceRecord,
+    EvidenceRecordId, EvidenceSummary, FileEffect, FileEffectClassification, FileEffectLabel,
+    FileEffectProvenance, FileEffectSet, FileEffectSetId, NativePublication, NativePublicationId,
+    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
+    ProjectionKind, ProjectionRequest, RelatedWork, RepoDoctorReport, RepositoryEvent,
+    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
+    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
+    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
+    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -85,6 +85,8 @@ pub enum StoreError {
     EmptyCommandRiskReason,
     #[error("--command-risk-reason requires --allow-command-risk")]
     CommandRiskReasonWithoutOverride,
+    #[error("agent instruction file already exists: {0}; rerun with force to overwrite")]
+    AgentInstructionExists(PathBuf),
     #[error("review {review_id} does not belong to thread {thread_id}")]
     ReviewThreadMismatch {
         review_id: String,
@@ -1074,6 +1076,34 @@ impl AnvicsStore {
             prompt,
             command,
         })
+    }
+
+    pub fn agent_instruction_files(
+        &self,
+        target: AgentInstructionTarget,
+        install: bool,
+        force: bool,
+    ) -> Result<Vec<AgentInstructionFile>> {
+        let files = instruction_targets(target)
+            .into_iter()
+            .map(|path| {
+                let full_path = self.root.join(path);
+                if install && full_path.exists() && !force {
+                    return Err(StoreError::AgentInstructionExists(full_path));
+                }
+                let content = render_agent_instruction_template(path);
+                if install {
+                    fs::write(&full_path, &content)?;
+                }
+                Ok(AgentInstructionFile {
+                    path: full_path.to_string_lossy().to_string(),
+                    content,
+                    written: install,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(files)
     }
 
     pub fn finish_agent(
@@ -3286,6 +3316,43 @@ fn render_codex_launch_command(workspace: &WorkspaceView, prompt: &str) -> Strin
     )
 }
 
+fn instruction_targets(target: AgentInstructionTarget) -> Vec<&'static str> {
+    match target {
+        AgentInstructionTarget::Agents => vec!["AGENTS.md"],
+        AgentInstructionTarget::Claude => vec!["CLAUDE.md"],
+        AgentInstructionTarget::All => vec!["AGENTS.md", "CLAUDE.md"],
+    }
+}
+
+fn render_agent_instruction_template(path: &str) -> String {
+    let audience = match path {
+        "CLAUDE.md" => "Claude Code",
+        _ => "AI coding agents",
+    };
+    format!(
+        "# Anvics Agent Instructions\n\n\
+These instructions are for {audience} working in an Anvics-managed repository.\n\n\
+## Source Control\n\n\
+- Anvics is the source-control interface. Do not create Git branches, Git worktrees, scratch commits, or pushes for normal agent work.\n\
+- Git may exist only as a legacy import/export boundary. Treat Anvics work threads, workspaces, snapshots, evidence, reviews, and publications as canonical.\n\
+- Anvics workspaces may not contain a `.git` directory. If your CLI requires Git, use its non-Git workspace flag.\n\n\
+## Before Editing\n\n\
+- Read `skills/anvics-skill/SKILL.md` when it exists.\n\
+- Read the Anvics task packet if the operator provided one.\n\
+- Work only in the workspace path from the packet or launch prompt.\n\
+- Run the packet's `agent enter` command before editing and read the coordination output.\n\n\
+## While Working\n\n\
+- Use `anvics --repo <repo> workspace diff <workspace-id>` instead of `git status` or `git diff`.\n\
+- Run `anvics --repo <repo> coordination status --workspace <workspace-id>` before finishing.\n\
+- Keep evidence compact: command label, exit status, short summary, and artifact paths instead of transcript dumps.\n\
+- Do not paste secrets, tokens, private keys, or `.env` values into summaries or review notes.\n\n\
+## Delegation\n\n\
+If you spawn subagents, pass them this file, the Anvics skill path, the task packet path, the repository path, the workspace id/path, and the same agent-run commands. Subagents must also run `agent enter`, use `workspace diff`, and report coordination status.\n\n\
+## Operator-Only Commands\n\n\
+Do not run `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export. Risky Anvics-run commands may require explicit operator approval with a reason.\n"
+    )
+}
+
 fn render_review(
     repo_root: &Path,
     review: &ReviewProjection,
@@ -3704,6 +3771,44 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn agent_instruction_templates_render_and_install_without_overwriting() {
+        let dir = tempdir().unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+
+        let rendered = store
+            .agent_instruction_files(AgentInstructionTarget::Agents, false, false)
+            .unwrap();
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].path.ends_with("AGENTS.md"));
+        assert!(!rendered[0].written);
+        assert!(rendered[0].content.contains("Anvics Agent Instructions"));
+        assert!(rendered[0].content.contains("workspace diff"));
+        assert!(!dir.path().join("AGENTS.md").exists());
+
+        let installed = store
+            .agent_instruction_files(AgentInstructionTarget::All, true, false)
+            .unwrap();
+        assert_eq!(installed.len(), 2);
+        assert!(installed.iter().all(|file| file.written));
+        assert!(dir.path().join("AGENTS.md").exists());
+        assert!(dir.path().join("CLAUDE.md").exists());
+
+        let err = store
+            .agent_instruction_files(AgentInstructionTarget::Agents, true, false)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::AgentInstructionExists(_)));
+
+        fs::write(dir.path().join("AGENTS.md"), "old").unwrap();
+        store
+            .agent_instruction_files(AgentInstructionTarget::Agents, true, true)
+            .unwrap();
+        assert!(fs::read_to_string(dir.path().join("AGENTS.md"))
+            .unwrap()
+            .contains("Do not create Git branches"));
     }
 
     #[test]
