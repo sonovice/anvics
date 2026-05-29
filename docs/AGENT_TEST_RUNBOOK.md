@@ -16,6 +16,7 @@ scripts/command_worker_process_smoke.sh
 scripts/secret_risk_smoke.sh
 scripts/agent_instructions_smoke.sh
 scripts/agent_context_pack_smoke.sh
+scripts/agent_recovery_smoke.sh
 scripts/agent_launch_prompt_smoke.sh
 scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
@@ -38,6 +39,8 @@ scripts/live_agent_trial_prepare.sh
 `agent_instructions_smoke.sh` renders and installs `AGENTS.md`/`CLAUDE.md` templates, verifies overwrite protection, and checks that the generated guidance tells external agents to use Anvics instead of Git defaults.
 
 `agent_context_pack_smoke.sh` renders a scoped, refreshable context pack for a workspace, including task, packet/skill paths, classified workspace changes, and coordination status.
+
+`agent_recovery_smoke.sh` proves interrupted agent work can be inspected with `agent recover` and preserved with `agent checkpoint` before acceptance.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
 
@@ -125,6 +128,7 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    Use the Anvics command prefix printed in the packet. Do not guess with Git if the command is unavailable.
    Run the packet's agent enter command before editing.
    Use the packet's workspace diff command instead of Git status or Git diff.
+   Run agent checkpoint before a long pause, handoff, risky edit, or expected context loss.
    Run coordination status before finishing and report any potential clashes.
    Do not create a Git branch, Git worktree, or Git commit.
    When done, tell me a short command label, its exit code, a one-sentence summary, and optionally a command/evidence file path.
@@ -164,6 +168,13 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    ```
 
    `agent finish`, `review show`, `publish create`, and `legacy git export` remain available when you want to inspect or publish each step manually.
+
+   If the agent crashes, exits early, or loses context before finishing, inspect salvageable progress first:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent recover --workspace "<workspace-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent checkpoint --workspace "<workspace-id>" --summary "Salvaged interrupted agent progress."
+   ```
 
    If publication is blocked by a secret-risk finding, inspect the review and risk list:
 

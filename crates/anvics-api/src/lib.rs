@@ -1,9 +1,10 @@
 use anvics_core::{
-    AgentAcceptance, AgentContextPack, AgentFinish, AgentInstructionFile, AgentInstructionTarget,
-    AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentSession, AgentStatus, ChangedPath,
-    CommandEvent, CommandPolicyDecision, CoordinationStatus, EvidenceRecord, FileEffect,
-    NativePublication, ProjectionRequest, RepoDoctorReport, RepositoryEvent, RepositoryManifest,
-    ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
+    AgentAcceptance, AgentCheckpoint, AgentContextPack, AgentFinish, AgentInstructionFile,
+    AgentInstructionTarget, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentRecovery,
+    AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision,
+    CoordinationStatus, EvidenceRecord, FileEffect, NativePublication, ProjectionRequest,
+    RepoDoctorReport, RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan,
+    SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +165,13 @@ pub enum ApiMethod {
     AgentContextPack {
         workspace: String,
         write: bool,
+    },
+    AgentCheckpoint {
+        workspace: String,
+        summary: String,
+    },
+    AgentRecover {
+        workspace: String,
     },
     AgentFinish {
         workspace: String,
@@ -343,6 +351,12 @@ pub enum ApiResult {
     AgentContextPack {
         pack: Box<AgentContextPack>,
     },
+    AgentCheckpoint {
+        checkpoint: Box<AgentCheckpoint>,
+    },
+    AgentRecover {
+        recovery: Box<AgentRecovery>,
+    },
     AgentFinish {
         finish: Box<AgentFinish>,
     },
@@ -521,6 +535,13 @@ mod tests {
             ApiMethod::AgentContextPack {
                 workspace: "workspace-1".to_owned(),
                 write: false,
+            },
+            ApiMethod::AgentCheckpoint {
+                workspace: "workspace-1".to_owned(),
+                summary: "salvage docs edits".to_owned(),
+            },
+            ApiMethod::AgentRecover {
+                workspace: "workspace-1".to_owned(),
             },
             ApiMethod::AgentFinish {
                 workspace: "workspace-1".to_owned(),
@@ -786,7 +807,7 @@ mod tests {
         let publication = NativePublication {
             id: publication_id,
             thread_id: thread_id.clone(),
-            accepted_snapshot: final_snapshot,
+            accepted_snapshot: final_snapshot.clone(),
             review_id: review_id.clone(),
             created_at: "2026-05-28T00:00:06Z".to_owned(),
         };
@@ -824,6 +845,18 @@ mod tests {
             content: "# Anvics Context Pack".to_owned(),
             path: None,
             written: false,
+        };
+        let checkpoint = AgentCheckpoint {
+            id: anvics_core::AgentCheckpointId::new(),
+            thread_id: thread.id.clone(),
+            workspace_id: workspace.id.clone(),
+            snapshot_id: final_snapshot.clone(),
+            summary: "salvage docs edits".to_owned(),
+            changed_paths: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
+            created_at: "2026-05-28T00:00:09Z".to_owned(),
         };
         let finish = AgentFinish {
             evidence: evidence.clone(),
@@ -865,6 +898,17 @@ mod tests {
                 freshness_note: "known changed paths from latest overlay".to_owned(),
             }],
             potential_clash_notes: vec!["Potential path overlap with title: app.txt".to_owned()],
+        };
+        let recovery = AgentRecovery {
+            thread: thread.clone(),
+            workspace: workspace.clone(),
+            current_changed_paths: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
+            latest_checkpoint: Some(checkpoint.clone()),
+            active_sessions: vec![session.clone()],
+            notes: vec!["Current workspace has 1 recoverable changed path(s).".to_owned()],
         };
         let results = vec![
             ApiResult::Pong,
@@ -990,6 +1034,12 @@ mod tests {
             },
             ApiResult::AgentContextPack {
                 pack: Box::new(context_pack),
+            },
+            ApiResult::AgentCheckpoint {
+                checkpoint: Box::new(checkpoint),
+            },
+            ApiResult::AgentRecover {
+                recovery: Box::new(recovery),
             },
             ApiResult::AgentFinish {
                 finish: Box::new(finish),

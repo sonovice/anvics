@@ -1,17 +1,18 @@
 use anvics_core::{
-    AgentAcceptance, AgentContextPack, AgentFinish, AgentInstructionFile, AgentInstructionTarget,
-    AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentSession, AgentSessionId,
-    AgentSessionStatus, AgentStatus, ChangeStatus, ChangeUnit, ChangeUnitId, ChangedPath,
-    CommandEvent, CommandEventId, CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision,
-    CommandRuntimeMetrics, CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus,
-    EvidenceRecord, EvidenceRecordId, EvidenceSummary, FileEffect, FileEffectClassification,
-    FileEffectLabel, FileEffectProvenance, FileEffectSet, FileEffectSetId, NativePublication,
-    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId,
-    ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork, RepoDoctorReport,
-    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
-    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
-    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
-    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    AgentAcceptance, AgentCheckpoint, AgentCheckpointId, AgentContextPack, AgentFinish,
+    AgentInstructionFile, AgentInstructionTarget, AgentLaunchPrompt, AgentLaunchTool,
+    AgentPreparation, AgentRecovery, AgentSession, AgentSessionId, AgentSessionStatus, AgentStatus,
+    ChangeStatus, ChangeUnit, ChangeUnitId, ChangedPath, CommandEvent, CommandEventId,
+    CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics,
+    CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus, EvidenceRecord,
+    EvidenceRecordId, EvidenceSummary, FileEffect, FileEffectClassification, FileEffectLabel,
+    FileEffectProvenance, FileEffectSet, FileEffectSetId, NativePublication, NativePublicationId,
+    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
+    ProjectionKind, ProjectionRequest, RelatedWork, RepoDoctorReport, RepositoryEvent,
+    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
+    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
+    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
+    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -63,6 +64,8 @@ pub enum StoreError {
     EmptyEvidenceCommand,
     #[error("agent name must not be empty")]
     EmptyAgentName,
+    #[error("agent checkpoint summary must not be empty")]
+    EmptyCheckpointSummary,
     #[error("command label must not be empty")]
     EmptyCommandLabel,
     #[error("command argv must not be empty")]
@@ -229,6 +232,7 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("reviews"))?;
         fs::create_dir_all(anvics_dir.join("publications"))?;
         fs::create_dir_all(anvics_dir.join("agent-packets"))?;
+        fs::create_dir_all(anvics_dir.join("agent-checkpoints"))?;
         fs::create_dir_all(anvics_dir.join("events"))?;
         fs::create_dir_all(anvics_dir.join("sessions"))?;
         fs::create_dir_all(anvics_dir.join("command-events"))?;
@@ -1156,6 +1160,81 @@ impl AnvicsStore {
         })
     }
 
+    pub fn agent_checkpoint(&self, workspace_id: &str, summary: String) -> Result<AgentCheckpoint> {
+        let summary = summary.trim().to_owned();
+        if summary.is_empty() {
+            return Err(StoreError::EmptyCheckpointSummary);
+        }
+        let changed_paths = self.workspace_diff(workspace_id)?;
+        let workspace =
+            self.workspace_snapshot(workspace_id, Some(format!("agent checkpoint: {summary}")))?;
+        let snapshot_id = workspace
+            .latest_snapshot
+            .clone()
+            .ok_or_else(|| StoreError::MissingWorkspaceSnapshot(workspace_id.to_owned()))?;
+        let checkpoint = AgentCheckpoint {
+            id: AgentCheckpointId::new(),
+            thread_id: workspace.thread_id.clone(),
+            workspace_id: workspace.id.clone(),
+            snapshot_id,
+            summary,
+            changed_paths,
+            created_at: now_rfc3339()?,
+        };
+        let checkpoint_path = self.agent_checkpoint_path(checkpoint.id.as_str());
+        if let Some(parent) = checkpoint_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_json_pretty(checkpoint_path, &checkpoint)?;
+        self.append_event(
+            RepositoryEventKind::AgentCheckpointCreated,
+            Some(checkpoint.id.to_string()),
+        )?;
+        Ok(checkpoint)
+    }
+
+    pub fn agent_recovery(&self, workspace_id: &str) -> Result<AgentRecovery> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let thread = self.show_thread(workspace.thread_id.as_str())?;
+        let current_changed_paths = self.workspace_diff(workspace_id)?;
+        let latest_checkpoint = self.latest_agent_checkpoint(workspace_id)?;
+        let active_sessions = self
+            .list_agent_sessions(None, Some(workspace_id))?
+            .into_iter()
+            .filter(|session| session.status == AgentSessionStatus::Active)
+            .collect::<Vec<_>>();
+        let mut notes = Vec::new();
+        if current_changed_paths.is_empty() {
+            notes.push("Current workspace matches its base snapshot.".to_owned());
+        } else {
+            notes.push(format!(
+                "Current workspace has {} recoverable changed path(s).",
+                current_changed_paths.len()
+            ));
+        }
+        if latest_checkpoint.is_some() {
+            notes.push("Latest checkpoint is a durable salvage snapshot.".to_owned());
+        } else {
+            notes.push(
+                "No checkpoint exists yet; create one before discarding the workspace.".to_owned(),
+            );
+        }
+        if active_sessions.is_empty() {
+            notes.push(
+                "No active agent session is currently registered for this workspace.".to_owned(),
+            );
+        }
+
+        Ok(AgentRecovery {
+            thread,
+            workspace,
+            current_changed_paths,
+            latest_checkpoint,
+            active_sessions,
+            notes,
+        })
+    }
+
     pub fn finish_agent(
         &self,
         workspace_id: &str,
@@ -1686,6 +1765,12 @@ impl AnvicsStore {
             .join(format!("{thread_id}.md"))
     }
 
+    fn agent_checkpoint_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir
+            .join("agent-checkpoints")
+            .join(format!("{id}.json"))
+    }
+
     fn append_event(
         &self,
         kind: RepositoryEventKind,
@@ -2036,6 +2121,20 @@ impl AnvicsStore {
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         Ok(workspaces)
+    }
+
+    fn latest_agent_checkpoint(&self, workspace_id: &str) -> Result<Option<AgentCheckpoint>> {
+        let mut checkpoints: Vec<AgentCheckpoint> =
+            read_json_dir::<AgentCheckpoint>(self.anvics_dir.join("agent-checkpoints"))?
+                .into_iter()
+                .filter(|checkpoint| checkpoint.workspace_id.as_str() == workspace_id)
+                .collect();
+        checkpoints.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(checkpoints.pop())
     }
 
     fn show_session(&self, id: &str) -> Result<AgentSession> {
@@ -3299,6 +3398,8 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
     let anvics = agent_command_prefix();
+    let thread_id = thread.id.to_string();
+    let workspace_id = workspace.id.to_string();
     let skill_path = Path::new(&workspace.materialized_path).join("skills/anvics-skill/SKILL.md");
     let skill_section = if skill_path.exists() {
         format!(
@@ -3309,23 +3410,10 @@ fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &Worksp
         "\n## Anvics Skill\n\nIf this repository provides `skills/anvics-skill/SKILL.md`, read it before editing and follow it as the source-control workflow guide.\n".to_owned()
     };
     format!(
-        "# Anvics Agent Task\n\nThread: `{}`\nWorkspace: `{}`\nRepository: `{}`\nWorkspace path: `{}`\n{skill_section}\n## Anvics CLI\n\nUse this command prefix for Anvics operations in this packet:\n\n```sh\n{anvics}\n```\n\nIf the command is unavailable, do not guess with Git. Report the missing Anvics command to the operator.\n\n## Task\n\n{}\n\n## Instructions\n\n- Read the Anvics skill above before editing when it is available.\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- This workspace may not be a Git repository. Use Anvics commands even if your CLI normally expects Git.\n- Use `{anvics} --repo {repo} agent context-pack --workspace {}` to refresh task context when you need a compact briefing.\n- Use `{anvics} --repo {repo} workspace diff {}` to inspect workspace changes; do not use Git status or Git diff inside the workspace.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- Before finishing, run `{anvics} --repo {repo} coordination status --workspace {}` and summarize any potential clashes.\n- If you spawn subagents, give them this packet, the Anvics skill path, the repository path, the workspace id/path, the Anvics command prefix, the context-pack command, and these same agent-run commands.\n- Do not run operator-only commands such as `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent-Run Commands\n\nRun these commands as the working agent.\n\n### Enter The Workspace\n\n```sh\n{anvics} --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n```\n\n### Refresh Context\n\n```sh\n{anvics} --repo {repo} agent context-pack --workspace {}\n```\n\n### Inspect Workspace Changes\n\n```sh\n{anvics} --repo {repo} workspace diff {}\n```\n\n### Check Coordination Before Finishing\n\n```sh\n{anvics} --repo {repo} coordination status --workspace {}\n```\n\n### Optional Agent Finish\n\nRun this only when asked to record self-reported evidence before operator acceptance.\n\n```sh\n{anvics} --repo {repo} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n\n## Operator-Run Commands\n\nThese commands accept, publish, or export work. Do not run them as an agent unless the operator explicitly asks you to.\n\n### Launch Prompt For External Agent CLIs\n\n```sh\n{anvics} --repo {repo} agent launch-prompt --workspace {} --tool codex\n```\n\n### Accept With Anvics-Run Verification\n\n```sh\n{anvics} --repo {repo} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\n### Accept With Externally-Run Verification\n\n```sh\n{anvics} --repo {repo} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n",
-        thread.id,
-        workspace.id,
-        repo_root.display(),
-        workspace.materialized_path,
-        thread.task,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id,
-        workspace.id
+        "# Anvics Agent Task\n\nThread: `{thread_id}`\nWorkspace: `{workspace_id}`\nRepository: `{repo_display}`\nWorkspace path: `{workspace_display}`\n{skill_section}\n## Anvics CLI\n\nUse this command prefix for Anvics operations in this packet:\n\n```sh\n{anvics}\n```\n\nIf the command is unavailable, do not guess with Git. Report the missing Anvics command to the operator.\n\n## Task\n\n{task}\n\n## Instructions\n\n- Read the Anvics skill above before editing when it is available.\n- Before editing, run the agent enter command below and read the coordination output.\n- Work only inside the workspace path above. This workspace is the only editable area for this task.\n- This workspace may not be a Git repository. Use Anvics commands even if your CLI normally expects Git.\n- Use `{anvics} --repo {repo} agent context-pack --workspace {workspace_id}` to refresh task context when you need a compact briefing.\n- Use `{anvics} --repo {repo} workspace diff {workspace_id}` to inspect workspace changes; do not use Git status or Git diff inside the workspace.\n- Do not edit the repository root, `.anvics/` metadata, another workspace, a Git branch, a Git worktree, or a Git commit.\n- Keep command output compact, and do not paste secrets or tokens into evidence summaries.\n- If you need to pause, hand off, or preserve progress before a risky step, run `{anvics} --repo {repo} agent checkpoint --workspace {workspace_id} --summary \"<short salvage summary>\"`.\n- Before finishing, run `{anvics} --repo {repo} coordination status --workspace {workspace_id}` and summarize any potential clashes.\n- If you spawn subagents, give them this packet, the Anvics skill path, the repository path, the workspace id/path, the Anvics command prefix, the context-pack command, and these same agent-run commands.\n- Do not run operator-only commands such as `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.\n\n## Workspace\n\n```sh\ncd {workspace_path}\n```\n\n## Agent-Run Commands\n\nRun these commands as the working agent.\n\n### Enter The Workspace\n\n```sh\n{anvics} --repo {repo} agent enter --workspace {workspace_id} --name \"<agent-name>\"\n```\n\n### Refresh Context\n\n```sh\n{anvics} --repo {repo} agent context-pack --workspace {workspace_id}\n```\n\n### Inspect Workspace Changes\n\n```sh\n{anvics} --repo {repo} workspace diff {workspace_id}\n```\n\n### Checkpoint Recoverable Progress\n\n```sh\n{anvics} --repo {repo} agent checkpoint --workspace {workspace_id} --summary \"<short salvage summary>\"\n```\n\n### Check Coordination Before Finishing\n\n```sh\n{anvics} --repo {repo} coordination status --workspace {workspace_id}\n```\n\n### Optional Agent Finish\n\nRun this only when asked to record self-reported evidence before operator acceptance.\n\n```sh\n{anvics} --repo {repo} agent finish --workspace {workspace_id} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n\nAdd `--artifact <path>` only when you created a compact artifact worth linking.\n\n## Operator-Run Commands\n\nThese commands accept, publish, or export work. Do not run them as an agent unless the operator explicitly asks you to.\n\n### Recover After Agent Crash Or Interruption\n\n```sh\n{anvics} --repo {repo} agent recover --workspace {workspace_id}\n```\n\n### Launch Prompt For External Agent CLIs\n\n```sh\n{anvics} --repo {repo} agent launch-prompt --workspace {workspace_id} --tool codex\n```\n\n### Accept With Anvics-Run Verification\n\n```sh\n{anvics} --repo {repo} agent accept --workspace {workspace_id} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]\n```\n\n### Accept With Externally-Run Verification\n\n```sh\n{anvics} --repo {repo} agent accept --workspace {workspace_id} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"\n```\n",
+        repo_display = repo_root.display(),
+        workspace_display = workspace.materialized_path,
+        task = thread.task,
     )
 }
 
@@ -3367,7 +3455,8 @@ Codex launch note: the agent process must have write access to the workspace and
 If your Codex CLI defaults to a read-only sandbox, choose an operator-approved write-enabled sandbox mode before launching.\n\n\
 Follow the skill and packet exactly. Work only inside the workspace path above. \
 Run the packet's `agent enter` command before editing. Use `agent context-pack` to refresh context and `workspace diff` to inspect changes. \
-Run `coordination status` before finishing and report potential clashes.\n\n\
+Run `agent checkpoint` before long pauses, handoffs, risky edits, or expected context loss. \
+Run `coordination status` before finishing and report potential clashes. Operators can use `agent recover` after an interruption.\n\n\
 When done, report whether you read the skill, whether you refreshed the context pack, whether you used `workspace diff`, \
 what verification command you ran, its exit code, a one-sentence summary, and any compact artifact path.",
         packet_path = packet_path.display(),
@@ -3949,6 +4038,7 @@ mod tests {
         assert!(dir.path().join(".anvics/objects/blake3").exists());
         assert!(dir.path().join(".anvics/snapshots").exists());
         assert!(dir.path().join(".anvics/agent-packets").exists());
+        assert!(dir.path().join(".anvics/agent-checkpoints").exists());
         assert!(dir.path().join(".anvics/events").exists());
         assert!(dir.path().join(".anvics/sessions").exists());
         assert!(dir.path().join(".anvics/command-events").exists());
@@ -4049,6 +4139,60 @@ mod tests {
         assert!(fs::read_to_string(path)
             .unwrap()
             .contains("# Anvics Context Pack"));
+    }
+
+    #[test]
+    fn agent_checkpoint_and_recover_salvage_unfinished_workspace() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Crash recovery".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        let workspace_path = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace_path.join("app.txt"), "salvaged\n").unwrap();
+        store
+            .enter_agent_session(preparation.workspace.id.as_str(), "codex".to_owned())
+            .unwrap();
+
+        let recovery_before = store
+            .agent_recovery(preparation.workspace.id.as_str())
+            .unwrap();
+        assert_eq!(
+            recovery_before.current_changed_paths,
+            vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }]
+        );
+        assert!(recovery_before.latest_checkpoint.is_none());
+        assert_eq!(recovery_before.active_sessions.len(), 1);
+
+        let checkpoint = store
+            .agent_checkpoint(
+                preparation.workspace.id.as_str(),
+                "salvaged app edit".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(checkpoint.summary, "salvaged app edit");
+        assert_eq!(checkpoint.changed_paths.len(), 1);
+        assert!(store
+            .show_workspace(preparation.workspace.id.as_str())
+            .unwrap()
+            .latest_snapshot
+            .is_some());
+
+        let recovery_after = store
+            .agent_recovery(preparation.workspace.id.as_str())
+            .unwrap();
+        assert_eq!(recovery_after.latest_checkpoint.unwrap().id, checkpoint.id);
+        assert!(store
+            .events_since(0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::AgentCheckpointCreated));
     }
 
     #[test]

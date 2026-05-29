@@ -19,7 +19,7 @@ An Anvics workspace may not be a Git repository. If your CLI complains about a m
 6. Edit through Anvics APIs when available, or through the workspace path when tools need files.
 7. Run `coordination status` before finishing.
 8. Use `workspace diff` to inspect changed files before finishing; do not rely on Git status or Git diff inside an Anvics workspace.
-9. Create a new `snapshot` at meaningful checkpoints.
+9. Run `agent checkpoint` at meaningful pause, handoff, or risk boundaries so progress can be recovered if the agent exits unexpectedly.
 10. Prefer Anvics-run verification when possible; attach compact `evidence`.
 11. Request `review` when the work is ready.
 12. `publish` after acceptance; export to Git only when a legacy system needs it.
@@ -57,6 +57,7 @@ Every write belongs to the current thread and workspace.
 - Use structured patch/write APIs when possible.
 - Refresh task, diff, and coordination context with the packet's `agent context-pack` command when useful.
 - Inspect local changes with the packet's `workspace diff` command.
+- Preserve recoverable progress with `agent checkpoint` before long pauses, risky edits, handoffs, or context loss.
 - Keep generated-file edits explicit.
 - If the base is stale, refresh or fork the workspace instead of forcing the edit.
 - If another thread touches the same path or hunk, record the overlap before continuing.
@@ -66,6 +67,7 @@ Every write belongs to the current thread and workspace.
 - Do not run `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.
 
 Do not use commits as scratchpad history. Keep failed or abandoned attempts attached to the thread as summarized evidence.
+If an agent crashes or exits before finishing, the operator should use `agent recover --workspace <id>` to inspect current changed paths and the latest checkpoint.
 
 ## Evidence Budget
 

@@ -62,6 +62,7 @@ opaque_id!(ReviewProjectionId);
 opaque_id!(NativePublicationId);
 opaque_id!(RepositoryEventId);
 opaque_id!(AgentSessionId);
+opaque_id!(AgentCheckpointId);
 opaque_id!(RiskScanId);
 opaque_id!(RiskFindingId);
 opaque_id!(PolicyOverrideId);
@@ -549,6 +550,7 @@ pub enum RepositoryEventKind {
     AgentSessionEntered,
     AgentSessionSeen,
     AgentSessionFinished,
+    AgentCheckpointCreated,
     RiskScanCreated,
     SecretRiskDetected,
     PolicyOverrideRecorded,
@@ -654,6 +656,28 @@ pub struct AgentLaunchPrompt {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentCheckpoint {
+    pub id: AgentCheckpointId,
+    pub thread_id: WorkThreadId,
+    pub workspace_id: WorkspaceViewId,
+    pub snapshot_id: SourceSnapshotId,
+    pub summary: String,
+    pub changed_paths: Vec<ChangedPath>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentRecovery {
+    pub thread: WorkThread,
+    pub workspace: WorkspaceView,
+    pub current_changed_paths: Vec<ChangedPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_checkpoint: Option<AgentCheckpoint>,
+    pub active_sessions: Vec<AgentSession>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

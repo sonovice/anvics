@@ -388,6 +388,16 @@ enum AgentCommand {
         #[arg(long)]
         write: bool,
     },
+    Checkpoint {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        summary: String,
+    },
+    Recover {
+        #[arg(long)]
+        workspace: String,
+    },
     Status {
         #[arg(long)]
         thread: Option<String>,
@@ -939,6 +949,24 @@ fn main() -> Result<()> {
                 agent_context_pack_via_daemon(root, socket, workspace, write)
             } else {
                 agent_context_pack(root, &workspace, write)
+            }
+        }
+        CliCommand::Agent {
+            command: AgentCommand::Checkpoint { workspace, summary },
+        } => {
+            if let Some(socket) = daemon {
+                agent_checkpoint_via_daemon(root, socket, workspace, summary)
+            } else {
+                agent_checkpoint(root, &workspace, summary)
+            }
+        }
+        CliCommand::Agent {
+            command: AgentCommand::Recover { workspace },
+        } => {
+            if let Some(socket) = daemon {
+                agent_recover_via_daemon(root, socket, workspace)
+            } else {
+                agent_recover(root, &workspace)
             }
         }
         CliCommand::Agent {
@@ -2374,6 +2402,131 @@ fn print_agent_context_pack(pack: anvics_core::AgentContextPack) {
         }
     }
     println!("{}", pack.content);
+}
+
+fn agent_checkpoint(root: PathBuf, workspace_id: &str, summary: String) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let checkpoint = store
+        .agent_checkpoint(workspace_id, summary)
+        .context("failed to checkpoint agent workspace")?;
+
+    print_agent_checkpoint(&checkpoint);
+    Ok(())
+}
+
+fn agent_checkpoint_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    summary: String,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentCheckpoint { workspace, summary },
+    )? {
+        ApiResult::AgentCheckpoint { checkpoint } => {
+            print_agent_checkpoint(&checkpoint);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_checkpoint(checkpoint: &anvics_core::AgentCheckpoint) {
+    println!("Created agent checkpoint {}", checkpoint.id);
+    println!("thread: {}", checkpoint.thread_id);
+    println!("workspace: {}", checkpoint.workspace_id);
+    println!("snapshot: {}", checkpoint.snapshot_id);
+    println!("summary: {}", checkpoint.summary);
+    print_changed_paths("changed_paths", &checkpoint.changed_paths);
+}
+
+fn agent_recover(root: PathBuf, workspace_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let recovery = store
+        .agent_recovery(workspace_id)
+        .context("failed to recover agent workspace")?;
+
+    print_agent_recovery(&root, &recovery);
+    Ok(())
+}
+
+fn agent_recover_via_daemon(root: PathBuf, socket: PathBuf, workspace: String) -> Result<()> {
+    match daemon_request(&socket, root.clone(), ApiMethod::AgentRecover { workspace })? {
+        ApiResult::AgentRecover { recovery } => {
+            print_agent_recovery(&root, &recovery);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_recovery(root: &std::path::Path, recovery: &anvics_core::AgentRecovery) {
+    println!("Agent recovery");
+    println!("thread: {}", recovery.thread.id);
+    println!("title: {}", recovery.thread.title);
+    println!("workspace: {}", recovery.workspace.id);
+    println!("workspace_path: {}", recovery.workspace.materialized_path);
+    println!("base_snapshot: {}", recovery.workspace.base_snapshot);
+    match &recovery.workspace.latest_snapshot {
+        Some(snapshot) => println!("latest_snapshot: {snapshot}"),
+        None => println!("latest_snapshot: none"),
+    }
+    print_changed_paths("current_changed_paths", &recovery.current_changed_paths);
+    match &recovery.latest_checkpoint {
+        Some(checkpoint) => {
+            println!("latest_checkpoint: {}", checkpoint.id);
+            println!("checkpoint_snapshot: {}", checkpoint.snapshot_id);
+            println!("checkpoint_summary: {}", checkpoint.summary);
+            print_changed_paths("checkpoint_changed_paths", &checkpoint.changed_paths);
+        }
+        None => println!("latest_checkpoint: none"),
+    }
+    if recovery.active_sessions.is_empty() {
+        println!("active_sessions: none");
+    } else {
+        println!("active_sessions:");
+        for session in &recovery.active_sessions {
+            println!(
+                "- {}  agent={}  last_seen={}",
+                session.id, session.agent_name, session.last_seen_at
+            );
+        }
+    }
+    if !recovery.notes.is_empty() {
+        println!("notes:");
+        for note in &recovery.notes {
+            println!("- {note}");
+        }
+    }
+    println!("next_commands:");
+    println!(
+        "  anvics --repo {} workspace diff {}",
+        shell_quote(&display_path(root)),
+        recovery.workspace.id
+    );
+    println!(
+        "  anvics --repo {} agent checkpoint --workspace {} --summary \"<salvage summary>\"",
+        shell_quote(&display_path(root)),
+        recovery.workspace.id
+    );
+    println!(
+        "  anvics --repo {} agent accept --workspace {} --run-label \"<verify>\" --run-summary \"<summary>\" -- <program> [args...]",
+        shell_quote(&display_path(root)),
+        recovery.workspace.id
+    );
+}
+
+fn print_changed_paths(label: &str, changed_paths: &[anvics_core::ChangedPath]) {
+    if changed_paths.is_empty() {
+        println!("{label}: none");
+    } else {
+        println!("{label}:");
+        for changed in changed_paths {
+            println!("- {:?}: {}", changed.status, changed.path);
+        }
+    }
 }
 
 fn enter_agent(root: PathBuf, workspace_id: &str, name: String) -> Result<()> {

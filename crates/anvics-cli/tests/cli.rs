@@ -403,6 +403,8 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains("Before editing, read and follow the Anvics skill"));
     assert!(packet_text.contains("agent enter"));
     assert!(packet_text.contains("agent context-pack"));
+    assert!(packet_text.contains("agent checkpoint"));
+    assert!(packet_text.contains("agent recover"));
     assert!(packet_text.contains("coordination status"));
     assert!(packet_text.contains("workspace diff"));
     assert!(packet_text.contains("If you spawn subagents"));
@@ -600,6 +602,8 @@ fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
     .stdout(predicate::str::contains("Anvics command prefix"))
     .stdout(predicate::str::contains("write-enabled sandbox mode"))
     .stdout(predicate::str::contains("agent context-pack"))
+    .stdout(predicate::str::contains("agent checkpoint"))
+    .stdout(predicate::str::contains("agent recover"))
     .stdout(predicate::str::contains("workspace diff"));
 
     anvics(
@@ -631,6 +635,99 @@ fn agent_launch_prompt_includes_codex_flags_and_daemon_matches() {
     .stdout(predicate::str::contains(&workspace_path))
     .stdout(predicate::str::contains(&packet))
     .stdout(predicate::str::contains("agent context-pack"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn agent_checkpoint_and_recover_report_salvage_state() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Crash Recovery",
+            "--task",
+            "Edit app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare_output, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare_output, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "salvaged\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "enter",
+            "--workspace",
+            &workspace,
+            "--name",
+            "codex",
+        ],
+    )
+    .assert()
+    .success();
+
+    anvics(dir.path(), &["agent", "recover", "--workspace", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agent recovery"))
+        .stdout(predicate::str::contains("current_changed_paths:"))
+        .stdout(predicate::str::contains("Modified: app.txt"))
+        .stdout(predicate::str::contains("latest_checkpoint: none"))
+        .stdout(predicate::str::contains("active_sessions:"))
+        .stdout(predicate::str::contains("agent checkpoint"));
+
+    let checkpoint_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "checkpoint",
+            "--workspace",
+            &workspace,
+            "--summary",
+            "salvaged app edit",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Created agent checkpoint"))
+    .stdout(predicate::str::contains("snapshot:"))
+    .stdout(predicate::str::contains("summary: salvaged app edit"))
+    .stdout(predicate::str::contains("Modified: app.txt"))
+    .get_output()
+    .stdout
+    .clone();
+    let checkpoint = created_id(&checkpoint_output, "Created agent checkpoint ");
+
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "recover", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(format!(
+        "latest_checkpoint: {checkpoint}"
+    )))
+    .stdout(predicate::str::contains("checkpoint_changed_paths:"))
+    .stdout(predicate::str::contains("next_commands:"));
 
     daemon.kill().unwrap();
     daemon.wait().unwrap();

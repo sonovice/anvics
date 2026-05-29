@@ -325,6 +325,18 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 pack: Box::new(pack),
             })
         }
+        ApiMethod::AgentCheckpoint { workspace, summary } => {
+            let checkpoint = AnvicsStore::open(&repo)?.agent_checkpoint(&workspace, summary)?;
+            Ok(ApiResult::AgentCheckpoint {
+                checkpoint: Box::new(checkpoint),
+            })
+        }
+        ApiMethod::AgentRecover { workspace } => {
+            let recovery = AnvicsStore::open(&repo)?.agent_recovery(&workspace)?;
+            Ok(ApiResult::AgentRecover {
+                recovery: Box::new(recovery),
+            })
+        }
         ApiMethod::AgentFinish {
             workspace,
             command,

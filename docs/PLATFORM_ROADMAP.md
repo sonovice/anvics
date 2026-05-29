@@ -400,7 +400,7 @@ Current status:
 - MVP 0.31 adds `anvics agent instructions`, which renders or installs Anvics-aware `AGENTS.md` and `CLAUDE.md` templates with daemon parity. This gives external agents repo-level guidance before they encounter a task packet.
 - MVP 0.32 adds `anvics agent context-pack`, a refreshable workspace briefing with task, packet/skill paths, agent-run commands, classified workspace changes, and coordination status.
 - MVP 0.33 wires context packs into generated packets, launch prompts, dogfood prompts, and the Anvics skill so external agents naturally refresh context instead of relying on stale packet text.
-- MVP 0.34 should address crash-progress recovery before broader architecture. A crashed or interrupted agent should leave salvageable progress: changed files, latest known context pack, session status, and a recoverable checkpoint or review draft. Start with explicit `agent checkpoint`/`agent recover` UX over the existing workspace projection rather than a full autosave daemon.
+- MVP 0.34 adds first crash-progress recovery with `agent checkpoint` and `agent recover`. A crashed or interrupted agent can leave salvageable progress as current workspace changes plus a durable checkpoint snapshot, without requiring autosave daemons or agent wrapping.
 
 Acceptance criteria:
 

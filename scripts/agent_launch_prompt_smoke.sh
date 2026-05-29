@@ -45,6 +45,8 @@ printf '%s\n' "$codex_prompt" | grep -- 'not Git worktrees'
 printf '%s\n' "$codex_prompt" | grep -- 'Anvics command prefix'
 printf '%s\n' "$codex_prompt" | grep -- 'write-enabled sandbox mode'
 printf '%s\n' "$codex_prompt" | grep -- 'agent context-pack'
+printf '%s\n' "$codex_prompt" | grep -- 'agent checkpoint'
+printf '%s\n' "$codex_prompt" | grep -- 'agent recover'
 printf '%s\n' "$codex_prompt" | grep -- 'workspace diff'
 
 generic_prompt="$(anvics agent launch-prompt --workspace "$workspace")"
