@@ -245,6 +245,8 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Command side effects first become neutral `FileEffectSet`s.
 - `FileEffectSet` records before/after path/object metadata, not language-specific conclusions.
 - Future `FileEffectSet`s should prefer event/audit-derived file effects when a runtime or mount can provide them, with deterministic tree diff as fallback.
+- MVP 0.26 derives heuristic `FileEffectSet`s from review changed paths and renders proposed `ChangeUnit`s directly in review markdown.
+- The first implementation is deliberately mechanical: one proposed `ChangeUnit` per source-relevant path effect, no semantic grouping, no rename identity, and no repo-specific policy parser.
 - Classification layers: config, policy, tools, humans, agent claims.
 - Built-in classification labels:
   - `source`

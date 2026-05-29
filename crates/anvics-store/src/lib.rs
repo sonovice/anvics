@@ -1,15 +1,16 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation,
-    AgentSession, AgentSessionId, AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath,
-    CommandEvent, CommandEventId, CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision,
-    CommandRuntimeMetrics, CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus,
-    EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
-    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
-    ProjectionKind, ProjectionRequest, RelatedWork, RepositoryEvent, RepositoryEventId,
-    RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
-    RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
-    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
-    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    AgentSession, AgentSessionId, AgentSessionStatus, AgentStatus, ChangeStatus, ChangeUnit,
+    ChangeUnitId, ChangedPath, CommandEvent, CommandEventId, CommandExecutorKind,
+    CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics, CommandWorkerRequest,
+    CommandWorkerResponse, CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary,
+    FileEffect, FileEffectLabel, FileEffectProvenance, FileEffectSet, FileEffectSetId,
+    NativePublication, NativePublicationId, ObjectId, OverlayEntry, PolicyOverride,
+    PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork,
+    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
+    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
+    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
+    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -712,6 +713,8 @@ impl AnvicsStore {
         };
         let evidence = self.thread_evidence(&thread.id)?;
         let overlap_notes = self.overlap_notes(&thread, &changed_paths)?;
+        let file_effect_set = propose_file_effect_set(&changed_paths)?;
+        let change_units = propose_change_units(&file_effect_set);
 
         let review = ReviewProjection {
             id: ReviewProjectionId::new(),
@@ -719,6 +722,7 @@ impl AnvicsStore {
             base_snapshot: thread.base_snapshot.clone(),
             final_snapshot,
             changed_paths,
+            change_units,
             overlap_notes,
             evidence,
             created_at: now_rfc3339()?,
@@ -2902,6 +2906,144 @@ fn diff_file_maps(
         .collect()
 }
 
+fn propose_file_effect_set(changed_paths: &[ChangedPath]) -> Result<FileEffectSet> {
+    Ok(FileEffectSet {
+        id: FileEffectSetId::new(),
+        effects: changed_paths
+            .iter()
+            .map(|path| FileEffect {
+                path: path.path.clone(),
+                status: path.status.clone(),
+                labels: classify_file_effect_path(&path.path),
+                provenance: FileEffectProvenance::Heuristic,
+            })
+            .collect(),
+        created_at: now_rfc3339()?,
+    })
+}
+
+fn propose_change_units(effect_set: &FileEffectSet) -> Vec<ChangeUnit> {
+    effect_set
+        .effects
+        .iter()
+        .filter(|effect| file_effect_becomes_change_unit(effect))
+        .map(|effect| ChangeUnit {
+            id: ChangeUnitId::new(),
+            path: effect.path.clone(),
+            status: effect.status.clone(),
+            labels: effect.labels.clone(),
+            provenance: effect.provenance.clone(),
+            summary: format!("{} {}", change_status_label(&effect.status), effect.path),
+        })
+        .collect()
+}
+
+fn file_effect_becomes_change_unit(effect: &FileEffect) -> bool {
+    effect.labels.iter().any(|label| {
+        matches!(
+            label,
+            FileEffectLabel::Source
+                | FileEffectLabel::GeneratedTracked
+                | FileEffectLabel::Lockfile
+                | FileEffectLabel::Config
+                | FileEffectLabel::Binary
+                | FileEffectLabel::Unknown
+        )
+    }) && !effect.labels.iter().any(|label| {
+        matches!(
+            label,
+            FileEffectLabel::Cache | FileEffectLabel::EvidenceCandidate
+        )
+    })
+}
+
+fn classify_file_effect_path(path: &str) -> Vec<FileEffectLabel> {
+    let lower = path.to_ascii_lowercase();
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    if lower.starts_with("target/")
+        || lower.starts_with(".cache/")
+        || lower.starts_with("node_modules/")
+        || lower.contains("/target/")
+        || lower.contains("/.cache/")
+        || lower.contains("/node_modules/")
+    {
+        return vec![FileEffectLabel::Cache];
+    }
+    if lower.starts_with(".anvics/artifacts/")
+        || lower.starts_with("artifacts/")
+        || lower.starts_with("evidence/")
+        || lower.ends_with(".log")
+    {
+        return vec![FileEffectLabel::EvidenceCandidate];
+    }
+    if matches!(
+        file_name.as_str(),
+        "cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lockb"
+    ) {
+        return vec![FileEffectLabel::Lockfile];
+    }
+    if matches!(
+        file_name.as_str(),
+        "anvics.toml"
+            | "package.json"
+            | "cargo.toml"
+            | "tsconfig.json"
+            | "deno.json"
+            | "pyproject.toml"
+    ) || lower.starts_with(".github/")
+    {
+        return vec![FileEffectLabel::Config];
+    }
+    if lower.contains("/generated/")
+        || lower.contains("/dist/")
+        || lower.starts_with("dist/")
+        || lower.ends_with(".generated.rs")
+        || lower.ends_with(".pb.rs")
+    {
+        return vec![FileEffectLabel::GeneratedTracked];
+    }
+    if matches!(
+        Path::new(&lower)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "zip" | "gz" | "wasm")
+    ) {
+        return vec![FileEffectLabel::Binary];
+    }
+    if matches!(
+        Path::new(&lower)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some(
+            "rs" | "js"
+                | "ts"
+                | "tsx"
+                | "jsx"
+                | "py"
+                | "go"
+                | "java"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "md"
+                | "txt"
+                | "sh"
+                | "html"
+                | "css"
+                | "sql"
+        )
+    ) {
+        return vec![FileEffectLabel::Source];
+    }
+    vec![FileEffectLabel::Unknown]
+}
+
 fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &WorkspaceView) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
@@ -3014,6 +3156,24 @@ fn render_review(
     } else {
         for evidence in &review.evidence {
             markdown.push_str(&format!("- {}\n", render_evidence_summary(evidence)));
+        }
+    }
+
+    markdown.push_str("\n## Change Units\n\n");
+    if review.change_units.is_empty() {
+        markdown.push_str("- No source-relevant change units proposed.\n");
+    } else {
+        for unit in &review.change_units {
+            let labels = unit
+                .labels
+                .iter()
+                .map(file_effect_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            markdown.push_str(&format!(
+                "- {} {:?}: `{}` ({labels}) - {}\n",
+                unit.id, unit.status, unit.path, unit.summary
+            ));
         }
     }
 
@@ -3183,6 +3343,21 @@ fn command_executor_label(executor: &CommandExecutorKind) -> &'static str {
     match executor {
         CommandExecutorKind::InProcess => "in_process",
         CommandExecutorKind::Worker => "worker",
+    }
+}
+
+fn file_effect_label(label: &FileEffectLabel) -> &'static str {
+    match label {
+        FileEffectLabel::Source => "source",
+        FileEffectLabel::GeneratedTracked => "generated_tracked",
+        FileEffectLabel::GeneratedUntracked => "generated_untracked",
+        FileEffectLabel::EvidenceCandidate => "evidence_candidate",
+        FileEffectLabel::Cache => "cache",
+        FileEffectLabel::Lockfile => "lockfile",
+        FileEffectLabel::Config => "config",
+        FileEffectLabel::SecretRisk => "secret_risk",
+        FileEffectLabel::Binary => "binary",
+        FileEffectLabel::Unknown => "unknown",
     }
 }
 
@@ -3732,6 +3907,59 @@ mod tests {
         assert!(overlay.entries.iter().any(|entry| {
             entry.path == "deleted.txt" && entry.object.is_none() && entry.size.is_none()
         }));
+    }
+
+    #[test]
+    fn file_effects_propose_source_relevant_change_units() {
+        let effects = propose_file_effect_set(&[
+            ChangedPath {
+                path: "src/lib.rs".to_owned(),
+                status: ChangeStatus::Modified,
+            },
+            ChangedPath {
+                path: "target/debug/anvics".to_owned(),
+                status: ChangeStatus::Added,
+            },
+            ChangedPath {
+                path: "Cargo.lock".to_owned(),
+                status: ChangeStatus::Modified,
+            },
+            ChangedPath {
+                path: "evidence/verify.log".to_owned(),
+                status: ChangeStatus::Added,
+            },
+            ChangedPath {
+                path: "assets/logo.png".to_owned(),
+                status: ChangeStatus::Modified,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(effects.effects.len(), 5);
+        assert_eq!(effects.effects[0].labels, vec![FileEffectLabel::Source]);
+        assert_eq!(effects.effects[1].labels, vec![FileEffectLabel::Cache]);
+        assert_eq!(effects.effects[2].labels, vec![FileEffectLabel::Lockfile]);
+        assert_eq!(
+            effects.effects[3].labels,
+            vec![FileEffectLabel::EvidenceCandidate]
+        );
+        assert_eq!(effects.effects[4].labels, vec![FileEffectLabel::Binary]);
+
+        let change_units = propose_change_units(&effects);
+        assert_eq!(
+            change_units
+                .iter()
+                .map(|unit| (unit.path.as_str(), unit.labels.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("src/lib.rs", &[FileEffectLabel::Source][..]),
+                ("Cargo.lock", &[FileEffectLabel::Lockfile][..]),
+                ("assets/logo.png", &[FileEffectLabel::Binary][..]),
+            ]
+        );
+        assert!(change_units
+            .iter()
+            .all(|unit| unit.provenance == FileEffectProvenance::Heuristic));
     }
 
     #[test]

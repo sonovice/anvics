@@ -682,6 +682,14 @@ mod tests {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
             }],
+            change_units: vec![ChangeUnit {
+                id: ChangeUnitId::new(),
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+                labels: vec![FileEffectLabel::Source],
+                provenance: FileEffectProvenance::Heuristic,
+                summary: "modified app.txt".to_owned(),
+            }],
             overlap_notes: Vec::new(),
             evidence: vec![EvidenceSummary {
                 id: evidence_id,

@@ -65,6 +65,8 @@ opaque_id!(AgentSessionId);
 opaque_id!(RiskScanId);
 opaque_id!(RiskFindingId);
 opaque_id!(PolicyOverrideId);
+opaque_id!(FileEffectSetId);
+opaque_id!(ChangeUnitId);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -374,6 +376,8 @@ pub struct ReviewProjection {
     pub base_snapshot: SourceSnapshotId,
     pub final_snapshot: SourceSnapshotId,
     pub changed_paths: Vec<ChangedPath>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_units: Vec<ChangeUnit>,
     pub overlap_notes: Vec<String>,
     pub evidence: Vec<EvidenceSummary>,
     pub created_at: String,
@@ -437,6 +441,56 @@ pub enum ChangeStatus {
     Added,
     Modified,
     Deleted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FileEffectSet {
+    pub id: FileEffectSetId,
+    pub effects: Vec<FileEffect>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FileEffect {
+    pub path: String,
+    pub status: ChangeStatus,
+    pub labels: Vec<FileEffectLabel>,
+    pub provenance: FileEffectProvenance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ChangeUnit {
+    pub id: ChangeUnitId,
+    pub path: String,
+    pub status: ChangeStatus,
+    pub labels: Vec<FileEffectLabel>,
+    pub provenance: FileEffectProvenance,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileEffectLabel {
+    Source,
+    GeneratedTracked,
+    GeneratedUntracked,
+    EvidenceCandidate,
+    Cache,
+    Lockfile,
+    Config,
+    SecretRisk,
+    Binary,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileEffectProvenance {
+    Policy,
+    Heuristic,
+    AgentClaim,
+    Tool,
+    Human,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -700,6 +754,14 @@ mod tests {
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
+            }],
+            change_units: vec![ChangeUnit {
+                id: ChangeUnitId::new(),
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+                labels: vec![FileEffectLabel::Source],
+                provenance: FileEffectProvenance::Heuristic,
+                summary: "modified app.txt".to_owned(),
             }],
             overlap_notes: vec!["No path overlap detected.".to_owned()],
             evidence: vec![EvidenceSummary {

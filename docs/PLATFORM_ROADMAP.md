@@ -313,6 +313,12 @@ Acceptance criteria:
 
 Goal: convert raw file effects into reviewable source-control units.
 
+Current status:
+
+- MVP 0.26 adds the first vertical slice: review creation derives a heuristic `FileEffectSet` from changed paths and proposes compact `ChangeUnit`s in review markdown.
+- This is intentionally path-level and deterministic. There is no indexer, semantic parser, repo policy parser, or agent-claim refinement yet.
+- Cache/evidence-like outputs are filtered out of proposed `ChangeUnit`s; source, config, lockfile, binary, generated, and unknown paths remain reviewable.
+
 Crates:
 
 - `anvics-agent`

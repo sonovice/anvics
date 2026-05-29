@@ -943,6 +943,8 @@ fn command_run_records_artifacts_and_review_evidence() {
     .stdout(predicate::str::contains("executor: in_process"))
     .stdout(predicate::str::contains("runtime: setup="))
     .stdout(predicate::str::contains("file effects: modified `app.txt`"))
+    .stdout(predicate::str::contains("## Change Units"))
+    .stdout(predicate::str::contains("`app.txt` (source)"))
     .stdout(predicate::str::contains("Verified app.txt contents"));
 }
 
