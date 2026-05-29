@@ -319,6 +319,12 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 AnvicsStore::open(&repo)?.agent_instruction_files(target, install, force)?;
             Ok(ApiResult::AgentInstructions { files })
         }
+        ApiMethod::AgentContextPack { workspace, write } => {
+            let pack = AnvicsStore::open(&repo)?.agent_context_pack(&workspace, write)?;
+            Ok(ApiResult::AgentContextPack {
+                pack: Box::new(pack),
+            })
+        }
         ApiMethod::AgentFinish {
             workspace,
             command,

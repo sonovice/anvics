@@ -688,6 +688,87 @@ fn agent_instructions_render_install_and_daemon_matches() {
 }
 
 #[test]
+fn agent_context_pack_renders_write_and_daemon_matches() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    fs::create_dir_all(dir.path().join("skills/anvics-skill")).unwrap();
+    fs::write(
+        dir.path().join("skills/anvics-skill/SKILL.md"),
+        "# Anvics\n",
+    )
+    .unwrap();
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Context Pack",
+            "--task",
+            "Edit app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "changed\n").unwrap();
+
+    anvics(
+        dir.path(),
+        &["agent", "context-pack", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("# Anvics Context Pack"))
+    .stdout(predicate::str::contains("Edit app.txt"))
+    .stdout(predicate::str::contains("workspace diff"))
+    .stdout(predicate::str::contains("Modified: `app.txt` (source)"))
+    .stdout(predicate::str::contains("Potential clashes: none"));
+
+    let write_output = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "context-pack",
+            "--workspace",
+            &workspace,
+            "--write",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("context_pack:"))
+    .get_output()
+    .stdout
+    .clone();
+    let pack_path = value_after_prefix(&write_output, "context_pack: ");
+    assert!(std::path::Path::new(&pack_path).exists());
+
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["agent", "context-pack", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("# Anvics Context Pack"))
+    .stdout(predicate::str::contains("Modified: `app.txt` (source)"));
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn agent_accept_publishes_and_exports_patch() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();

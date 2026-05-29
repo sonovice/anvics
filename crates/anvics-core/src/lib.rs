@@ -628,6 +628,20 @@ pub struct AgentInstructionFile {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AgentContextPack {
+    pub thread_id: WorkThreadId,
+    pub workspace_id: WorkspaceViewId,
+    pub repo_path: String,
+    pub workspace_path: String,
+    pub packet_path: Option<String>,
+    pub skill_path: Option<String>,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub written: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AgentLaunchPrompt {
     pub tool: AgentLaunchTool,
     pub thread_id: WorkThreadId,
@@ -984,6 +998,24 @@ mod tests {
             )
             .unwrap(),
             instruction_file
+        );
+        let context_pack = AgentContextPack {
+            thread_id: thread.id.clone(),
+            workspace_id: workspace.id.clone(),
+            repo_path: "/tmp/repo".to_owned(),
+            workspace_path: "/tmp/repo/.anvics/workspaces/workspace/files".to_owned(),
+            packet_path: Some(".anvics/agent-packets/thread.md".to_owned()),
+            skill_path: None,
+            content: "# Context".to_owned(),
+            path: Some(".anvics/context-packs/workspace.md".to_owned()),
+            written: true,
+        };
+        assert_eq!(
+            serde_json::from_str::<AgentContextPack>(
+                &serde_json::to_string(&context_pack).unwrap()
+            )
+            .unwrap(),
+            context_pack
         );
         assert_eq!(
             serde_json::from_str::<CoordinationStatus>(

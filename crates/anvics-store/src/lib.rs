@@ -1,17 +1,17 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentInstructionFile, AgentInstructionTarget, AgentLaunchPrompt,
-    AgentLaunchTool, AgentPreparation, AgentSession, AgentSessionId, AgentSessionStatus,
-    AgentStatus, ChangeStatus, ChangeUnit, ChangeUnitId, ChangedPath, CommandEvent, CommandEventId,
-    CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics,
-    CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus, EvidenceRecord,
-    EvidenceRecordId, EvidenceSummary, FileEffect, FileEffectClassification, FileEffectLabel,
-    FileEffectProvenance, FileEffectSet, FileEffectSetId, NativePublication, NativePublicationId,
-    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
-    ProjectionKind, ProjectionRequest, RelatedWork, RepoDoctorReport, RepositoryEvent,
-    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
-    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
-    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
-    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    AgentAcceptance, AgentContextPack, AgentFinish, AgentInstructionFile, AgentInstructionTarget,
+    AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentSession, AgentSessionId,
+    AgentSessionStatus, AgentStatus, ChangeStatus, ChangeUnit, ChangeUnitId, ChangedPath,
+    CommandEvent, CommandEventId, CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision,
+    CommandRuntimeMetrics, CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus,
+    EvidenceRecord, EvidenceRecordId, EvidenceSummary, FileEffect, FileEffectClassification,
+    FileEffectLabel, FileEffectProvenance, FileEffectSet, FileEffectSetId, NativePublication,
+    NativePublicationId, ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId,
+    ProjectionCapabilities, ProjectionKind, ProjectionRequest, RelatedWork, RepoDoctorReport,
+    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
+    ReviewProjection, ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId,
+    RiskSeverity, RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind,
+    WorkThread, WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -1104,6 +1104,56 @@ impl AnvicsStore {
             .collect::<Result<Vec<_>>>()?;
 
         Ok(files)
+    }
+
+    pub fn agent_context_pack(&self, workspace_id: &str, write: bool) -> Result<AgentContextPack> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let thread = self.show_thread(workspace.thread_id.as_str())?;
+        let packet_path = self
+            .agent_packet_file_path(thread.id.as_str())
+            .ok()
+            .map(|path| path.to_string_lossy().to_string());
+        let skill_path =
+            Path::new(&workspace.materialized_path).join("skills/anvics-skill/SKILL.md");
+        let skill_path = skill_path
+            .exists()
+            .then(|| skill_path.to_string_lossy().to_string());
+        let file_effects = self.workspace_file_effects(workspace_id)?;
+        let coordination = self.coordination_status_with_session(workspace_id, None)?;
+        let content = render_agent_context_pack(
+            &self.root,
+            &thread,
+            &workspace,
+            packet_path.as_deref(),
+            skill_path.as_deref(),
+            &file_effects,
+            &coordination,
+        );
+        let path = if write {
+            let path = self
+                .anvics_dir
+                .join("context-packs")
+                .join(format!("{}.md", workspace.id));
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, &content)?;
+            Some(path.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        Ok(AgentContextPack {
+            thread_id: thread.id,
+            workspace_id: workspace.id,
+            repo_path: self.root.to_string_lossy().to_string(),
+            workspace_path: workspace.materialized_path,
+            packet_path,
+            skill_path,
+            content,
+            path,
+            written: write,
+        })
     }
 
     pub fn finish_agent(
@@ -3353,6 +3403,126 @@ Do not run `agent accept`, `publish create`, or `legacy git export` unless the o
     )
 }
 
+fn render_agent_context_pack(
+    repo_root: &Path,
+    thread: &WorkThread,
+    workspace: &WorkspaceView,
+    packet_path: Option<&str>,
+    skill_path: Option<&str>,
+    file_effects: &[FileEffect],
+    coordination: &CoordinationStatus,
+) -> String {
+    let repo = shell_quote(&display_path(repo_root));
+    let mut markdown = format!(
+        "# Anvics Context Pack\n\n\
+- Thread: `{}`\n\
+- Title: {}\n\
+- Workspace: `{}`\n\
+- Repository: `{}`\n\
+- Workspace path: `{}`\n\
+- Base snapshot: `{}`\n",
+        thread.id,
+        thread.title,
+        workspace.id,
+        repo_root.display(),
+        workspace.materialized_path,
+        workspace.base_snapshot
+    );
+    if let Some(snapshot) = &workspace.latest_snapshot {
+        markdown.push_str(&format!("- Latest snapshot: `{snapshot}`\n"));
+    } else {
+        markdown.push_str("- Latest snapshot: none\n");
+    }
+    if let Some(path) = packet_path {
+        markdown.push_str(&format!("- Packet: `{path}`\n"));
+    }
+    if let Some(path) = skill_path {
+        markdown.push_str(&format!("- Skill: `{path}`\n"));
+    }
+
+    markdown.push_str("\n## Task\n\n");
+    markdown.push_str(&thread.task);
+    markdown.push_str("\n\n## Agent-Run Commands\n\n```sh\n");
+    markdown.push_str(&format!(
+        "anvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n",
+        workspace.id
+    ));
+    markdown.push_str(&format!(
+        "anvics --repo {repo} workspace diff {}\n",
+        workspace.id
+    ));
+    markdown.push_str(&format!(
+        "anvics --repo {repo} coordination status --workspace {}\n",
+        workspace.id
+    ));
+    markdown.push_str("```\n");
+
+    markdown.push_str("\n## Current Workspace Changes\n\n");
+    if file_effects.is_empty() {
+        markdown.push_str("- No workspace changes detected.\n");
+    } else {
+        for effect in file_effects {
+            let labels = effect
+                .labels
+                .iter()
+                .map(file_effect_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            markdown.push_str(&format!(
+                "- {:?}: `{}` ({labels})\n",
+                effect.status, effect.path
+            ));
+        }
+    }
+
+    markdown.push_str("\n## Coordination\n\n");
+    if coordination.known_changed_paths.is_empty() {
+        markdown.push_str("- Known changed paths: none\n");
+    } else {
+        markdown.push_str(&format!(
+            "- Known changed paths: {}\n",
+            coordination.known_changed_paths.join(", ")
+        ));
+    }
+    if coordination.related_work.is_empty() {
+        markdown.push_str("- Related active work: none\n");
+    } else {
+        markdown.push_str("- Related active work:\n");
+        for related in &coordination.related_work {
+            let overlaps = if related.overlap_paths.is_empty() {
+                "none".to_owned()
+            } else {
+                related.overlap_paths.join(", ")
+            };
+            markdown.push_str(&format!(
+                "  - {} on workspace `{}`: changed paths={}, overlap={}, freshness={}\n",
+                related.thread_title,
+                related.workspace_id,
+                if related.known_changed_paths.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    related.known_changed_paths.join(", ")
+                },
+                overlaps,
+                related.freshness_note
+            ));
+        }
+    }
+    if coordination.potential_clash_notes.is_empty() {
+        markdown.push_str("- Potential clashes: none\n");
+    } else {
+        markdown.push_str("- Potential clashes:\n");
+        for note in &coordination.potential_clash_notes {
+            markdown.push_str(&format!("  - {note}\n"));
+        }
+    }
+
+    markdown.push_str(
+        "\n## Reminders\n\n- Work only inside the workspace path.\n- Use Anvics `workspace diff`, not Git status or Git diff.\n- Keep evidence compact and do not paste secrets into summaries.\n",
+    );
+    markdown
+}
+
 fn render_review(
     repo_root: &Path,
     review: &ReviewProjection,
@@ -3809,6 +3979,54 @@ mod tests {
         assert!(fs::read_to_string(dir.path().join("AGENTS.md"))
             .unwrap()
             .contains("Do not create Git branches"));
+    }
+
+    #[test]
+    fn agent_context_pack_renders_current_task_changes_and_coordination() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        fs::create_dir_all(dir.path().join("skills/anvics-skill")).unwrap();
+        fs::write(
+            dir.path().join("skills/anvics-skill/SKILL.md"),
+            "# Anvics\n",
+        )
+        .unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Context".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "changed\n",
+        )
+        .unwrap();
+
+        let pack = store
+            .agent_context_pack(preparation.workspace.id.as_str(), false)
+            .unwrap();
+
+        assert_eq!(pack.workspace_id, preparation.workspace.id);
+        assert!(!pack.written);
+        assert!(pack.path.is_none());
+        assert!(pack.packet_path.is_some());
+        assert!(pack.skill_path.is_some());
+        assert!(pack.content.contains("# Anvics Context Pack"));
+        assert!(pack.content.contains("Edit app.txt"));
+        assert!(pack.content.contains("workspace diff"));
+        assert!(pack.content.contains("Modified: `app.txt` (source)"));
+        assert!(pack.content.contains("Potential clashes: none"));
+
+        let written = store
+            .agent_context_pack(preparation.workspace.id.as_str(), true)
+            .unwrap();
+        let path = written.path.as_ref().unwrap();
+        assert!(written.written);
+        assert!(Path::new(path).exists());
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .contains("# Anvics Context Pack"));
     }
 
     #[test]

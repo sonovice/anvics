@@ -15,6 +15,7 @@ scripts/command_worker_smoke.sh
 scripts/command_worker_process_smoke.sh
 scripts/secret_risk_smoke.sh
 scripts/agent_instructions_smoke.sh
+scripts/agent_context_pack_smoke.sh
 scripts/agent_launch_prompt_smoke.sh
 scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
@@ -35,6 +36,8 @@ scripts/live_agent_trial_prepare.sh
 `command_worker_process_smoke.sh` checks `anvics-worker` protocol health, then runs the same acceptance loop through the opt-in worker process executor and verifies that review evidence records `executor: worker`.
 
 `agent_instructions_smoke.sh` renders and installs `AGENTS.md`/`CLAUDE.md` templates, verifies overwrite protection, and checks that the generated guidance tells external agents to use Anvics instead of Git defaults.
+
+`agent_context_pack_smoke.sh` renders a scoped, refreshable context pack for a workspace, including task, packet/skill paths, classified workspace changes, and coordination status.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
 
@@ -99,6 +102,7 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
 
    ```sh
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent packet --thread "<thread-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent context-pack --workspace "<workspace-id>"
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent launch-prompt --workspace "<workspace-id>" --tool codex
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent status --thread "<thread-id>"
    ```

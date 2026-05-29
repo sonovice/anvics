@@ -382,6 +382,12 @@ enum AgentCommand {
         #[arg(long)]
         force: bool,
     },
+    ContextPack {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        write: bool,
+    },
     Status {
         #[arg(long)]
         thread: Option<String>,
@@ -924,6 +930,15 @@ fn main() -> Result<()> {
                 agent_instructions_via_daemon(root, socket, target, install, force)
             } else {
                 agent_instructions(root, target, install, force)
+            }
+        }
+        CliCommand::Agent {
+            command: AgentCommand::ContextPack { workspace, write },
+        } => {
+            if let Some(socket) = daemon {
+                agent_context_pack_via_daemon(root, socket, workspace, write)
+            } else {
+                agent_context_pack(root, &workspace, write)
             }
         }
         CliCommand::Agent {
@@ -2321,6 +2336,44 @@ fn print_agent_instruction_files(files: &[anvics_core::AgentInstructionFile], in
             println!("{}", file.content);
         }
     }
+}
+
+fn agent_context_pack(root: PathBuf, workspace_id: &str, write: bool) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let pack = store
+        .agent_context_pack(workspace_id, write)
+        .context("failed to render agent context pack")?;
+
+    print_agent_context_pack(pack);
+    Ok(())
+}
+
+fn agent_context_pack_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    write: bool,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentContextPack { workspace, write },
+    )? {
+        ApiResult::AgentContextPack { pack } => {
+            print_agent_context_pack(*pack);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_context_pack(pack: anvics_core::AgentContextPack) {
+    if pack.written {
+        if let Some(path) = &pack.path {
+            println!("context_pack: {path}");
+        }
+    }
+    println!("{}", pack.content);
 }
 
 fn enter_agent(root: PathBuf, workspace_id: &str, name: String) -> Result<()> {

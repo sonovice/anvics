@@ -1,9 +1,9 @@
 use anvics_core::{
-    AgentAcceptance, AgentFinish, AgentInstructionFile, AgentInstructionTarget, AgentLaunchPrompt,
-    AgentLaunchTool, AgentPreparation, AgentSession, AgentStatus, ChangedPath, CommandEvent,
-    CommandPolicyDecision, CoordinationStatus, EvidenceRecord, FileEffect, NativePublication,
-    ProjectionRequest, RepoDoctorReport, RepositoryEvent, RepositoryManifest, ReviewProjection,
-    RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
+    AgentAcceptance, AgentContextPack, AgentFinish, AgentInstructionFile, AgentInstructionTarget,
+    AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentSession, AgentStatus, ChangedPath,
+    CommandEvent, CommandPolicyDecision, CoordinationStatus, EvidenceRecord, FileEffect,
+    NativePublication, ProjectionRequest, RepoDoctorReport, RepositoryEvent, RepositoryManifest,
+    ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -160,6 +160,10 @@ pub enum ApiMethod {
         target: AgentInstructionTarget,
         install: bool,
         force: bool,
+    },
+    AgentContextPack {
+        workspace: String,
+        write: bool,
     },
     AgentFinish {
         workspace: String,
@@ -336,6 +340,9 @@ pub enum ApiResult {
     AgentInstructions {
         files: Vec<AgentInstructionFile>,
     },
+    AgentContextPack {
+        pack: Box<AgentContextPack>,
+    },
     AgentFinish {
         finish: Box<AgentFinish>,
     },
@@ -510,6 +517,10 @@ mod tests {
                 target: AgentInstructionTarget::All,
                 install: false,
                 force: false,
+            },
+            ApiMethod::AgentContextPack {
+                workspace: "workspace-1".to_owned(),
+                write: false,
             },
             ApiMethod::AgentFinish {
                 workspace: "workspace-1".to_owned(),
@@ -803,6 +814,17 @@ mod tests {
             content: "# Anvics Agent Instructions\n".to_owned(),
             written: false,
         };
+        let context_pack = AgentContextPack {
+            thread_id: thread.id.clone(),
+            workspace_id: workspace.id.clone(),
+            repo_path: "/tmp/repo".to_owned(),
+            workspace_path: "/tmp/repo/.anvics/workspaces/workspace/files".to_owned(),
+            packet_path: Some(".anvics/agent-packets/thread.md".to_owned()),
+            skill_path: None,
+            content: "# Anvics Context Pack".to_owned(),
+            path: None,
+            written: false,
+        };
         let finish = AgentFinish {
             evidence: evidence.clone(),
             workspace: workspace.clone(),
@@ -965,6 +987,9 @@ mod tests {
             },
             ApiResult::AgentInstructions {
                 files: vec![instruction_file],
+            },
+            ApiResult::AgentContextPack {
+                pack: Box::new(context_pack),
             },
             ApiResult::AgentFinish {
                 finish: Box::new(finish),

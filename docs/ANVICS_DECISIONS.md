@@ -31,6 +31,7 @@ This is the compact checkpoint of the grilled Anvics design. It captures the dec
 - MVP 0 evidence is compact by default: raw artifacts by reference, short review summaries by budget.
 - Team relay/native sync is post-MVP.
 - MVP 0.31 adds repo instruction templates for `AGENTS.md` and `CLAUDE.md`; these are normal source files, installed only on request, and reviewable through Anvics like any other repo change.
+- MVP 0.32 adds refreshable `ContextPack` generation for a workspace. It is derived context for agents, not a new source of truth.
 
 ## Core Objects
 
