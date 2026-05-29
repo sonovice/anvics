@@ -168,7 +168,7 @@ Capture observations in `docs/trials/LIVE_AGENT_TRIAL_TEMPLATE.md`. Do not creat
 
 ## Dogfood Trial
 
-Use the dogfood harness before starting VFS work:
+Use the dogfood harness before expanding VFS/runtime work:
 
 ```sh
 scripts/dogfood_trial_prepare.sh
@@ -177,6 +177,22 @@ scripts/dogfood_trial_prepare.sh
 Paste the two generated prompts into two external agents. Accept one completed workspace with `scripts/live_agent_trial_verify.sh` using the target repo, thread id, workspace id, verification command, exit code, and summary printed or reported by the agents.
 
 After the actual run, copy `docs/trials/0002-anvics-dogfood-template.md` to `docs/trials/0002-anvics-dogfood.md` and fill it with the observed friction, review quality, risk findings, and patch export result.
+
+## Projection Runtime Checks
+
+Operators can ask Anvics-run verification commands to use a projection backend:
+
+```sh
+anvics --repo "$target_repo" agent accept \
+  --workspace "$workspace_id" \
+  --run-label "verify" \
+  --run-summary "Verified accepted workspace" \
+  --projection auto \
+  --output "$target_repo/accepted.patch" \
+  -- <program> [args...]
+```
+
+Use `--projection auto` when testing VFS behavior without making FUSE availability a hard requirement. Use `--projection fuse-mount` only when the binary was built with `vfs-fuse` and the machine has working FUSE/macFUSE support. These flags are for operator-run `command run` and `agent accept --run-*` verification; do not add them to agent packet commands. Agents should still edit the normal workspace path from the packet and should not manually manage mounts.
 
 ## What To Check
 

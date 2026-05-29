@@ -197,6 +197,16 @@ MVP 0 stance: a materialized workspace backend is enough for the first proof. Li
 
 Agentvfs lesson: the right product boundary is not "agents manually manage mounts." It is a proxy-mounted workspace runtime: source state can be projected through a mount when tools need paths, while command/proxy execution owns workspace resolution, policy classification, mount lifecycle, file-effect summaries, evidence attachment, and cleanup where possible.
 
+MVP 0.17 result: Anvics now has an opt-in `fuse_mount` projection behind `command run` and `agent accept --run-*`, feature-gated behind `vfs-fuse`, with `materialized_dir` still the default. The spike proves runtime-owned mount, command execution through the mounted path, changed-path capture, reconciliation back to the materialized workspace, review evidence, and legacy patch export. `--projection auto` can fall back to `materialized_dir` when FUSE support is unavailable.
+
+Current VFS limitations:
+
+- Mounted state is an in-memory mirror for the command session, not lazy CAS hydration.
+- Open-file write state is enough for basic shell/editor-style writes, not a production crash-recovery state machine.
+- There is no low-level `workspace mount` command yet.
+- There is no Windows backend yet.
+- The backend is still a spike; it should remain opt-in until repeated dogfood proves that the complexity pays for itself.
+
 Crates:
 
 - `anvics-runtime` or equivalent boundary, provisional
@@ -230,6 +240,7 @@ Acceptance criteria:
 - Unmount/remount preserves overlay state.
 - Command/proxy cleanup unmounts cleanly on success and failure.
 - Materialized fallback can produce a usable directory when VFS is unavailable.
+- `--projection auto` records a fallback reason only when it actually falls back.
 - Linux and macOS backend prototypes both have smoke tests or manual verification notes.
 - The prototype makes no production sandbox claim.
 

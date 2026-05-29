@@ -978,6 +978,105 @@ fn agent_accept_with_command_run_exports_patch_and_failed_run_does_not_publish()
         .stdout(predicate::str::contains("publication_status: published"));
 }
 
+#[cfg(feature = "vfs-fuse")]
+#[test]
+fn agent_accept_with_fuse_projection_exports_patch() {
+    if !run_fuse_tests() {
+        eprintln!("skipping FUSE projection test; set ANVICS_RUN_FUSE_TESTS=1");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "FUSE Accept",
+            "--task",
+            "Change app.txt through the runtime projection",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let patch_path = dir.path().join("fuse-accept.patch");
+
+    let accept = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "fuse verify",
+            "--run-summary",
+            "Verified through FUSE projection",
+            "--projection",
+            "fuse-mount",
+            "--output",
+            patch_path.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            "printf 'accepted through fuse\\n' > app.txt && grep 'accepted through fuse' app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Accepted agent workspace"))
+    .stdout(predicate::str::contains("patch: "))
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&accept, "review: ");
+    assert!(patch_path.exists());
+
+    anvics(
+        dir.path(),
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("fuse verify"))
+    .stdout(predicate::str::contains("anvics-run:"))
+    .stdout(predicate::str::contains("projection: fuse_mount"))
+    .stdout(predicate::str::contains("file effects: modified `app.txt`"));
+
+    let clean = tempdir().unwrap();
+    fs::write(clean.path().join("app.txt"), "base\n").unwrap();
+    StdCommand::new("git")
+        .args(["init"])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    let apply = StdCommand::new("git")
+        .args(["apply", patch_path.to_str().unwrap()])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "git apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(clean.path().join("app.txt")).unwrap(),
+        "accepted through fuse\n"
+    );
+}
+
 #[test]
 fn agent_enter_and_coordination_status_report_related_work() {
     let dir = tempdir().unwrap();
@@ -1615,6 +1714,113 @@ fn daemon_backed_full_agent_flow_exports_patch_and_events() {
     daemon.wait().unwrap();
 }
 
+#[cfg(feature = "vfs-fuse")]
+#[test]
+fn daemon_backed_agent_accept_with_fuse_projection_exports_patch() {
+    if !run_fuse_tests() {
+        eprintln!("skipping daemon FUSE projection test; set ANVICS_RUN_FUSE_TESTS=1");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+
+    daemon_anvics(dir.path(), &socket, &["repo", "init"])
+        .assert()
+        .success();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["snapshot", "create", "--message", "base"],
+    )
+    .assert()
+    .success();
+    let prepare = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Daemon FUSE Accept",
+            "--task",
+            "Change app.txt through the daemon runtime projection",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let patch_path = dir.path().join("daemon-fuse-accept.patch");
+
+    let accept = daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "daemon fuse verify",
+            "--run-summary",
+            "Daemon verified through FUSE projection",
+            "--projection",
+            "fuse-mount",
+            "--output",
+            patch_path.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            "printf 'daemon accepted through fuse\\n' > app.txt && grep 'daemon accepted through fuse' app.txt",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Accepted agent workspace"))
+    .get_output()
+    .stdout
+    .clone();
+    let review = value_after_prefix(&accept, "review: ");
+    assert!(patch_path.exists());
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &["review", "show", &review, "--format", "markdown"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("daemon fuse verify"))
+    .stdout(predicate::str::contains("projection: fuse_mount"))
+    .stdout(predicate::str::contains("file effects: modified `app.txt`"));
+
+    let clean = tempdir().unwrap();
+    fs::write(clean.path().join("app.txt"), "base\n").unwrap();
+    StdCommand::new("git")
+        .args(["init"])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    let apply = StdCommand::new("git")
+        .args(["apply", patch_path.to_str().unwrap()])
+        .current_dir(clean.path())
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "git apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
 #[test]
 fn daemon_backed_two_agent_overlap_and_error_output() {
     let dir = tempdir().unwrap();
@@ -1986,6 +2192,11 @@ fn wait_for_socket(socket: &std::path::Path) {
         );
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(feature = "vfs-fuse")]
+fn run_fuse_tests() -> bool {
+    std::env::var("ANVICS_RUN_FUSE_TESTS").ok().as_deref() == Some("1")
 }
 
 fn created_id(output: &[u8], prefix: &str) -> String {

@@ -624,6 +624,15 @@ impl AnvicsStore {
             },
         )?;
 
+        let mount_cleanup_path = resolved_projection
+            .mounted_workspace
+            .as_ref()
+            .map(|workspace| workspace.mount_path().to_path_buf());
+        drop(resolved_projection);
+        if let Some(path) = mount_cleanup_path {
+            remove_empty_mount_dir(&path)?;
+        }
+
         Ok(CommandRunResult {
             command_event,
             evidence,
@@ -1968,6 +1977,9 @@ impl AnvicsStore {
             let command_policy_class = command_event
                 .as_ref()
                 .and_then(|event| event.command_policy_class.clone());
+            let projection_kind = command_event
+                .as_ref()
+                .and_then(|event| event.projection_kind.clone());
             let file_effects = command_event
                 .map(|event| event.file_effects)
                 .unwrap_or_default();
@@ -1983,6 +1995,7 @@ impl AnvicsStore {
                 artifact_path: record.artifact_path,
                 stdout_path: record.stdout_path,
                 stderr_path: record.stderr_path,
+                projection_kind,
                 command_policy_class,
                 file_effects,
             });
@@ -2141,6 +2154,15 @@ fn write_json_pretty(path: impl AsRef<Path>, value: &impl serde::Serialize) -> R
     let bytes = serde_json::to_vec_pretty(value)?;
     fs::write(path, bytes)?;
     Ok(())
+}
+
+fn remove_empty_mount_dir(path: &Path) -> Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
+        Err(error) => Err(StoreError::Io(error)),
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
@@ -2835,6 +2857,12 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
             command_policy_class_label(policy_class)
         ));
     }
+    if let Some(projection_kind) = &evidence.projection_kind {
+        text.push_str(&format!(
+            " (projection: {})",
+            projection_kind_label(projection_kind)
+        ));
+    }
     if !evidence.file_effects.is_empty() {
         let effects = evidence
             .file_effects
@@ -2845,6 +2873,13 @@ fn render_evidence_summary(evidence: &EvidenceSummary) -> String {
         text.push_str(&format!(" (file effects: {effects})"));
     }
     text
+}
+
+fn projection_kind_label(kind: &ProjectionKind) -> &'static str {
+    match kind {
+        ProjectionKind::MaterializedDir => "materialized_dir",
+        ProjectionKind::FuseMount => "fuse_mount",
+    }
 }
 
 fn command_policy_class_label(policy_class: &CommandPolicyClass) -> &'static str {
@@ -3848,6 +3883,147 @@ mod tests {
 
         assert_eq!(result.command_event.exit_code, Some(-1));
         assert!(result.command_event.timed_out);
+    }
+
+    #[cfg(feature = "vfs-fuse")]
+    #[test]
+    fn fuse_projection_remounts_readback_and_cleans_up_mount_dir() {
+        if std::env::var("ANVICS_RUN_FUSE_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping real FUSE store test; set ANVICS_RUN_FUSE_TESTS=1 to run it");
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        fs::write(dir.path().join("delete.txt"), "delete\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Fuse remount".to_owned(), "Edit through mount".to_owned())
+            .unwrap();
+
+        let first = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'changed\\n' > app.txt && printf 'new\\n' > added.txt && rm delete.txt"
+                        .to_owned(),
+                ],
+                command_file: None,
+                command_label: "fuse edit".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Edited through FUSE".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::FuseMount,
+                mount_root: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            first.command_event.projection_kind,
+            Some(ProjectionKind::FuseMount)
+        );
+        assert_eq!(first.command_event.projection_fallback_reason, None);
+        assert!(!Path::new(first.command_event.projection_root.as_ref().unwrap()).exists());
+        assert_eq!(
+            fs::read_to_string(Path::new(&preparation.workspace.materialized_path).join("app.txt"))
+                .unwrap(),
+            "changed\n"
+        );
+        assert!(Path::new(&preparation.workspace.materialized_path)
+            .join("added.txt")
+            .exists());
+        assert!(!Path::new(&preparation.workspace.materialized_path)
+            .join("delete.txt")
+            .exists());
+
+        let second = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "cat app.txt && test -f added.txt && test ! -e delete.txt".to_owned(),
+                ],
+                command_file: None,
+                command_label: "fuse readback".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Read persisted FUSE changes".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::FuseMount,
+                mount_root: None,
+            })
+            .unwrap();
+
+        assert_eq!(second.command_event.exit_code, Some(0));
+        assert!(second.command_event.file_effects.is_empty());
+        assert_eq!(
+            fs::read_to_string(second.command_event.stdout_path.as_ref().unwrap()).unwrap(),
+            "changed\n"
+        );
+        assert!(!Path::new(second.command_event.projection_root.as_ref().unwrap()).exists());
+    }
+
+    #[cfg(feature = "vfs-fuse")]
+    #[test]
+    fn failed_fuse_command_persists_writes_and_records_evidence() {
+        if std::env::var("ANVICS_RUN_FUSE_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping real FUSE store test; set ANVICS_RUN_FUSE_TESTS=1 to run it");
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Fuse failure".to_owned(), "Edit then fail".to_owned())
+            .unwrap();
+
+        let result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'changed before failure\\n' > app.txt; exit 7".to_owned(),
+                ],
+                command_file: None,
+                command_label: "fuse edit then fail".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "FUSE command wrote before failing".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::FuseMount,
+                mount_root: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.command_event.exit_code, Some(7));
+        assert_eq!(
+            result.command_event.projection_kind,
+            Some(ProjectionKind::FuseMount)
+        );
+        assert_eq!(
+            result.command_event.file_effects,
+            vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }]
+        );
+        assert_eq!(result.evidence.exit_code, 7);
+        assert_eq!(
+            fs::read_to_string(Path::new(&preparation.workspace.materialized_path).join("app.txt"))
+                .unwrap(),
+            "changed before failure\n"
+        );
+        assert!(!Path::new(result.command_event.projection_root.as_ref().unwrap()).exists());
     }
 
     #[test]

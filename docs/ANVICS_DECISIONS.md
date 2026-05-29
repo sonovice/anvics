@@ -91,6 +91,9 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - MVP 0 may use `materialized_dir` to prove the product loop while VFS prototypes run in parallel.
 - `materialized_dir` backend is required for MVP, locked-down machines, CI, containers, and fallback. It can remain a supported backend, but it does not solve the full no-copy worktree replacement at scale.
 - `anvics-vfs` owns Anvics' backend abstraction; do not let one crate/platform API define the workspace model.
+- MVP 0.17 proved an opt-in `fuse_mount` backend behind `command run` and `agent accept --run-*`; it is not the default workflow yet.
+- Runtime-owned mounts are preferable to manual agent-managed mounts: Anvics can classify the command, capture file effects, reconcile writes, attach evidence, and clean up the mount.
+- The current FUSE backend is a spike with an in-memory command-session mirror. Production VFS still needs lazy CAS/base hydration, stronger open-file/writeback handling, crash recovery, Windows research, and broader dogfood.
 - Start with a small mount/capabilities backend trait; keep detailed file-operation plumbing backend-specific until prototypes teach more.
 - Open-file write state, flush/release/fsync behavior, and clean unmount semantics are core prototype risks.
 

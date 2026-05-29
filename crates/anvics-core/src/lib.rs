@@ -268,6 +268,8 @@ pub struct EvidenceSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_kind: Option<ProjectionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_policy_class: Option<CommandPolicyClass>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<ChangedPath>,
@@ -627,6 +629,7 @@ mod tests {
                 artifact_path: Some("target/test.log".to_owned()),
                 stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
+                projection_kind: Some(ProjectionKind::MaterializedDir),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),

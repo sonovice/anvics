@@ -159,6 +159,16 @@ Important distinction: materialized directories are acceptable for MVP 0 and com
 
 The next VFS milestone should therefore be a proxy-mounted workspace spike: mount one workspace, run a command through that mounted projection, collect file effects, unmount cleanly, and fall back to materialized execution when FUSE/macFUSE is unavailable.
 
+MVP 0.17 implemented the first version of that spike without extracting a separate `anvics-runtime` crate. The boundary currently lives in `anvics-store`: command execution resolves a `ProjectionRequest` to either `materialized_dir` or feature-gated `fuse_mount`, records projection kind/capabilities/fallback reason on `CommandEvent`, captures file effects, and reconciles mounted writes back into the materialized workspace. This is enough to validate the runtime boundary while keeping crate topology simple.
+
+Current spike constraints:
+
+- `fuse_mount` is opt-in through `--projection fuse-mount` or `--projection auto`; default execution remains `materialized_dir`.
+- The FUSE filesystem is an in-memory mirror of the composed workspace for one command session.
+- Changed files are persisted back into the normal materialized workspace/overlay path after command completion.
+- Mount directories are runtime-owned and cleaned up after successful and failed commands when safe.
+- There is no production open-file state machine, lazy CAS hydration, low-level `workspace mount`, Windows backend, or sandbox guarantee yet.
+
 Clients:
 
 - `anvics` CLI.

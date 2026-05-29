@@ -652,6 +652,7 @@ mod tests {
                 artifact_path: None,
                 stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
                 stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
+                projection_kind: Some(ProjectionKind::MaterializedDir),
                 command_policy_class: Some(CommandPolicyClass::ReadOnly),
                 file_effects: vec![ChangedPath {
                     path: "app.txt".to_owned(),
