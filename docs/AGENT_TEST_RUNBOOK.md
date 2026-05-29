@@ -31,7 +31,7 @@ scripts/live_agent_trial_prepare.sh
 
 `command_worker_smoke.sh` accepts a workspace through Anvics-run verification, stores stdout/stderr artifacts by reference, publishes the result, and verifies the exported patch applies.
 
-`command_worker_process_smoke.sh` runs the same acceptance loop through the opt-in `anvics-worker` process executor and verifies that review evidence records `executor: worker`.
+`command_worker_process_smoke.sh` checks `anvics-worker` protocol health, then runs the same acceptance loop through the opt-in worker process executor and verifies that review evidence records `executor: worker`.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
 

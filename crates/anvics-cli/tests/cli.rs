@@ -1033,6 +1033,30 @@ fn command_run_can_execute_through_worker_process() {
 }
 
 #[test]
+fn command_worker_check_reports_worker_health() {
+    let dir = tempdir().unwrap();
+    let worker = assert_cmd::cargo::cargo_bin("anvics-worker");
+
+    Command::cargo_bin("anvics")
+        .unwrap()
+        .args([
+            "--repo",
+            dir.path().to_str().unwrap(),
+            "command",
+            "worker-check",
+            "--worker-bin",
+            worker.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("worker: "))
+        .stdout(predicate::str::contains("exit_code: 0"))
+        .stdout(predicate::str::contains("timed_out: false"))
+        .stdout(predicate::str::contains("duration_ms: "))
+        .stdout(predicate::str::contains("stdout: worker-ok"));
+}
+
+#[test]
 fn command_policy_blocks_risky_commands_and_records_override() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();

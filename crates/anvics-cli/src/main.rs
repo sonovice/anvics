@@ -2,6 +2,7 @@ use anvics_api::{
     ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat as ApiReviewFormat,
     WorkspaceDiffFormat as ApiWorkspaceDiffFormat,
 };
+use anvics_core::{CommandWorkerRequest, CommandWorkerResponse};
 use anvics_store::{
     classify_command_policy, AnvicsStore, CommandEvidenceInput, CommandPolicyInput,
     CommandRunInput, PublicationOptions, StoreError,
@@ -12,6 +13,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
+    process::{Command, Stdio},
 };
 
 #[derive(Debug, Parser)]
@@ -212,6 +214,10 @@ enum CommandRunCommand {
     },
     Show {
         id: String,
+    },
+    WorkerCheck {
+        #[arg(long)]
+        worker_bin: Option<PathBuf>,
     },
 }
 
@@ -738,6 +744,9 @@ fn main() -> Result<()> {
                 show_command_event(root, &id)
             }
         }
+        CliCommand::Command {
+            command: CommandRunCommand::WorkerCheck { worker_bin },
+        } => check_command_worker(root, worker_bin),
         CliCommand::Review {
             command: ReviewCommand::Create { thread },
         } => {
@@ -1585,6 +1594,57 @@ fn show_command_event_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> 
         }
         result => unexpected_daemon_result(result),
     }
+}
+
+fn check_command_worker(root: PathBuf, worker_bin: Option<PathBuf>) -> Result<()> {
+    let worker = worker_bin
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(|| std::env::var("ANVICS_WORKER_BIN").ok())
+        .unwrap_or_else(|| "anvics-worker".to_owned());
+    let request = CommandWorkerRequest {
+        argv: vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "printf worker-ok".to_owned(),
+        ],
+        cwd: root.to_string_lossy().to_string(),
+        timeout_seconds: 10,
+    };
+    let mut child = Command::new(&worker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn command worker {worker}"))?;
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("failed to open command worker stdin")?;
+        serde_json::to_writer(&mut stdin, &request).context("failed to write worker request")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for command worker")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "command worker failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let response: CommandWorkerResponse =
+        serde_json::from_slice(&output.stdout).context("failed to parse worker response")?;
+    println!("worker: {worker}");
+    println!("exit_code: {}", response.exit_code);
+    println!("timed_out: {}", response.timed_out);
+    println!("duration_ms: {}", response.duration_ms);
+    println!("stdout: {}", String::from_utf8_lossy(&response.stdout));
+    if !response.stderr.is_empty() {
+        println!("stderr: {}", String::from_utf8_lossy(&response.stderr));
+    }
+    Ok(())
 }
 
 fn print_command_run(

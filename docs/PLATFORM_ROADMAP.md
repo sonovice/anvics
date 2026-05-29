@@ -282,6 +282,9 @@ Scope:
   - keep in-process execution as the default
   - allow opt-in worker execution with `ANVICS_COMMAND_EXECUTOR=worker`
   - record the executor on `CommandEvent` and review evidence
+- MVP 0.25 worker health check:
+  - expose `anvics command worker-check`
+  - verify the worker JSON protocol before using the worker executor path
 - `workspace.run_command`.
 - Local `anvics-worker` process.
 - Command spec:

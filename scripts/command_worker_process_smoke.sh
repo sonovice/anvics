@@ -22,6 +22,8 @@ value_after_prefix() {
 printf 'base\n' > "$target_repo/app.txt"
 
 echo "Target repo: $target_repo"
+cargo run -q -p anvics-cli --bin anvics --manifest-path "$repo_root/Cargo.toml" -- \
+  --repo "$target_repo" command worker-check --worker-bin "$worker_bin"
 anvics repo init
 anvics snapshot create --message base
 
