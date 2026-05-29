@@ -247,6 +247,8 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Future `FileEffectSet`s should prefer event/audit-derived file effects when a runtime or mount can provide them, with deterministic tree diff as fallback.
 - MVP 0.26 derives heuristic `FileEffectSet`s from review changed paths and renders proposed `ChangeUnit`s directly in review markdown.
 - The first implementation is deliberately mechanical: one proposed `ChangeUnit` per source-relevant path effect, no semantic grouping, no rename identity, and no repo-specific policy parser.
+- MVP 0.27 reads optional root `anvics.toml` for generated, ignored/cache, and evidence-candidate path classification.
+- A workspace's modified `anvics.toml` must not reinterpret its own review. Config edits are reviewed as config changes first, then affect later accepted work after publication.
 - Classification layers: config, policy, tools, humans, agent claims.
 - Built-in classification labels:
   - `source`

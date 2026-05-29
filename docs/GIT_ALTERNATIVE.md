@@ -650,6 +650,8 @@ Private/local/org policy should not live in source-tree `anvics.toml`. Secrets p
 
 `anvics.toml` should be optional but encouraged. Anvics can infer basic structure when it is absent, and `anvics repo init` or `anvics repo doctor` should generate or improve it. Agents may propose edits to `anvics.toml`, but those edits are source-control configuration changes and should trigger elevated review or policy gates before native publication.
 
+The first implementation should apply root `anvics.toml` conservatively: use accepted repo config to classify generated, ignored/cache, and evidence-candidate paths, but do not let an agent's workspace edit to `anvics.toml` reinterpret that same review.
+
 Generated paths should be split by intent. Tracked generated source can be part of native publications, but agents should normally modify the generator/schema/template and rerun generation rather than editing generated files directly. Direct edits to tracked generated source should require explicit rationale and policy approval. Untracked generated outputs stay out of source changes. Evidence candidate paths can produce attach suggestions, with retention and sharing controlled by evidence policy.
 
 ### Agent Adoption Layer

@@ -318,6 +318,8 @@ Current status:
 - MVP 0.26 adds the first vertical slice: review creation derives a heuristic `FileEffectSet` from changed paths and proposes compact `ChangeUnit`s in review markdown.
 - This is intentionally path-level and deterministic. There is no indexer, semantic parser, repo policy parser, or agent-claim refinement yet.
 - Cache/evidence-like outputs are filtered out of proposed `ChangeUnit`s; source, config, lockfile, binary, generated, and unknown paths remain reviewable.
+- MVP 0.27 adds optional root `anvics.toml` classification for `generated.tracked`, `generated.untracked`, `ignore.paths`, and `evidence.candidate_paths`.
+- Review classification uses the canonical repo-root `anvics.toml`; a workspace edit to `anvics.toml` is reviewed as a config change but does not reinterpret that same review.
 
 Crates:
 
@@ -346,7 +348,7 @@ Scope:
   - agent claim
   - tool
   - human
-- `anvics.toml` generated/ignore/evidence parsing.
+- `anvics.toml` generated/ignore/evidence parsing. First path-pattern support exists; source roots, tools, package boundaries, and policy gates remain roadmap.
 - Proposed `ChangeUnit` creation for source-relevant effects.
 - Evidence artifact suggestions.
 - Secret-risk hard gate placeholder.

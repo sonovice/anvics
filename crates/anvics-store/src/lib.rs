@@ -98,6 +98,8 @@ pub enum StoreError {
     #[error(transparent)]
     Time(#[from] time::error::Format),
     #[error(transparent)]
+    Toml(#[from] toml::de::Error),
+    #[error(transparent)]
     Walk(#[from] ignore::Error),
     #[error(transparent)]
     Vfs(#[from] anvics_vfs::VfsError),
@@ -170,6 +172,36 @@ struct ResolvedProjection {
     mounted_workspace: Option<anvics_vfs::MountedWorkspace>,
 }
 
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct RepositoryConfig {
+    #[serde(default)]
+    generated: GeneratedConfig,
+    #[serde(default)]
+    ignore: IgnoreConfig,
+    #[serde(default)]
+    evidence: EvidenceConfig,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct GeneratedConfig {
+    #[serde(default)]
+    tracked: Vec<String>,
+    #[serde(default)]
+    untracked: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct IgnoreConfig {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvidenceConfig {
+    #[serde(default)]
+    candidate_paths: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PublicationOptions {
     pub allow_secret_risk: bool,
@@ -227,6 +259,14 @@ impl AnvicsStore {
 
     pub fn manifest(&self) -> Result<RepositoryManifest> {
         read_json(self.anvics_dir.join("repo.json"))
+    }
+
+    fn repository_config(&self) -> Result<RepositoryConfig> {
+        let path = self.root.join("anvics.toml");
+        if !path.exists() {
+            return Ok(RepositoryConfig::default());
+        }
+        Ok(toml::from_str(&fs::read_to_string(path)?)?)
     }
 
     pub fn create_snapshot(&self, message: Option<String>) -> Result<SourceSnapshot> {
@@ -713,7 +753,8 @@ impl AnvicsStore {
         };
         let evidence = self.thread_evidence(&thread.id)?;
         let overlap_notes = self.overlap_notes(&thread, &changed_paths)?;
-        let file_effect_set = propose_file_effect_set(&changed_paths)?;
+        let repository_config = self.repository_config()?;
+        let file_effect_set = propose_file_effect_set(&changed_paths, &repository_config)?;
         let change_units = propose_change_units(&file_effect_set);
 
         let review = ReviewProjection {
@@ -2906,7 +2947,10 @@ fn diff_file_maps(
         .collect()
 }
 
-fn propose_file_effect_set(changed_paths: &[ChangedPath]) -> Result<FileEffectSet> {
+fn propose_file_effect_set(
+    changed_paths: &[ChangedPath],
+    config: &RepositoryConfig,
+) -> Result<FileEffectSet> {
     Ok(FileEffectSet {
         id: FileEffectSetId::new(),
         effects: changed_paths
@@ -2914,7 +2958,7 @@ fn propose_file_effect_set(changed_paths: &[ChangedPath]) -> Result<FileEffectSe
             .map(|path| FileEffect {
                 path: path.path.clone(),
                 status: path.status.clone(),
-                labels: classify_file_effect_path(&path.path),
+                labels: classify_file_effect_path(&path.path, config),
                 provenance: FileEffectProvenance::Heuristic,
             })
             .collect(),
@@ -2952,18 +2996,32 @@ fn file_effect_becomes_change_unit(effect: &FileEffect) -> bool {
     }) && !effect.labels.iter().any(|label| {
         matches!(
             label,
-            FileEffectLabel::Cache | FileEffectLabel::EvidenceCandidate
+            FileEffectLabel::Cache
+                | FileEffectLabel::GeneratedUntracked
+                | FileEffectLabel::EvidenceCandidate
         )
     })
 }
 
-fn classify_file_effect_path(path: &str) -> Vec<FileEffectLabel> {
+fn classify_file_effect_path(path: &str, config: &RepositoryConfig) -> Vec<FileEffectLabel> {
     let lower = path.to_ascii_lowercase();
     let file_name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(path)
         .to_ascii_lowercase();
+    if config_patterns_match(&config.ignore.paths, path) {
+        return vec![FileEffectLabel::Cache];
+    }
+    if config_patterns_match(&config.generated.untracked, path) {
+        return vec![FileEffectLabel::GeneratedUntracked];
+    }
+    if config_patterns_match(&config.evidence.candidate_paths, path) {
+        return vec![FileEffectLabel::EvidenceCandidate];
+    }
+    if config_patterns_match(&config.generated.tracked, path) {
+        return vec![FileEffectLabel::GeneratedTracked];
+    }
     if lower.starts_with("target/")
         || lower.starts_with(".cache/")
         || lower.starts_with("node_modules/")
@@ -3042,6 +3100,65 @@ fn classify_file_effect_path(path: &str) -> Vec<FileEffectLabel> {
         return vec![FileEffectLabel::Source];
     }
     vec![FileEffectLabel::Unknown]
+}
+
+fn config_patterns_match(patterns: &[String], path: &str) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| path_matches_config_pattern(pattern, path))
+}
+
+fn path_matches_config_pattern(pattern: &str, path: &str) -> bool {
+    let pattern = normalize_config_pattern(pattern);
+    let path = normalize_config_pattern(path);
+    if pattern.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if pattern.contains('*') || pattern.contains('?') {
+        return wildcard_match(pattern.as_bytes(), path.as_bytes());
+    }
+    path == pattern || path.starts_with(&format!("{pattern}/"))
+}
+
+fn normalize_config_pattern(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("./")
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let mut star_index = None;
+    let mut star_value_index = 0;
+
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            star_value_index = value_index;
+            pattern_index += 1;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_value_index += 1;
+            value_index = star_value_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
 }
 
 fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &WorkspaceView) -> String {
@@ -3911,28 +4028,31 @@ mod tests {
 
     #[test]
     fn file_effects_propose_source_relevant_change_units() {
-        let effects = propose_file_effect_set(&[
-            ChangedPath {
-                path: "src/lib.rs".to_owned(),
-                status: ChangeStatus::Modified,
-            },
-            ChangedPath {
-                path: "target/debug/anvics".to_owned(),
-                status: ChangeStatus::Added,
-            },
-            ChangedPath {
-                path: "Cargo.lock".to_owned(),
-                status: ChangeStatus::Modified,
-            },
-            ChangedPath {
-                path: "evidence/verify.log".to_owned(),
-                status: ChangeStatus::Added,
-            },
-            ChangedPath {
-                path: "assets/logo.png".to_owned(),
-                status: ChangeStatus::Modified,
-            },
-        ])
+        let effects = propose_file_effect_set(
+            &[
+                ChangedPath {
+                    path: "src/lib.rs".to_owned(),
+                    status: ChangeStatus::Modified,
+                },
+                ChangedPath {
+                    path: "target/debug/anvics".to_owned(),
+                    status: ChangeStatus::Added,
+                },
+                ChangedPath {
+                    path: "Cargo.lock".to_owned(),
+                    status: ChangeStatus::Modified,
+                },
+                ChangedPath {
+                    path: "evidence/verify.log".to_owned(),
+                    status: ChangeStatus::Added,
+                },
+                ChangedPath {
+                    path: "assets/logo.png".to_owned(),
+                    status: ChangeStatus::Modified,
+                },
+            ],
+            &RepositoryConfig::default(),
+        )
         .unwrap();
 
         assert_eq!(effects.effects.len(), 5);
@@ -3960,6 +4080,93 @@ mod tests {
         assert!(change_units
             .iter()
             .all(|unit| unit.provenance == FileEffectProvenance::Heuristic));
+    }
+
+    #[test]
+    fn anvics_toml_classifies_review_change_units_without_self_reinterpretation() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("anvics.toml"),
+            "[generated]\ntracked = [\"src/generated/**\"]\nuntracked = [\"dist/**\"]\n\n[ignore]\npaths = [\"cache/**\"]\n\n[evidence]\ncandidate_paths = [\"reports/**\"]\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("src/generated")).unwrap();
+        fs::write(
+            dir.path().join("src/generated/client.rs"),
+            "old generated\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("dist")).unwrap();
+        fs::write(dir.path().join("dist/bundle.js"), "old bundle\n").unwrap();
+        fs::create_dir_all(dir.path().join("cache")).unwrap();
+        fs::write(dir.path().join("cache/result.txt"), "old cache\n").unwrap();
+        fs::create_dir_all(dir.path().join("reports")).unwrap();
+        fs::write(dir.path().join("reports/test.txt"), "old report\n").unwrap();
+        fs::write(dir.path().join("src.rs"), "old source\n").unwrap();
+
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent(
+                "Config labels".to_owned(),
+                "Exercise anvics.toml".to_owned(),
+            )
+            .unwrap();
+        let workspace = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace.join("src/generated/client.rs"), "new generated\n").unwrap();
+        fs::write(workspace.join("dist/bundle.js"), "new bundle\n").unwrap();
+        fs::write(workspace.join("cache/result.txt"), "new cache\n").unwrap();
+        fs::write(workspace.join("reports/test.txt"), "new report\n").unwrap();
+        fs::write(workspace.join("src.rs"), "new source\n").unwrap();
+        fs::write(
+            workspace.join("anvics.toml"),
+            "[ignore]\npaths = [\"src.rs\"]\n",
+        )
+        .unwrap();
+
+        store
+            .workspace_snapshot(preparation.workspace.id.as_str(), Some("result".to_owned()))
+            .unwrap();
+        let review = store.create_review(preparation.thread.id.as_str()).unwrap();
+
+        assert!(review
+            .changed_paths
+            .iter()
+            .any(|path| path.path == "dist/bundle.js"));
+        assert!(review
+            .changed_paths
+            .iter()
+            .any(|path| path.path == "reports/test.txt"));
+
+        let units = review
+            .change_units
+            .iter()
+            .map(|unit| (unit.path.as_str(), unit.labels.as_slice()))
+            .collect::<Vec<_>>();
+        assert!(units.contains(&("src.rs", &[FileEffectLabel::Source][..])));
+        assert!(units.contains(&(
+            "src/generated/client.rs",
+            &[FileEffectLabel::GeneratedTracked][..]
+        )));
+        assert!(units.contains(&("anvics.toml", &[FileEffectLabel::Config][..])));
+        assert!(!review
+            .change_units
+            .iter()
+            .any(|unit| unit.path == "dist/bundle.js"));
+        assert!(!review
+            .change_units
+            .iter()
+            .any(|unit| unit.path == "cache/result.txt"));
+        assert!(!review
+            .change_units
+            .iter()
+            .any(|unit| unit.path == "reports/test.txt"));
+
+        let markdown = store.review_markdown(review.id.as_str()).unwrap();
+        assert!(markdown.contains("`src/generated/client.rs` (generated_tracked)"));
+        assert!(markdown.contains("`src.rs` (source)"));
+        assert!(!markdown.contains("`dist/bundle.js` ("));
     }
 
     #[test]
