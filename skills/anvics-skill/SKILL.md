@@ -78,9 +78,9 @@ Evidence should support review. It should not become a second codebase made of l
 
 ## Command Policy
 
-Anvics classifies Anvics-run commands before execution. Read-only, mutating, destructive, and unknown commands are allowed by default inside the isolated workspace. Networked, host-escape-risk, and interactive commands are blocked unless the operator explicitly approves them with `--allow-command-risk --command-risk-reason "<reason>"`.
+Anvics classifies Anvics-run commands before execution, including commands loaded from `--command-file`. Read-only, mutating, destructive, and unknown commands are allowed by default inside the isolated workspace. Networked, host-escape-risk, and interactive commands are blocked unless the operator explicitly approves them with `--allow-command-risk --command-risk-reason "<reason>"`.
 
-This is a provenance and workflow gate, not a sandbox. If a blocked command seems necessary, report the exact command and why it is needed, then wait for the operator.
+This is a provenance and workflow gate, not a sandbox. If a blocked command seems necessary, report the exact command and why it is needed, then wait for the operator. Operators can preview unfamiliar commands with `anvics command classify -- <program> [args...]` or `anvics command classify --command-file <path>`.
 
 ## Review And Publish
 

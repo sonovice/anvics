@@ -942,6 +942,53 @@ fn command_policy_blocks_risky_commands_and_records_override() {
         "command_policy_override: Operator approved local binary version check",
     ));
 
+    anvics(
+        dir.path(),
+        &["command", "classify", "--", "curl", "https://example.com"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains("blocked: true"))
+    .stdout(predicate::str::contains(
+        "override: --allow-command-risk --command-risk-reason <reason>",
+    ));
+
+    let risky_command_file = dir.path().join("risky-command.sh");
+    fs::write(&risky_command_file, "curl https://example.com\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "command",
+            "classify",
+            "--command-file",
+            risky_command_file.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains("blocked: true"));
+    anvics(
+        dir.path(),
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "risky file",
+            "--summary",
+            "Risky command file should be blocked",
+            "--command-file",
+            risky_command_file.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("Networked"));
+
     let command = anvics(
         dir.path(),
         &[
@@ -976,6 +1023,32 @@ fn command_policy_blocks_risky_commands_and_records_override() {
         .stdout(predicate::str::contains(
             "\"command_policy_override_reason\": \"Operator approved local binary version check\"",
         ));
+    let allowed_command_file = dir.path().join("git-version-command.sh");
+    fs::write(&allowed_command_file, "git --version\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "git version file",
+            "--summary",
+            "Operator approved checking Git version from a command file",
+            "--command-file",
+            allowed_command_file.to_str().unwrap(),
+            "--allow-command-risk",
+            "--command-risk-reason",
+            "Operator approved command-file version check",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: networked"))
+    .stdout(predicate::str::contains(
+        "command_policy_override: Operator approved command-file version check",
+    ));
 
     anvics(
         dir.path(),
@@ -999,6 +1072,9 @@ fn command_policy_blocks_risky_commands_and_records_override() {
     .stdout(predicate::str::contains("policy: networked"))
     .stdout(predicate::str::contains(
         "command policy override: Operator approved local binary version check",
+    ))
+    .stdout(predicate::str::contains(
+        "command policy override: Operator approved command-file version check",
     ));
 }
 
@@ -1180,6 +1256,27 @@ fn agent_accept_blocks_risky_command_before_publication() {
             "--",
             "curl",
             "https://example.com",
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("Networked"));
+    let command_file = dir.path().join("network-verify.sh");
+    fs::write(&command_file, "curl https://example.com\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "network file verify",
+            "--run-summary",
+            "Network command file should be blocked",
+            "--command-file",
+            command_file.to_str().unwrap(),
         ],
     )
     .assert()
@@ -1828,6 +1925,55 @@ fn daemon_backed_command_policy_matches_direct_cli() {
     daemon_anvics(
         dir.path(),
         &socket,
+        &["command", "classify", "--", "docker", "ps"],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: host_escape_risk"))
+    .stdout(predicate::str::contains("blocked: true"));
+
+    let daemon_command_file = dir.path().join("daemon-risky-command.sh");
+    fs::write(&daemon_command_file, "docker ps\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "command",
+            "classify",
+            "--command-file",
+            daemon_command_file.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("policy: host_escape_risk"))
+    .stdout(predicate::str::contains("blocked: true"));
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "command",
+            "run",
+            "--workspace",
+            &workspace,
+            "--label",
+            "blocked command file",
+            "--summary",
+            "Host escape command file should be blocked",
+            "--command-file",
+            daemon_command_file.to_str().unwrap(),
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("daemon error"))
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("HostEscapeRisk"));
+
+    daemon_anvics(
+        dir.path(),
+        &socket,
         &[
             "command",
             "run",
@@ -1899,6 +2045,29 @@ fn daemon_backed_command_policy_matches_direct_cli() {
             "--",
             "curl",
             "https://example.com",
+        ],
+    )
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("daemon error"))
+    .stderr(predicate::str::contains("command policy blocked"))
+    .stderr(predicate::str::contains("Networked"));
+    let accept_command_file = dir.path().join("daemon-accept-risky-command.sh");
+    fs::write(&accept_command_file, "curl https://example.com\n").unwrap();
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "accept",
+            "--workspace",
+            &workspace,
+            "--run-label",
+            "network accept file",
+            "--run-summary",
+            "Network command file should be blocked",
+            "--command-file",
+            accept_command_file.to_str().unwrap(),
         ],
     )
     .assert()

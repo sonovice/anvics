@@ -1,12 +1,12 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentSessionId,
     AgentSessionStatus, AgentStatus, ChangeStatus, ChangedPath, CommandEvent, CommandEventId,
-    CommandPolicyClass, CommandRuntimeMetrics, CoordinationStatus, EvidenceRecord,
-    EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId, ObjectId,
-    OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities, ProjectionKind,
-    ProjectionRequest, RelatedWork, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
-    RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId, RiskFinding,
-    RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
+    CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics, CoordinationStatus,
+    EvidenceRecord, EvidenceRecordId, EvidenceSummary, NativePublication, NativePublicationId,
+    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
+    ProjectionKind, ProjectionRequest, RelatedWork, RepositoryEvent, RepositoryEventId,
+    RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection, ReviewProjectionId,
+    RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
     SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
     WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
@@ -135,6 +135,12 @@ pub struct CommandRunInput {
     pub mount_root: Option<String>,
     pub allow_command_risk: bool,
     pub command_risk_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandPolicyInput {
+    pub argv: Vec<String>,
+    pub command_file: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -516,7 +522,11 @@ impl AnvicsStore {
             }
             input.argv.clone()
         };
-        let command_policy_class = classify_command_policy(&argv);
+        let command_policy_class = classify_command_policy(CommandPolicyInput {
+            argv: input.argv.clone(),
+            command_file: command_file.clone(),
+        })?
+        .policy_class;
         let command_policy_override_reason =
             command_policy_override_reason(&command_policy_class, &input)?;
 
@@ -2468,7 +2478,23 @@ fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn classify_command_policy(argv: &[String]) -> CommandPolicyClass {
+pub fn classify_command_policy(input: CommandPolicyInput) -> Result<CommandPolicyDecision> {
+    let policy_class = if let Some(path) = input.command_file {
+        let command = fs::read_to_string(path)?;
+        classify_shell_command(&command)
+    } else {
+        classify_argv_policy(&input.argv)
+    };
+    let blocked = command_policy_requires_override(&policy_class);
+    Ok(CommandPolicyDecision {
+        policy_class,
+        blocked,
+        override_hint: blocked
+            .then(|| "--allow-command-risk --command-risk-reason <reason>".to_owned()),
+    })
+}
+
+fn classify_argv_policy(argv: &[String]) -> CommandPolicyClass {
     let Some(program) = argv.first().map(|value| value.as_str()) else {
         return CommandPolicyClass::Unknown;
     };
@@ -3971,11 +3997,11 @@ mod tests {
     #[test]
     fn command_policy_classifier_reports_coarse_classes() {
         assert_eq!(
-            classify_command_policy(&["cat".to_owned(), "app.txt".to_owned()]),
+            classify_argv_policy(&["cat".to_owned(), "app.txt".to_owned()]),
             CommandPolicyClass::ReadOnly
         );
         assert_eq!(
-            classify_command_policy(&[
+            classify_argv_policy(&[
                 "sh".to_owned(),
                 "-c".to_owned(),
                 "printf x > app.txt".to_owned()
@@ -3983,11 +4009,11 @@ mod tests {
             CommandPolicyClass::Mutating
         );
         assert_eq!(
-            classify_command_policy(&["rm".to_owned(), "app.txt".to_owned()]),
+            classify_argv_policy(&["rm".to_owned(), "app.txt".to_owned()]),
             CommandPolicyClass::Destructive
         );
         assert_eq!(
-            classify_command_policy(&["mystery-tool".to_owned()]),
+            classify_argv_policy(&["mystery-tool".to_owned()]),
             CommandPolicyClass::Unknown
         );
     }
@@ -4050,6 +4076,73 @@ mod tests {
             event.kind != RepositoryEventKind::CommandStarted
                 && event.kind != RepositoryEventKind::EvidenceAttached
         }));
+    }
+
+    #[test]
+    fn command_file_policy_blocks_risky_contents_without_artifacts() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        let command_file = dir.path().join("verify.sh");
+        fs::write(&command_file, "curl https://example.com\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Policy".to_owned(), "Check command file".to_owned())
+            .unwrap();
+
+        let decision = classify_command_policy(CommandPolicyInput {
+            argv: Vec::new(),
+            command_file: Some(command_file.to_string_lossy().to_string()),
+        })
+        .unwrap();
+        assert_eq!(decision.policy_class, CommandPolicyClass::Networked);
+        assert!(decision.blocked);
+        assert_eq!(
+            decision.override_hint.as_deref(),
+            Some("--allow-command-risk --command-risk-reason <reason>")
+        );
+
+        let err = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: Vec::new(),
+                command_file: Some(command_file.to_string_lossy().to_string()),
+                command_label: "risky file".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Risky command file".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
+                allow_command_risk: false,
+                command_risk_reason: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::CommandPolicyBlocked {
+                policy_class: CommandPolicyClass::Networked
+            }
+        ));
+        assert!(
+            read_json_dir::<CommandEvent>(store.anvics_dir.join("command-events"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            read_json_dir::<EvidenceRecord>(store.anvics_dir.join("evidence"))
+                .unwrap()
+                .is_empty()
+        );
+        let command_artifact_root = store.anvics_dir.join("artifacts/commands");
+        assert!(
+            !command_artifact_root.exists()
+                || fs::read_dir(command_artifact_root)
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
     }
 
     #[test]
@@ -4129,6 +4222,36 @@ mod tests {
                 .command_policy_override_reason
                 .as_deref(),
             Some("Operator approved version check")
+        );
+
+        let command_file = dir.path().join("git-version.sh");
+        fs::write(&command_file, "git --version\n").unwrap();
+        let command_file_result = store
+            .run_command(CommandRunInput {
+                workspace_id: preparation.workspace.id.to_string(),
+                argv: Vec::new(),
+                command_file: Some(command_file.to_string_lossy().to_string()),
+                command_label: "git version file".to_owned(),
+                cwd: None,
+                timeout_seconds: Some(10),
+                summary: "Allowed git version command file".to_owned(),
+                artifact_path: None,
+                projection: ProjectionRequest::MaterializedDir,
+                mount_root: None,
+                allow_command_risk: true,
+                command_risk_reason: Some("Operator approved command file".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(
+            command_file_result.command_event.command_policy_class,
+            Some(CommandPolicyClass::Networked)
+        );
+        assert_eq!(
+            command_file_result
+                .command_event
+                .command_policy_override_reason
+                .as_deref(),
+            Some("Operator approved command file")
         );
     }
 

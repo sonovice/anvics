@@ -1,8 +1,8 @@
 use anvics_core::{
     AgentAcceptance, AgentFinish, AgentPreparation, AgentSession, AgentStatus, ChangedPath,
-    CommandEvent, CoordinationStatus, EvidenceRecord, NativePublication, ProjectionRequest,
-    RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot,
-    WorkThread, WorkspaceView,
+    CommandEvent, CommandPolicyDecision, CoordinationStatus, EvidenceRecord, NativePublication,
+    ProjectionRequest, RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding,
+    RiskScan, SourceSnapshot, WorkThread, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +82,10 @@ pub enum ApiMethod {
         #[serde(default)]
         allow_command_risk: bool,
         command_risk_reason: Option<String>,
+    },
+    CommandClassify {
+        argv: Vec<String>,
+        command_file: Option<String>,
     },
     CommandShow {
         id: String,
@@ -276,6 +280,9 @@ pub enum ApiResult {
         command_event: Box<CommandEvent>,
         evidence: EvidenceRecord,
     },
+    CommandClassify {
+        decision: CommandPolicyDecision,
+    },
     CommandShow {
         command_event: Box<CommandEvent>,
     },
@@ -411,6 +418,10 @@ mod tests {
                 mount_root: None,
                 allow_command_risk: false,
                 command_risk_reason: None,
+            },
+            ApiMethod::CommandClassify {
+                argv: vec!["curl".to_owned(), "https://example.com".to_owned()],
+                command_file: None,
             },
             ApiMethod::CommandShow {
                 id: "command-1".to_owned(),
@@ -810,6 +821,15 @@ mod tests {
             ApiResult::CommandRun {
                 command_event: Box::new(command_event.clone()),
                 evidence: evidence.clone(),
+            },
+            ApiResult::CommandClassify {
+                decision: CommandPolicyDecision {
+                    policy_class: CommandPolicyClass::Networked,
+                    blocked: true,
+                    override_hint: Some(
+                        "--allow-command-risk --command-risk-reason <reason>".to_owned(),
+                    ),
+                },
             },
             ApiResult::CommandShow {
                 command_event: Box::new(command_event.clone()),

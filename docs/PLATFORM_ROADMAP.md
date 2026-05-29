@@ -274,6 +274,9 @@ Scope:
   - allow read-only, mutating, destructive, and unknown by default
   - block networked, host-escape-risk, and interactive by default
   - allow an audited operator override with an explicit reason
+- MVP 0.22 hardening:
+  - policy-scan Anvics-run command files before execution
+  - expose `command classify` for non-mutating policy preview
 - `workspace.run_command`.
 - Local `anvics-worker` process.
 - Command spec:

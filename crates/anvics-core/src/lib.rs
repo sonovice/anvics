@@ -234,6 +234,14 @@ pub enum CommandPolicyClass {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CommandPolicyDecision {
+    pub policy_class: CommandPolicyClass,
+    pub blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct EvidenceRecord {
     pub id: EvidenceRecordId,
     pub thread_id: WorkThreadId,

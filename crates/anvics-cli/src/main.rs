@@ -3,7 +3,8 @@ use anvics_api::{
     WorkspaceDiffFormat as ApiWorkspaceDiffFormat,
 };
 use anvics_store::{
-    AnvicsStore, CommandEvidenceInput, CommandRunInput, PublicationOptions, StoreError,
+    classify_command_policy, AnvicsStore, CommandEvidenceInput, CommandPolicyInput,
+    CommandRunInput, PublicationOptions, StoreError,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -177,6 +178,12 @@ enum EvidenceCommand {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum CommandRunCommand {
+    Classify {
+        #[arg(long)]
+        command_file: Option<PathBuf>,
+        #[arg(last = true)]
+        argv: Vec<String>,
+    },
     Run {
         #[arg(long)]
         workspace: String,
@@ -455,6 +462,12 @@ struct CommandRunOptions {
 }
 
 #[derive(Debug)]
+struct CommandClassifyOptions {
+    argv: Vec<String>,
+    command_file: Option<PathBuf>,
+}
+
+#[derive(Debug)]
 struct AgentAcceptOptions {
     command: Option<String>,
     command_file: Option<PathBuf>,
@@ -646,6 +659,16 @@ fn main() -> Result<()> {
                 attach_command_evidence_via_daemon(root, socket, thread, options)
             } else {
                 attach_command_evidence(root, &thread, options)
+            }
+        }
+        CliCommand::Command {
+            command: CommandRunCommand::Classify { command_file, argv },
+        } => {
+            let options = CommandClassifyOptions { argv, command_file };
+            if let Some(socket) = daemon {
+                classify_command_via_daemon(root, socket, options)
+            } else {
+                classify_command(options)
             }
         }
         CliCommand::Command {
@@ -1485,6 +1508,35 @@ fn run_command_via_daemon(
     }
 }
 
+fn classify_command(options: CommandClassifyOptions) -> Result<()> {
+    let input = command_policy_input(options)?;
+    let decision = classify_command_policy(input).context("failed to classify command policy")?;
+    print_command_policy_decision(decision);
+    Ok(())
+}
+
+fn classify_command_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    options: CommandClassifyOptions,
+) -> Result<()> {
+    let input = command_policy_input(options)?;
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::CommandClassify {
+            argv: input.argv,
+            command_file: input.command_file,
+        },
+    )? {
+        ApiResult::CommandClassify { decision } => {
+            print_command_policy_decision(decision);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
 fn show_command_event(root: PathBuf, id: &str) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let command_event = store
@@ -1558,6 +1610,17 @@ fn print_command_run(
     }
     if let Some(stderr) = command_event.stderr_path {
         println!("stderr: {stderr}");
+    }
+}
+
+fn print_command_policy_decision(decision: anvics_core::CommandPolicyDecision) {
+    println!(
+        "policy: {}",
+        command_policy_class_label(&decision.policy_class)
+    );
+    println!("blocked: {}", decision.blocked);
+    if let Some(hint) = decision.override_hint {
+        println!("override: {hint}");
     }
 }
 
@@ -2447,6 +2510,18 @@ fn command_run_input(options: CommandRunOptions) -> Result<CommandRunInput> {
     })
 }
 
+fn command_policy_input(options: CommandClassifyOptions) -> Result<CommandPolicyInput> {
+    if options.command_file.is_none() && options.argv.is_empty() {
+        anyhow::bail!("command classify requires --command-file or command argv after --");
+    }
+    Ok(CommandPolicyInput {
+        argv: options.argv,
+        command_file: options
+            .command_file
+            .map(|path| path.to_string_lossy().to_string()),
+    })
+}
+
 fn agent_accept_run_input(
     workspace: String,
     options: AgentAcceptOptions,
@@ -2457,13 +2532,15 @@ fn agent_accept_run_input(
     let summary = options
         .run_summary
         .ok_or_else(|| anyhow::anyhow!("--run-summary is required for command-run accept"))?;
-    if options.argv.is_empty() {
-        anyhow::bail!("command-run accept requires command argv after --");
+    if options.command_file.is_none() && options.argv.is_empty() {
+        anyhow::bail!("command-run accept requires --command-file or command argv after --");
     }
     Ok(CommandRunInput {
         workspace_id: workspace,
         argv: options.argv,
-        command_file: None,
+        command_file: options
+            .command_file
+            .map(|path| path.to_string_lossy().to_string()),
         command_label: label,
         cwd: options.cwd,
         timeout_seconds: options.run_timeout_seconds,

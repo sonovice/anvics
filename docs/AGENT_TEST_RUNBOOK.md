@@ -104,7 +104,7 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
      -- sh -c "cat app.txt"
    ```
 
-   Anvics blocks networked, host-escape-risk, and interactive verification commands by default. If the operator intentionally approves that risk, add `--allow-command-risk --command-risk-reason "<reason>"` to the `agent accept` or `command run` invocation. This records an audited override on the command event; it is not a sandbox.
+   Anvics blocks networked, host-escape-risk, and interactive verification commands by default. Preview unfamiliar commands with `anvics command classify -- <program> [args...]` or `anvics command classify --command-file <path>`. If the operator intentionally approves that risk, add `--allow-command-risk --command-risk-reason "<reason>"` to the `agent accept` or `command run` invocation. This records an audited override on the command event; it is not a sandbox.
 
    If Anvics cannot run the verification command, fall back to externally-reported evidence:
 
@@ -117,7 +117,7 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
      --output "$target_repo/accepted.patch"
    ```
 
-   For multi-command verification, put the commands in a small file and use `--command-file <path> --label "<short label>"` instead of a long inline command. Add `--artifact <path>` if the agent produced a compact result file worth linking.
+   For multi-command verification, put the commands in a small file and use `--run-label "<short label>" --run-summary "<short summary>" --command-file <path>` for Anvics-run evidence, or `--command-file <path> --label "<short label>"` when attaching externally-run evidence. Anvics-run command files are policy-scanned before execution. Add `--artifact <path>` if the agent produced a compact result file worth linking.
 
 6. Inspect the accepted result:
 

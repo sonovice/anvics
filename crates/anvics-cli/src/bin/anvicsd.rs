@@ -1,6 +1,7 @@
 use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat};
 use anvics_store::{
-    AnvicsStore, CommandEvidenceInput, CommandRunInput, PublicationOptions, StoreError,
+    classify_command_policy, AnvicsStore, CommandEvidenceInput, CommandPolicyInput,
+    CommandRunInput, PublicationOptions, StoreError,
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -238,6 +239,10 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 command_event: Box::new(result.command_event),
                 evidence: result.evidence,
             })
+        }
+        ApiMethod::CommandClassify { argv, command_file } => {
+            let decision = classify_command_policy(CommandPolicyInput { argv, command_file })?;
+            Ok(ApiResult::CommandClassify { decision })
         }
         ApiMethod::CommandShow { id } => {
             let command_event = AnvicsStore::open(&repo)?.show_command_event(&id)?;
