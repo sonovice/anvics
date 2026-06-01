@@ -277,9 +277,30 @@ To test same-file conflict pressure, prepare the conflict fixture:
 scripts/three_agent_conflict_trial_prepare.sh
 ```
 
-Launch the three generated prompts in external agents. Finish each workspace as a candidate review, then use `agent resolve --review ...` to prepare a resolver workspace from those candidate reviews. The current assigned agent, a human, or an operator-selected external agent can handle that resolver packet; Anvics does not spawn one. Accept the resolver workspace with Anvics-run verification and verify the exported patch applies to a clean copy.
+Launch the three generated prompts in external agents. Finish each workspace as a candidate review, then run deterministic conflict analysis before preparing the resolver workspace:
 
-Current limitation: this is an operator-mediated workflow. Anvics detects overlap and records reviewable notes, but it does not yet create a first-class conflict session or structured resolution contract.
+```sh
+anvics --repo "$target_repo" conflict analyze \
+  --review "<agent-a-review>" \
+  --review "<agent-b-review>" \
+  --review "<agent-c-review>"
+```
+
+Then prepare the bounded resolver workspace:
+
+```sh
+anvics --repo "$target_repo" conflict prepare \
+  --review "<agent-a-review>" \
+  --review "<agent-b-review>" \
+  --review "<agent-c-review>" \
+  --title "Resolve competing edits" \
+  --task "Combine the compatible intent from all candidates." \
+  --agent-command "$ANVICS_AGENT_COMMAND"
+```
+
+`conflict prepare` applies deterministic safe changes first and leaves only true conflict cases for the current assigned agent, a human, or an operator-selected external agent. Anvics does not spawn one. Use `conflict status --workspace <resolver-workspace>` before acceptance, accept with Anvics-run verification, then run `conflict verify --workspace <resolver-workspace>` and verify the exported patch applies to a clean copy.
+
+Current limitation: conflict verification is deterministic and publication-gated for resolver work, but the semantic choice for overlapping intent still comes from the assigned agent/operator.
 
 ## Projection Runtime Checks
 
@@ -316,15 +337,24 @@ Use `--projection auto` when testing VFS behavior without making FUSE availabili
 
 - Workspaces are still materialized directories under `.anvics/workspaces/`.
 - Patch export is the only legacy Git artifact in this slice; commit creation and push come later.
-- Conflict handling is path-level overlap notes, not semantic resolution.
+- Conflict handling has a deterministic spine: analysis, safe auto-apply, resolver packet, verification, and publication gates. It is not semantic auto-resolution.
 - The live-agent flow is manual and tool-agnostic; Anvics does not run the agent yet.
 
 ## Three-Agent Conflict Resolution
 
-After candidate agents finish and produce reviews, prepare a resolver workspace directly from the competing reviews:
+After candidate agents finish and produce reviews, analyze the competing reviews:
 
 ```sh
-anvics --repo "$target_repo" agent resolve \
+anvics --repo "$target_repo" conflict analyze \
+  --review "<agent-a-review>" \
+  --review "<agent-b-review>" \
+  --review "<agent-c-review>"
+```
+
+Then prepare a resolver workspace directly from the competing reviews:
+
+```sh
+anvics --repo "$target_repo" conflict prepare \
   --review "<agent-a-review>" \
   --review "<agent-b-review>" \
   --review "<agent-c-review>" \
@@ -333,7 +363,9 @@ anvics --repo "$target_repo" agent resolve \
   --agent-command "$ANVICS_AGENT_COMMAND"
 ```
 
-`agent resolve` requires all source reviews to share one base snapshot. It creates a normal resolver thread/workspace, writes a packet containing candidate review paths, changed paths, evidence summaries, and overlap notes, and records the source review ids on the final resolver review.
+`conflict prepare` requires all source reviews to share one base snapshot. It creates or reuses a deterministic conflict analysis, creates a normal resolver thread/workspace, applies safe independent and non-overlapping hunk changes, writes a packet containing candidate review paths, changed paths, evidence summaries, overlap notes, and unresolved conflict cases, and records the source review ids plus conflict analysis id on the final resolver review.
+
+`agent resolve` remains as a compatibility wrapper for resolver preparation, but new runbooks should use `conflict analyze` and `conflict prepare`.
 
 Use the generated resolver packet with the current assigned agent, an operator, or any external agent CLI the operator chooses. Anvics does not spawn or require a resolver agent. Then accept the resolver workspace through the normal operator flow:
 
@@ -345,3 +377,11 @@ anvics --repo "$target_repo" agent accept \
   --output resolved.patch \
   -- cargo test
 ```
+
+After acceptance:
+
+```sh
+anvics --repo "$target_repo" conflict verify --workspace "<resolver-workspace>"
+```
+
+Resolver publication is blocked by default if deterministic verification detects unrelated paths, dropped safe changes, missing source review links, unresolved cases without final output, or missing compact evidence. Override only with an audited `--allow-resolution-risk --resolution-risk-reason "<reason>"`.

@@ -313,6 +313,50 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 preparation: Box::new(preparation),
             })
         }
+        ApiMethod::ConflictAnalyze { reviews } => {
+            let store = AnvicsStore::open(&repo)?;
+            let analysis = store.create_conflict_analysis(reviews)?;
+            let markdown = store.conflict_analysis_markdown(analysis.id.as_str())?;
+            let markdown_path = repo
+                .join(".anvics")
+                .join("conflicts")
+                .join(format!("{}.md", analysis.id))
+                .to_string_lossy()
+                .to_string();
+            Ok(ApiResult::ConflictAnalyze {
+                analysis: Box::new(analysis),
+                markdown_path,
+                markdown,
+            })
+        }
+        ApiMethod::ConflictPrepare {
+            reviews,
+            title,
+            task,
+            agent_command,
+        } => {
+            let preparation = AnvicsStore::open(&repo)?.prepare_conflict_resolution(
+                reviews,
+                title,
+                task,
+                agent_command,
+            )?;
+            Ok(ApiResult::ConflictPrepare {
+                preparation: Box::new(preparation),
+            })
+        }
+        ApiMethod::ConflictStatus { workspace } => {
+            let verification = AnvicsStore::open(&repo)?.conflict_status(&workspace)?;
+            Ok(ApiResult::ConflictStatus {
+                verification: Box::new(verification),
+            })
+        }
+        ApiMethod::ConflictVerify { workspace } => {
+            let verification = AnvicsStore::open(&repo)?.conflict_verify(&workspace)?;
+            Ok(ApiResult::ConflictVerify {
+                verification: Box::new(verification),
+            })
+        }
         ApiMethod::AgentEnter { workspace, name } => {
             let status = AnvicsStore::open(&repo)?.enter_agent_session(&workspace, name)?;
             Ok(ApiResult::AgentEnter {
@@ -410,6 +454,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             output_path,
             allow_secret_risk,
             override_reason,
+            allow_resolution_risk,
+            resolution_risk_reason,
         } => {
             let input = command_input(
                 command,
@@ -427,6 +473,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 PublicationOptions {
                     allow_secret_risk,
                     override_reason,
+                    allow_resolution_risk,
+                    resolution_risk_reason,
                 },
             )?;
             Ok(ApiResult::AgentAccept {
@@ -447,6 +495,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             output_path,
             allow_secret_risk,
             override_reason,
+            allow_resolution_risk,
+            resolution_risk_reason,
             allow_command_risk,
             command_risk_reason,
         } => {
@@ -469,6 +519,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 PublicationOptions {
                     allow_secret_risk,
                     override_reason,
+                    allow_resolution_risk,
+                    resolution_risk_reason,
                 },
             )?;
             Ok(ApiResult::AgentAccept {
@@ -499,6 +551,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             review,
             allow_secret_risk,
             override_reason,
+            allow_resolution_risk,
+            resolution_risk_reason,
         } => {
             let publication = AnvicsStore::open(&repo)?.create_publication_with_options(
                 &thread,
@@ -506,6 +560,8 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 PublicationOptions {
                     allow_secret_risk,
                     override_reason,
+                    allow_resolution_risk,
+                    resolution_risk_reason,
                 },
             )?;
             Ok(ApiResult::PublishCreate { publication })

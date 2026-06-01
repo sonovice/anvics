@@ -442,7 +442,14 @@ Acceptance criteria:
 
 Goal: handle parallel agent interference before human merge pain.
 
-MVP 0 stance: detect path/hunk overlap and create reviewable conflict notes. Structured multi-agent resolution contracts and auto-apply are roadmap work.
+MVP 0.42-0.45 adds the deterministic conflict spine before full collaboration protocols:
+
+- `conflict analyze` persists `ConflictAnalysis` from competing reviews that share a base snapshot.
+- `conflict prepare` creates a resolver workspace, applies independent and non-overlapping hunk changes mechanically, and leaves true conflict cases for bounded semantic choice.
+- `conflict status` and `conflict verify` check source review links, preserved safe changes, unrelated paths, unresolved cases, and evidence.
+- Resolver publication is gated unless verification passes or an audited resolution-risk override is recorded.
+
+Roadmap work remains richer multi-party collaboration, agreement protocols, semantic prediction, and UI. The product should not depend on LLM-generated free-form merge decisions.
 
 Crates:
 
@@ -475,10 +482,11 @@ Scope:
 
 Acceptance criteria:
 
-- Two work threads editing overlapping hunks trigger conflict.
-- Agents can submit structured resolution contracts.
-- If all accept and policy allows, Anvics creates resolution output.
-- Non-trivial conflict creates `ResolutionThread`.
+- Two work threads editing overlapping hunks produce a durable conflict analysis.
+- Safe path/hunk changes can be applied before resolver editing.
+- Resolver output is verified against source reviews and safe changes before publication.
+- Agents can later submit richer structured resolution contracts.
+- If all accept and policy allows, Anvics can eventually create resolution output automatically.
 - Human sees conceptual resolution proposal, not merge markers.
 
 ## Roadmap Phase 11 - Legacy Git Adapter

@@ -68,6 +68,7 @@ opaque_id!(RiskFindingId);
 opaque_id!(PolicyOverrideId);
 opaque_id!(FileEffectSetId);
 opaque_id!(ChangeUnitId);
+opaque_id!(ConflictAnalysisId);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -172,6 +173,8 @@ pub struct WorkThread {
     pub base_snapshot: SourceSnapshotId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_review_ids: Vec<ReviewProjectionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_analysis_id: Option<ConflictAnalysisId>,
     pub status: WorkThreadStatus,
     pub created_at: String,
 }
@@ -403,6 +406,8 @@ pub struct ReviewProjection {
     pub final_snapshot: SourceSnapshotId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_review_ids: Vec<ReviewProjectionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_analysis_id: Option<ConflictAnalysisId>,
     pub changed_paths: Vec<ChangedPath>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<FileEffect>,
@@ -459,6 +464,83 @@ pub struct PolicyOverride {
     pub review_id: ReviewProjectionId,
     pub reason: String,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ConflictAnalysis {
+    pub id: ConflictAnalysisId,
+    pub base_snapshot: SourceSnapshotId,
+    pub input_reviews: Vec<ConflictInputReview>,
+    pub path_cases: Vec<ConflictPathCase>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ConflictInputReview {
+    pub review_id: ReviewProjectionId,
+    pub thread_id: WorkThreadId,
+    pub title: String,
+    pub final_snapshot: SourceSnapshotId,
+    pub changed_paths: Vec<ChangedPath>,
+    pub evidence_summaries: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ConflictPathCase {
+    pub path: String,
+    pub kind: ConflictCaseKind,
+    pub safety: MergeSafety,
+    pub review_ids: Vec<ReviewProjectionId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hunks: Vec<ConflictHunkCase>,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ConflictHunkCase {
+    pub review_id: ReviewProjectionId,
+    pub base_start: u32,
+    pub base_end: u32,
+    pub final_start: u32,
+    pub final_end: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictCaseKind {
+    IndependentPath,
+    SamePathNonOverlappingHunks,
+    SamePathOverlappingHunks,
+    ModifyDelete,
+    AddAdd,
+    BinaryOrUnknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeSafety {
+    AutoMergeable,
+    NeedsResolution,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ResolutionVerification {
+    pub workspace_id: WorkspaceViewId,
+    pub thread_id: WorkThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_analysis_id: Option<ConflictAnalysisId>,
+    pub passed: bool,
+    pub findings: Vec<String>,
+    pub current_changed_paths: Vec<ChangedPath>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ConflictPreparation {
+    pub analysis: ConflictAnalysis,
+    pub analysis_markdown_path: String,
+    pub preparation: AgentPreparation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -565,6 +647,7 @@ pub enum RepositoryEventKind {
     RiskScanCreated,
     SecretRiskDetected,
     PolicyOverrideRecorded,
+    ConflictAnalysisCreated,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -754,6 +837,7 @@ mod tests {
             task: "Edit a file".to_owned(),
             base_snapshot: base_snapshot.clone(),
             source_review_ids: Vec::new(),
+            conflict_analysis_id: None,
             status: WorkThreadStatus::Active,
             created_at: "2026-05-28T00:00:00Z".to_owned(),
         };
@@ -842,6 +926,7 @@ mod tests {
             base_snapshot: base_snapshot.clone(),
             final_snapshot: final_snapshot.clone(),
             source_review_ids: Vec::new(),
+            conflict_analysis_id: None,
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,

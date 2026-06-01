@@ -111,16 +111,17 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - VCS owns mechanical concurrency guarantees; agents own semantic coordination.
 - Mechanical guarantees: isolated `WorkspaceView`s, immutable snapshots, stable `ChangeUnit` identity, overlap detection, policy gates, audit, publication consistency.
 - Agents negotiate meaning: intent, conceptual resolution, code changes, tradeoffs, task satisfaction, evidence.
-- MVP 0 conflict handling is same-path/same-hunk overlap detection plus a reviewable conflict note.
+- MVP 0.42+ conflict handling has a deterministic spine: `ConflictAnalysis`, safe auto-apply into resolver workspaces, resolver packets, `conflict status`, `conflict verify`, and resolver publication gates.
+- Path/hunk overlap notes remain useful early warning signals, but publication of resolver work now checks that safe candidate changes were preserved and unrelated paths were not introduced.
 - Roadmap hard overlap starts `ConflictSession`.
 - Soft risk starts `CoordinationSignal`.
 - Agents collaboratively resolve conflicts as soon as they appear.
 - `ConflictSession` requires structured resolution contracts from each participating agent, not transcript inference.
 - Auto-apply resolution if all agents accept, tasks remain satisfied, evidence passes, policy allows, and no high-risk gate blocks.
 - Human involvement is conceptual, not line-level merge labor.
-- Roadmap non-trivial conflicts create `ResolutionThread` by default.
-- Direct shared `ResolutionChangeUnit` only for mechanically trivial cases.
-- Full `ConflictSession`, `ResolutionThread`, resolution contracts, and auto-apply are roadmap features, not MVP 0 requirements.
+- Non-trivial conflicts create a normal resolver `WorkThread` with `source_review_ids` and `conflict_analysis_id`; this is intentionally simpler than a full `ConflictSession`.
+- Direct shared `ResolutionChangeUnit` remains roadmap only.
+- Full multi-party `ConflictSession`, agent agreement protocols, semantic merge, and automatic publication remain roadmap features, not MVP 0 requirements.
 
 ## Freshness And Replay
 

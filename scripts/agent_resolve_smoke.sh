@@ -41,6 +41,7 @@ mod tests {
     }
 }
 EOF
+cargo generate-lockfile -q --manifest-path "$target_repo/Cargo.toml"
 
 echo "Target repo: $target_repo"
 anvics repo init
@@ -153,8 +154,17 @@ review_a="$(finish_candidate "$workspace_a" "Candidate A tests passed" | value_a
 review_b="$(finish_candidate "$workspace_b" "Candidate B tests passed" | value_after_prefix "review: ")"
 review_c="$(finish_candidate "$workspace_c" "Candidate C tests passed" | value_after_prefix "review: ")"
 
+analysis="$(
+  anvics conflict analyze \
+    --review "$review_a" \
+    --review "$review_b" \
+    --review "$review_c"
+)"
+printf '%s\n' "$analysis" | grep -- 'conflict_analysis:'
+printf '%s\n' "$analysis" | grep -- 'SamePathOverlappingHunks'
+
 resolve="$(
-  anvics agent resolve \
+  anvics conflict prepare \
     --review "$review_a" \
     --review "$review_b" \
     --review "$review_c" \
@@ -170,6 +180,7 @@ grep -- "$review_a" "$resolver_packet"
 grep -- "$review_b" "$resolver_packet"
 grep -- "$review_c" "$resolver_packet"
 grep -- 'Candidate A tests passed' "$resolver_packet"
+grep -- 'Deterministic Conflict Analysis' "$resolver_packet"
 grep -- "$agent_command" "$resolver_packet"
 
 cat > "$resolver_path/src/lib.rs" <<'EOF'
@@ -199,6 +210,8 @@ mod tests {
 }
 EOF
 
+anvics conflict status --workspace "$resolver_workspace" | grep -- 'passed: false'
+
 accept="$(
   anvics agent accept \
     --workspace "$resolver_workspace" \
@@ -210,6 +223,7 @@ accept="$(
 review="$(printf '%s\n' "$accept" | value_after_prefix "review: ")"
 publication="$(printf '%s\n' "$accept" | value_after_prefix "publication: ")"
 test -n "$publication"
+anvics conflict verify --workspace "$resolver_workspace" | grep -- 'passed: true'
 anvics review show "$review" --format markdown | grep -- '## Source Reviews'
 anvics review show "$review" --format markdown | grep -- "$review_a"
 

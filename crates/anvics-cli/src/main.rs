@@ -88,6 +88,10 @@ enum CliCommand {
         #[command(subcommand)]
         command: CoordinationCommand,
     },
+    Conflict {
+        #[command(subcommand)]
+        command: ConflictCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -266,6 +270,10 @@ enum PublishCommand {
         allow_secret_risk: bool,
         #[arg(long)]
         override_reason: Option<String>,
+        #[arg(long)]
+        allow_resolution_risk: bool,
+        #[arg(long)]
+        resolution_risk_reason: Option<String>,
     },
 }
 
@@ -294,6 +302,13 @@ enum ReviewFormat {
 enum WorkspaceDiffFormat {
     Summary,
     Patch,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ConflictFormat {
+    Summary,
+    Json,
+    Markdown,
 }
 
 impl From<WorkspaceDiffFormat> for ApiWorkspaceDiffFormat {
@@ -355,6 +370,7 @@ impl From<AgentInstructionTargetSelection> for anvics_core::AgentInstructionTarg
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum AgentCommand {
     Prepare {
         #[arg(long)]
@@ -485,6 +501,10 @@ enum AgentCommand {
         allow_command_risk: bool,
         #[arg(long)]
         command_risk_reason: Option<String>,
+        #[arg(long)]
+        allow_resolution_risk: bool,
+        #[arg(long)]
+        resolution_risk_reason: Option<String>,
         #[arg(last = true)]
         argv: Vec<String>,
     },
@@ -527,6 +547,34 @@ enum DaemonCommand {
 #[derive(Debug, Subcommand)]
 enum CoordinationCommand {
     Status {
+        #[arg(long)]
+        workspace: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConflictCommand {
+    Analyze {
+        #[arg(long = "review", required = true)]
+        reviews: Vec<String>,
+        #[arg(long, value_enum, default_value_t = ConflictFormat::Summary)]
+        format: ConflictFormat,
+    },
+    Prepare {
+        #[arg(long = "review", required = true)]
+        reviews: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        agent_command: Option<String>,
+    },
+    Status {
+        #[arg(long)]
+        workspace: String,
+    },
+    Verify {
         #[arg(long)]
         workspace: String,
     },
@@ -583,6 +631,8 @@ struct AgentAcceptOptions {
     override_reason: Option<String>,
     allow_command_risk: bool,
     command_risk_reason: Option<String>,
+    allow_resolution_risk: bool,
+    resolution_risk_reason: Option<String>,
     argv: Vec<String>,
 }
 
@@ -591,6 +641,8 @@ impl AgentAcceptOptions {
         PublicationOptions {
             allow_secret_risk: self.allow_secret_risk,
             override_reason: self.override_reason.clone(),
+            allow_resolution_risk: self.allow_resolution_risk,
+            resolution_risk_reason: self.resolution_risk_reason.clone(),
         }
     }
 }
@@ -919,11 +971,15 @@ fn main() -> Result<()> {
                     review,
                     allow_secret_risk,
                     override_reason,
+                    allow_resolution_risk,
+                    resolution_risk_reason,
                 },
         } => {
             let options = PublicationOptions {
                 allow_secret_risk,
                 override_reason,
+                allow_resolution_risk,
+                resolution_risk_reason,
             };
             if let Some(socket) = daemon {
                 create_publication_via_daemon(root, socket, thread, review, options)
@@ -1104,6 +1160,8 @@ fn main() -> Result<()> {
                     override_reason,
                     allow_command_risk,
                     command_risk_reason,
+                    allow_resolution_risk,
+                    resolution_risk_reason,
                     argv,
                 },
         } => {
@@ -1124,6 +1182,8 @@ fn main() -> Result<()> {
                 override_reason,
                 allow_command_risk,
                 command_risk_reason,
+                allow_resolution_risk,
+                resolution_risk_reason,
                 argv,
             };
             if let Some(socket) = daemon {
@@ -1167,6 +1227,48 @@ fn main() -> Result<()> {
                 coordination_status_via_daemon(root, socket, workspace)
             } else {
                 coordination_status(root, &workspace)
+            }
+        }
+        CliCommand::Conflict {
+            command: ConflictCommand::Analyze { reviews, format },
+        } => {
+            if let Some(socket) = daemon {
+                conflict_analyze_via_daemon(root, socket, reviews, format)
+            } else {
+                conflict_analyze(root, reviews, format)
+            }
+        }
+        CliCommand::Conflict {
+            command:
+                ConflictCommand::Prepare {
+                    reviews,
+                    title,
+                    task,
+                    agent_command,
+                },
+        } => {
+            if let Some(socket) = daemon {
+                conflict_prepare_via_daemon(root, socket, reviews, title, task, agent_command)
+            } else {
+                conflict_prepare(root, reviews, title, task, agent_command)
+            }
+        }
+        CliCommand::Conflict {
+            command: ConflictCommand::Status { workspace },
+        } => {
+            if let Some(socket) = daemon {
+                conflict_status_via_daemon(root, socket, workspace)
+            } else {
+                conflict_status(root, &workspace)
+            }
+        }
+        CliCommand::Conflict {
+            command: ConflictCommand::Verify { workspace },
+        } => {
+            if let Some(socket) = daemon {
+                conflict_verify_via_daemon(root, socket, workspace)
+            } else {
+                conflict_verify(root, &workspace)
             }
         }
     }
@@ -2367,6 +2469,8 @@ fn create_publication_via_daemon(
             review,
             allow_secret_risk: options.allow_secret_risk,
             override_reason: options.override_reason,
+            allow_resolution_risk: options.allow_resolution_risk,
+            resolution_risk_reason: options.resolution_risk_reason,
         },
     )? {
         ApiResult::PublishCreate { publication } => {
@@ -2466,6 +2570,211 @@ fn resolve_agent_via_daemon(
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn conflict_analyze(root: PathBuf, reviews: Vec<String>, format: ConflictFormat) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let analysis = store
+        .create_conflict_analysis(reviews)
+        .context("failed to analyze candidate reviews")?;
+    let markdown_path = root
+        .join(".anvics")
+        .join("conflicts")
+        .join(format!("{}.md", analysis.id))
+        .to_string_lossy()
+        .to_string();
+    print_conflict_analysis(&store, &analysis, Some(markdown_path), format)
+}
+
+fn conflict_analyze_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    reviews: Vec<String>,
+    format: ConflictFormat,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ConflictAnalyze { reviews })? {
+        ApiResult::ConflictAnalyze {
+            analysis, markdown, ..
+        } => match format {
+            ConflictFormat::Summary => print_conflict_analysis_summary(&analysis, None),
+            ConflictFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&analysis)?);
+                Ok(())
+            }
+            ConflictFormat::Markdown => {
+                println!("{markdown}");
+                Ok(())
+            }
+        },
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn conflict_prepare(
+    root: PathBuf,
+    reviews: Vec<String>,
+    title: Option<String>,
+    task: Option<String>,
+    agent_command: Option<String>,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let result = store
+        .prepare_conflict_resolution(reviews, title, task, agent_command)
+        .context("failed to prepare conflict resolver")?;
+    print_conflict_preparation(&root, result);
+    Ok(())
+}
+
+fn conflict_prepare_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    reviews: Vec<String>,
+    title: Option<String>,
+    task: Option<String>,
+    agent_command: Option<String>,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root.clone(),
+        ApiMethod::ConflictPrepare {
+            reviews,
+            title,
+            task,
+            agent_command,
+        },
+    )? {
+        ApiResult::ConflictPrepare { preparation } => {
+            print_conflict_preparation(&root, *preparation);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn conflict_status(root: PathBuf, workspace: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let verification = store
+        .conflict_status(workspace)
+        .context("failed to inspect conflict status")?;
+    print_resolution_verification(&verification);
+    Ok(())
+}
+
+fn conflict_status_via_daemon(root: PathBuf, socket: PathBuf, workspace: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ConflictStatus { workspace })? {
+        ApiResult::ConflictStatus { verification } => {
+            print_resolution_verification(&verification);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn conflict_verify(root: PathBuf, workspace: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let verification = store
+        .conflict_verify(workspace)
+        .context("failed to verify conflict resolution")?;
+    print_resolution_verification(&verification);
+    if verification.passed {
+        Ok(())
+    } else {
+        anyhow::bail!("conflict verification failed")
+    }
+}
+
+fn conflict_verify_via_daemon(root: PathBuf, socket: PathBuf, workspace: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::ConflictVerify { workspace })? {
+        ApiResult::ConflictVerify { verification } => {
+            print_resolution_verification(&verification);
+            if verification.passed {
+                Ok(())
+            } else {
+                anyhow::bail!("conflict verification failed")
+            }
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_conflict_analysis(
+    store: &AnvicsStore,
+    analysis: &anvics_core::ConflictAnalysis,
+    markdown_path: Option<String>,
+    format: ConflictFormat,
+) -> Result<()> {
+    match format {
+        ConflictFormat::Summary => print_conflict_analysis_summary(analysis, markdown_path),
+        ConflictFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(analysis)?);
+            Ok(())
+        }
+        ConflictFormat::Markdown => {
+            println!(
+                "{}",
+                store.conflict_analysis_markdown(analysis.id.as_str())?
+            );
+            Ok(())
+        }
+    }
+}
+
+fn print_conflict_analysis_summary(
+    analysis: &anvics_core::ConflictAnalysis,
+    markdown_path: Option<String>,
+) -> Result<()> {
+    println!("conflict_analysis: {}", analysis.id);
+    println!("base_snapshot: {}", analysis.base_snapshot);
+    if let Some(path) = markdown_path.filter(|path| !path.is_empty()) {
+        println!("markdown: {path}");
+    }
+    for input in &analysis.input_reviews {
+        println!("review: {} thread: {}", input.review_id, input.thread_id);
+    }
+    for case in &analysis.path_cases {
+        println!(
+            "case: {:?} {:?} `{}` reviews={}",
+            case.safety,
+            case.kind,
+            case.path,
+            case.review_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    Ok(())
+}
+
+fn print_conflict_preparation(root: &std::path::Path, result: anvics_core::ConflictPreparation) {
+    println!("Prepared conflict resolver");
+    println!("conflict_analysis: {}", result.analysis.id);
+    println!("conflict_markdown: {}", result.analysis_markdown_path);
+    print_agent_preparation(root, result.preparation);
+}
+
+fn print_resolution_verification(verification: &anvics_core::ResolutionVerification) {
+    println!("workspace: {}", verification.workspace_id);
+    println!("thread: {}", verification.thread_id);
+    if let Some(analysis_id) = &verification.conflict_analysis_id {
+        println!("conflict_analysis: {analysis_id}");
+    }
+    println!("passed: {}", verification.passed);
+    if verification.findings.is_empty() {
+        println!("findings: none");
+    } else {
+        for finding in &verification.findings {
+            println!("finding: {finding}");
+        }
+    }
+    if verification.current_changed_paths.is_empty() {
+        println!("changed_paths: none");
+    } else {
+        for changed in &verification.current_changed_paths {
+            println!("changed_path: {:?} {}", changed.status, changed.path);
+        }
     }
 }
 
@@ -3168,7 +3477,11 @@ fn accept_agent(
     };
     let acceptance = match result {
         Ok(acceptance) => acceptance,
-        Err((error @ StoreError::PublicationBlockedSecretRisk { .. }, context)) => {
+        Err((
+            error @ (StoreError::PublicationBlockedSecretRisk { .. }
+            | StoreError::PublicationBlockedResolutionRisk { .. }),
+            context,
+        )) => {
             if let Err(hint_error) = print_accept_recovery_hint(&root, &store, workspace_id) {
                 eprintln!("Recovery hint unavailable: {hint_error:#}");
             }
@@ -3240,6 +3553,15 @@ fn print_accept_recovery_hint(
             workspace.thread_id,
             review_id
         );
+        eprintln!(
+            "  If this is a resolver review and the resolution tradeoff is intentional, use:"
+        );
+        eprintln!(
+            "  anvics --repo {} publish create --thread {} --review {} --allow-resolution-risk --resolution-risk-reason \"<audited reason>\"",
+            shell_quote(&display_path(root)),
+            workspace.thread_id,
+            review_id
+        );
     }
     Ok(())
 }
@@ -3253,6 +3575,8 @@ fn accept_agent_via_daemon(
 ) -> Result<()> {
     let allow_secret_risk = options.allow_secret_risk;
     let override_reason = options.override_reason.clone();
+    let allow_resolution_risk = options.allow_resolution_risk;
+    let resolution_risk_reason = options.resolution_risk_reason.clone();
     let method = if options.run_label.is_some() || !options.argv.is_empty() {
         let input = agent_accept_run_input(workspace, options)?;
         ApiMethod::AgentAcceptRun {
@@ -3269,6 +3593,8 @@ fn accept_agent_via_daemon(
             output_path: output.map(|path| path.to_string_lossy().to_string()),
             allow_secret_risk,
             override_reason,
+            allow_resolution_risk,
+            resolution_risk_reason,
             allow_command_risk: input.allow_command_risk,
             command_risk_reason: input.command_risk_reason,
         }
@@ -3286,6 +3612,8 @@ fn accept_agent_via_daemon(
             output_path: output.map(|path| path.to_string_lossy().to_string()),
             allow_secret_risk,
             override_reason,
+            allow_resolution_risk,
+            resolution_risk_reason,
         }
     };
 

@@ -1,10 +1,11 @@
 use anvics_core::{
     AgentAcceptance, AgentCheckpoint, AgentContextPack, AgentFinish, AgentInstructionFile,
     AgentInstructionTarget, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentRecovery,
-    AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision,
-    CoordinationStatus, EvidenceRecord, FileEffect, NativePublication, ProjectionRequest,
-    RepoDoctorReport, RepositoryEvent, RepositoryManifest, ReviewProjection, RiskFinding, RiskScan,
-    SourceSnapshot, WorkThread, WorkspaceView,
+    AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision, ConflictAnalysis,
+    ConflictPreparation, CoordinationStatus, EvidenceRecord, FileEffect, NativePublication,
+    ProjectionRequest, RepoDoctorReport, RepositoryEvent, RepositoryManifest,
+    ResolutionVerification, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread,
+    WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +123,21 @@ pub enum ApiMethod {
         task: Option<String>,
         agent_command: Option<String>,
     },
+    ConflictAnalyze {
+        reviews: Vec<String>,
+    },
+    ConflictPrepare {
+        reviews: Vec<String>,
+        title: Option<String>,
+        task: Option<String>,
+        agent_command: Option<String>,
+    },
+    ConflictStatus {
+        workspace: String,
+    },
+    ConflictVerify {
+        workspace: String,
+    },
     AgentEnter {
         workspace: String,
         name: String,
@@ -148,6 +164,9 @@ pub enum ApiMethod {
         output_path: Option<String>,
         allow_secret_risk: bool,
         override_reason: Option<String>,
+        #[serde(default)]
+        allow_resolution_risk: bool,
+        resolution_risk_reason: Option<String>,
     },
     AgentAcceptRun {
         workspace: String,
@@ -164,6 +183,9 @@ pub enum ApiMethod {
         output_path: Option<String>,
         allow_secret_risk: bool,
         override_reason: Option<String>,
+        #[serde(default)]
+        allow_resolution_risk: bool,
+        resolution_risk_reason: Option<String>,
         #[serde(default)]
         allow_command_risk: bool,
         command_risk_reason: Option<String>,
@@ -213,6 +235,9 @@ pub enum ApiMethod {
         review: String,
         allow_secret_risk: bool,
         override_reason: Option<String>,
+        #[serde(default)]
+        allow_resolution_risk: bool,
+        resolution_risk_reason: Option<String>,
     },
     RiskScan {
         review: String,
@@ -350,6 +375,20 @@ pub enum ApiResult {
     },
     AgentPrepare {
         preparation: Box<AgentPreparation>,
+    },
+    ConflictAnalyze {
+        analysis: Box<ConflictAnalysis>,
+        markdown_path: String,
+        markdown: String,
+    },
+    ConflictPrepare {
+        preparation: Box<ConflictPreparation>,
+    },
+    ConflictStatus {
+        verification: Box<ResolutionVerification>,
+    },
+    ConflictVerify {
+        verification: Box<ResolutionVerification>,
     },
     AgentEnter {
         status: Box<CoordinationStatus>,
@@ -530,6 +569,8 @@ mod tests {
                 review: "review-1".to_owned(),
                 allow_secret_risk: false,
                 override_reason: None,
+                allow_resolution_risk: false,
+                resolution_risk_reason: None,
             },
             ApiMethod::RiskScan {
                 review: "review-1".to_owned(),
@@ -550,6 +591,21 @@ mod tests {
                 title: Some("Resolve".to_owned()),
                 task: Some("Combine candidates".to_owned()),
                 agent_command: Some("cargo run -q -p anvics-cli --bin anvics --".to_owned()),
+            },
+            ApiMethod::ConflictAnalyze {
+                reviews: vec!["review-1".to_owned(), "review-2".to_owned()],
+            },
+            ApiMethod::ConflictPrepare {
+                reviews: vec!["review-1".to_owned(), "review-2".to_owned()],
+                title: Some("Resolve".to_owned()),
+                task: Some("Combine candidates".to_owned()),
+                agent_command: None,
+            },
+            ApiMethod::ConflictStatus {
+                workspace: "workspace-1".to_owned(),
+            },
+            ApiMethod::ConflictVerify {
+                workspace: "workspace-1".to_owned(),
             },
             ApiMethod::AgentEnter {
                 workspace: "workspace-1".to_owned(),
@@ -610,6 +666,8 @@ mod tests {
                 output_path: Some("accepted.patch".to_owned()),
                 allow_secret_risk: false,
                 override_reason: None,
+                allow_resolution_risk: false,
+                resolution_risk_reason: None,
             },
             ApiMethod::AgentAcceptRun {
                 workspace: "workspace-1".to_owned(),
@@ -627,6 +685,8 @@ mod tests {
                 output_path: Some("accepted.patch".to_owned()),
                 allow_secret_risk: true,
                 override_reason: Some("fixture false positive".to_owned()),
+                allow_resolution_risk: true,
+                resolution_risk_reason: Some("operator accepted tradeoff".to_owned()),
             },
             ApiMethod::LegacyGitExport {
                 publication: "publication-1".to_owned(),
@@ -710,6 +770,7 @@ mod tests {
             task: "task".to_owned(),
             base_snapshot: base_snapshot.clone(),
             source_review_ids: Vec::new(),
+            conflict_analysis_id: None,
             status: WorkThreadStatus::Active,
             created_at: "2026-05-28T00:00:02Z".to_owned(),
         };
@@ -786,6 +847,7 @@ mod tests {
             base_snapshot: base_snapshot.clone(),
             final_snapshot: final_snapshot.clone(),
             source_review_ids: Vec::new(),
+            conflict_analysis_id: None,
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -866,6 +928,30 @@ mod tests {
             workspace: workspace.clone(),
             packet_path: ".anvics/agent-packets/thread.md".to_owned(),
             agent_command: Some("anvics".to_owned()),
+        };
+        let conflict_analysis = ConflictAnalysis {
+            id: anvics_core::ConflictAnalysisId::new(),
+            base_snapshot: base_snapshot.clone(),
+            input_reviews: Vec::new(),
+            path_cases: Vec::new(),
+            created_at: "2026-05-28T00:00:06Z".to_owned(),
+        };
+        let conflict_preparation = ConflictPreparation {
+            analysis: conflict_analysis.clone(),
+            analysis_markdown_path: ".anvics/conflicts/conflict.md".to_owned(),
+            preparation: preparation.clone(),
+        };
+        let resolution_verification = ResolutionVerification {
+            workspace_id: workspace.id.clone(),
+            thread_id: thread.id.clone(),
+            conflict_analysis_id: Some(conflict_analysis.id.clone()),
+            passed: true,
+            findings: Vec::new(),
+            current_changed_paths: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
+            created_at: "2026-05-28T00:00:06Z".to_owned(),
         };
         let launch_prompt = AgentLaunchPrompt {
             tool: AgentLaunchTool::Codex,
@@ -1061,6 +1147,20 @@ mod tests {
             },
             ApiResult::AgentPrepare {
                 preparation: Box::new(preparation),
+            },
+            ApiResult::ConflictAnalyze {
+                analysis: Box::new(conflict_analysis),
+                markdown_path: ".anvics/conflicts/conflict.md".to_owned(),
+                markdown: "# Conflict Analysis".to_owned(),
+            },
+            ApiResult::ConflictPrepare {
+                preparation: Box::new(conflict_preparation),
+            },
+            ApiResult::ConflictStatus {
+                verification: Box::new(resolution_verification.clone()),
+            },
+            ApiResult::ConflictVerify {
+                verification: Box::new(resolution_verification),
             },
             ApiResult::AgentEnter {
                 status: Box::new(coordination.clone()),

@@ -4,15 +4,17 @@ use anvics_core::{
     AgentPreparation, AgentRecovery, AgentSession, AgentSessionId, AgentSessionStatus, AgentStatus,
     ChangeStatus, ChangeUnit, ChangeUnitId, ChangedPath, CommandEvent, CommandEventId,
     CommandExecutorKind, CommandPolicyClass, CommandPolicyDecision, CommandRuntimeMetrics,
-    CommandWorkerRequest, CommandWorkerResponse, CoordinationStatus, EvidenceRecord,
-    EvidenceRecordId, EvidenceSummary, FileEffect, FileEffectClassification, FileEffectLabel,
-    FileEffectProvenance, FileEffectSet, FileEffectSetId, NativePublication, NativePublicationId,
-    ObjectId, OverlayEntry, PolicyOverride, PolicyOverrideId, ProjectionCapabilities,
-    ProjectionKind, ProjectionRequest, RelatedWork, RepoDoctorReport, RepositoryEvent,
-    RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest, ReviewProjection,
-    ReviewProjectionId, RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity,
-    RiskTargetKind, SourceSnapshot, SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread,
-    WorkThreadId, WorkThreadStatus, WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    CommandWorkerRequest, CommandWorkerResponse, ConflictAnalysis, ConflictAnalysisId,
+    ConflictCaseKind, ConflictHunkCase, ConflictInputReview, ConflictPathCase, ConflictPreparation,
+    CoordinationStatus, EvidenceRecord, EvidenceRecordId, EvidenceSummary, FileEffect,
+    FileEffectClassification, FileEffectLabel, FileEffectProvenance, FileEffectSet,
+    FileEffectSetId, MergeSafety, NativePublication, NativePublicationId, ObjectId, OverlayEntry,
+    PolicyOverride, PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest,
+    RelatedWork, RepoDoctorReport, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
+    RepositoryId, RepositoryManifest, ResolutionVerification, ReviewProjection, ReviewProjectionId,
+    RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
+    SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
+    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -44,6 +46,8 @@ pub enum StoreError {
     WorkspaceNotFound(String),
     #[error("review does not exist: {0}")]
     ReviewNotFound(String),
+    #[error("conflict analysis does not exist: {0}")]
+    ConflictAnalysisNotFound(String),
     #[error("agent resolve needs at least two source reviews")]
     NotEnoughSourceReviews,
     #[error("source reviews must share one base snapshot")]
@@ -90,12 +94,16 @@ pub enum StoreError {
     CommandPolicyBlocked { policy_class: CommandPolicyClass },
     #[error("publication blocked by {finding_count} unresolved secret-risk finding(s); rerun with --allow-secret-risk --override-reason <reason> to proceed")]
     PublicationBlockedSecretRisk { finding_count: usize },
+    #[error("publication blocked by unresolved resolution risk(s): {findings}; rerun with --allow-resolution-risk --resolution-risk-reason <reason> to proceed")]
+    PublicationBlockedResolutionRisk { findings: String },
     #[error("override reason must not be empty")]
     EmptyOverrideReason,
     #[error("command risk reason must not be empty")]
     EmptyCommandRiskReason,
     #[error("--command-risk-reason requires --allow-command-risk")]
     CommandRiskReasonWithoutOverride,
+    #[error("--resolution-risk-reason requires --allow-resolution-risk")]
+    ResolutionRiskReasonWithoutOverride,
     #[error("agent instruction file already exists: {0}; rerun with force to overwrite")]
     AgentInstructionExists(PathBuf),
     #[error("review {review_id} does not belong to thread {thread_id}")]
@@ -220,6 +228,8 @@ struct EvidenceConfig {
 pub struct PublicationOptions {
     pub allow_secret_risk: bool,
     pub override_reason: Option<String>,
+    pub allow_resolution_risk: bool,
+    pub resolution_risk_reason: Option<String>,
 }
 
 impl AnvicsStore {
@@ -238,6 +248,7 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("workspaces"))?;
         fs::create_dir_all(anvics_dir.join("evidence"))?;
         fs::create_dir_all(anvics_dir.join("reviews"))?;
+        fs::create_dir_all(anvics_dir.join("conflicts"))?;
         fs::create_dir_all(anvics_dir.join("publications"))?;
         fs::create_dir_all(anvics_dir.join("agent-packets"))?;
         fs::create_dir_all(anvics_dir.join("agent-checkpoints"))?;
@@ -405,7 +416,7 @@ impl AnvicsStore {
 
     pub fn create_thread(&self, title: String, task: String) -> Result<WorkThread> {
         let base_snapshot = self.current_snapshot()?.id;
-        self.create_thread_on_base(title, task, base_snapshot, Vec::new())
+        self.create_thread_on_base(title, task, base_snapshot, Vec::new(), None)
     }
 
     fn create_thread_on_base(
@@ -414,6 +425,7 @@ impl AnvicsStore {
         task: String,
         base_snapshot: SourceSnapshotId,
         source_review_ids: Vec<ReviewProjectionId>,
+        conflict_analysis_id: Option<ConflictAnalysisId>,
     ) -> Result<WorkThread> {
         let thread = WorkThread {
             id: WorkThreadId::new(),
@@ -421,6 +433,7 @@ impl AnvicsStore {
             task,
             base_snapshot,
             source_review_ids,
+            conflict_analysis_id,
             status: WorkThreadStatus::Active,
             created_at: now_rfc3339()?,
         };
@@ -880,6 +893,7 @@ impl AnvicsStore {
             base_snapshot: thread.base_snapshot.clone(),
             final_snapshot,
             source_review_ids: thread.source_review_ids.clone(),
+            conflict_analysis_id: thread.conflict_analysis_id.clone(),
             changed_paths,
             file_effects,
             change_units,
@@ -888,9 +902,10 @@ impl AnvicsStore {
             created_at: now_rfc3339()?,
         };
         write_json_pretty(self.review_path(review.id.as_str()), &review)?;
+        let resolution = self.review_resolution_verification(&thread, &review)?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
-            render_review(&self.root, &review, &thread, &[], &[]),
+            render_review(&self.root, &review, &thread, &[], &[], resolution.as_ref()),
         )?;
         self.append_event(
             RepositoryEventKind::ReviewCreated,
@@ -1072,6 +1087,27 @@ impl AnvicsStore {
                 });
             }
         }
+        if thread.conflict_analysis_id.is_some() {
+            let verification = self.verify_review_resolution(&thread, &review)?;
+            if !verification.passed {
+                if options.allow_resolution_risk {
+                    self.record_policy_override(
+                        review_id,
+                        options
+                            .resolution_risk_reason
+                            .map(|reason| format!("resolution risk override: {reason}")),
+                    )?;
+                } else {
+                    return Err(StoreError::PublicationBlockedResolutionRisk {
+                        findings: verification.findings.join("; "),
+                    });
+                }
+            } else if options.resolution_risk_reason.is_some() {
+                return Err(StoreError::ResolutionRiskReasonWithoutOverride);
+            }
+        } else if options.resolution_risk_reason.is_some() {
+            return Err(StoreError::ResolutionRiskReasonWithoutOverride);
+        }
 
         let publication = NativePublication {
             id: NativePublicationId::new(),
@@ -1122,10 +1158,133 @@ impl AnvicsStore {
         task: Option<String>,
         agent_command: Option<String>,
     ) -> Result<AgentPreparation> {
+        Ok(self
+            .prepare_conflict_resolution(review_ids, title, task, agent_command)?
+            .preparation)
+    }
+
+    pub fn create_conflict_analysis(&self, review_ids: Vec<String>) -> Result<ConflictAnalysis> {
+        let reviews = self.load_conflict_reviews(review_ids)?;
+        let base_snapshot = reviews[0].base_snapshot.clone();
+        let mut input_reviews = Vec::new();
+        let mut changed_by_path: BTreeMap<String, Vec<(ReviewProjection, ChangeStatus)>> =
+            BTreeMap::new();
+
+        for review in &reviews {
+            let thread = self.show_thread(review.thread_id.as_str())?;
+            input_reviews.push(ConflictInputReview {
+                review_id: review.id.clone(),
+                thread_id: review.thread_id.clone(),
+                title: thread.title,
+                final_snapshot: review.final_snapshot.clone(),
+                changed_paths: review.changed_paths.clone(),
+                evidence_summaries: review
+                    .evidence
+                    .iter()
+                    .map(|evidence| evidence.summary.clone())
+                    .collect(),
+            });
+            for changed in &review.changed_paths {
+                changed_by_path
+                    .entry(changed.path.clone())
+                    .or_default()
+                    .push((review.clone(), changed.status.clone()));
+            }
+        }
+
+        let mut path_cases = Vec::new();
+        for (path, participants) in changed_by_path {
+            path_cases.push(self.classify_conflict_path_case(
+                &base_snapshot,
+                path,
+                participants,
+            )?);
+        }
+
+        let analysis = ConflictAnalysis {
+            id: ConflictAnalysisId::new(),
+            base_snapshot,
+            input_reviews,
+            path_cases,
+            created_at: now_rfc3339()?,
+        };
+        write_json_pretty(self.conflict_analysis_path(analysis.id.as_str()), &analysis)?;
+        fs::write(
+            self.conflict_analysis_markdown_path(analysis.id.as_str()),
+            render_conflict_analysis_markdown(&self.root, &analysis),
+        )?;
+        self.append_event(
+            RepositoryEventKind::ConflictAnalysisCreated,
+            Some(analysis.id.to_string()),
+        )?;
+        Ok(analysis)
+    }
+
+    pub fn show_conflict_analysis(&self, id: &str) -> Result<ConflictAnalysis> {
+        let path = self.conflict_analysis_path(id);
+        if !path.exists() {
+            return Err(StoreError::ConflictAnalysisNotFound(id.to_owned()));
+        }
+        read_json(path)
+    }
+
+    pub fn conflict_analysis_markdown(&self, id: &str) -> Result<String> {
+        let path = self.conflict_analysis_markdown_path(id);
+        if !path.exists() {
+            return Err(StoreError::ConflictAnalysisNotFound(id.to_owned()));
+        }
+        Ok(fs::read_to_string(path)?)
+    }
+
+    pub fn prepare_conflict_resolution(
+        &self,
+        review_ids: Vec<String>,
+        title: Option<String>,
+        task: Option<String>,
+        agent_command: Option<String>,
+    ) -> Result<ConflictPreparation> {
+        let reviews = self.load_conflict_reviews(review_ids.clone())?;
+        let analysis = self.create_conflict_analysis(review_ids)?;
+        let source_review_ids = reviews
+            .iter()
+            .map(|review| review.id.clone())
+            .collect::<Vec<_>>();
+        let title = title.unwrap_or_else(|| format!("Resolve {} candidate reviews", reviews.len()));
+        let task = render_resolution_task(self, &reviews, task, Some(&analysis))?;
+        let thread = self.create_thread_on_base(
+            title,
+            task,
+            analysis.base_snapshot.clone(),
+            source_review_ids,
+            Some(analysis.id.clone()),
+        )?;
+        let workspace = self.create_workspace(thread.id.as_str())?;
+        self.apply_conflict_safe_changes(&analysis, &workspace)?;
+        let preparation = self.write_agent_packet(&thread, &workspace, agent_command)?;
+        Ok(ConflictPreparation {
+            analysis_markdown_path: self
+                .conflict_analysis_markdown_path(analysis.id.as_str())
+                .to_string_lossy()
+                .to_string(),
+            analysis,
+            preparation,
+        })
+    }
+
+    pub fn conflict_status(&self, workspace_id: &str) -> Result<ResolutionVerification> {
+        self.conflict_verify(workspace_id)
+    }
+
+    pub fn conflict_verify(&self, workspace_id: &str) -> Result<ResolutionVerification> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let thread = self.show_thread(workspace.thread_id.as_str())?;
+        self.verify_workspace_resolution(&thread, &workspace)
+    }
+
+    fn load_conflict_reviews(&self, review_ids: Vec<String>) -> Result<Vec<ReviewProjection>> {
         if review_ids.len() < 2 {
             return Err(StoreError::NotEnoughSourceReviews);
         }
-
         let mut reviews = Vec::new();
         for review_id in review_ids {
             reviews.push(self.show_review(&review_id)?);
@@ -1137,16 +1296,336 @@ impl AnvicsStore {
         {
             return Err(StoreError::SourceReviewBaseMismatch);
         }
+        Ok(reviews)
+    }
 
-        let source_review_ids = reviews
+    fn classify_conflict_path_case(
+        &self,
+        base_snapshot: &SourceSnapshotId,
+        path: String,
+        participants: Vec<(ReviewProjection, ChangeStatus)>,
+    ) -> Result<ConflictPathCase> {
+        let review_ids = participants
             .iter()
-            .map(|review| review.id.clone())
+            .map(|(review, _)| review.id.clone())
             .collect::<Vec<_>>();
-        let title = title.unwrap_or_else(|| format!("Resolve {} candidate reviews", reviews.len()));
-        let task = render_resolution_task(self, &reviews, task)?;
-        let thread = self.create_thread_on_base(title, task, base_snapshot, source_review_ids)?;
-        let workspace = self.create_workspace(thread.id.as_str())?;
-        self.write_agent_packet(&thread, &workspace, agent_command)
+        if participants.len() == 1 {
+            return Ok(ConflictPathCase {
+                path: path.clone(),
+                kind: ConflictCaseKind::IndependentPath,
+                safety: MergeSafety::AutoMergeable,
+                review_ids,
+                hunks: Vec::new(),
+                summary: format!("`{path}` changed by one candidate review."),
+            });
+        }
+
+        let statuses = participants
+            .iter()
+            .map(|(_, status)| status)
+            .collect::<Vec<_>>();
+        if statuses
+            .iter()
+            .any(|status| matches!(status, ChangeStatus::Deleted))
+            && statuses
+                .iter()
+                .any(|status| !matches!(status, ChangeStatus::Deleted))
+        {
+            return Ok(ConflictPathCase {
+                path: path.clone(),
+                kind: ConflictCaseKind::ModifyDelete,
+                safety: MergeSafety::NeedsResolution,
+                review_ids,
+                hunks: Vec::new(),
+                summary: format!("`{path}` is deleted by one candidate and changed by another."),
+            });
+        }
+        if statuses
+            .iter()
+            .all(|status| matches!(status, ChangeStatus::Added))
+        {
+            return Ok(ConflictPathCase {
+                path: path.clone(),
+                kind: ConflictCaseKind::AddAdd,
+                safety: MergeSafety::NeedsResolution,
+                review_ids,
+                hunks: Vec::new(),
+                summary: format!("`{path}` is independently added by multiple candidates."),
+            });
+        }
+
+        let mut hunks = Vec::new();
+        for (review, status) in &participants {
+            match status {
+                ChangeStatus::Deleted => {
+                    hunks.push(ConflictHunkCase {
+                        review_id: review.id.clone(),
+                        base_start: 1,
+                        base_end: 1,
+                        final_start: 0,
+                        final_end: 0,
+                    });
+                }
+                ChangeStatus::Added | ChangeStatus::Modified => {
+                    let Some(base_bytes) = self.file_bytes_at_snapshot(base_snapshot, &path)?
+                    else {
+                        return Ok(ConflictPathCase {
+                            path: path.clone(),
+                            kind: ConflictCaseKind::BinaryOrUnknown,
+                            safety: MergeSafety::Unknown,
+                            review_ids,
+                            hunks: Vec::new(),
+                            summary: format!("`{path}` has no shared text base."),
+                        });
+                    };
+                    let Some(final_bytes) =
+                        self.file_bytes_at_snapshot(&review.final_snapshot, &path)?
+                    else {
+                        return Ok(ConflictPathCase {
+                            path: path.clone(),
+                            kind: ConflictCaseKind::BinaryOrUnknown,
+                            safety: MergeSafety::Unknown,
+                            review_ids,
+                            hunks: Vec::new(),
+                            summary: format!("`{path}` has no comparable final text."),
+                        });
+                    };
+                    let Some(hunk) = detect_text_hunk(&review.id, &base_bytes, &final_bytes) else {
+                        return Ok(ConflictPathCase {
+                            path: path.clone(),
+                            kind: ConflictCaseKind::BinaryOrUnknown,
+                            safety: MergeSafety::Unknown,
+                            review_ids,
+                            hunks: Vec::new(),
+                            summary: format!("`{path}` is binary or not safely line-comparable."),
+                        });
+                    };
+                    hunks.push(hunk);
+                }
+            }
+        }
+
+        let overlaps = hunk_ranges_overlap(&hunks);
+        Ok(ConflictPathCase {
+            path: path.clone(),
+            kind: if overlaps {
+                ConflictCaseKind::SamePathOverlappingHunks
+            } else {
+                ConflictCaseKind::SamePathNonOverlappingHunks
+            },
+            safety: if overlaps {
+                MergeSafety::NeedsResolution
+            } else {
+                MergeSafety::AutoMergeable
+            },
+            review_ids,
+            hunks,
+            summary: if overlaps {
+                format!("`{path}` has overlapping line changes and needs semantic resolution.")
+            } else {
+                format!("`{path}` has non-overlapping line changes that can be auto-applied.")
+            },
+        })
+    }
+
+    fn apply_conflict_safe_changes(
+        &self,
+        analysis: &ConflictAnalysis,
+        workspace: &WorkspaceView,
+    ) -> Result<()> {
+        let workspace_root = Path::new(&workspace.materialized_path);
+        for path_case in &analysis.path_cases {
+            if path_case.safety != MergeSafety::AutoMergeable {
+                continue;
+            }
+            match path_case.kind {
+                ConflictCaseKind::IndependentPath => {
+                    let Some(review_id) = path_case.review_ids.first() else {
+                        continue;
+                    };
+                    self.apply_review_path_effect(review_id, &path_case.path, workspace_root)?;
+                }
+                ConflictCaseKind::SamePathNonOverlappingHunks => {
+                    let Some(bytes) = self.auto_merge_text_path(analysis, path_case)? else {
+                        continue;
+                    };
+                    let target = workspace_root.join(&path_case.path);
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(target, bytes)?;
+                }
+                ConflictCaseKind::SamePathOverlappingHunks
+                | ConflictCaseKind::ModifyDelete
+                | ConflictCaseKind::AddAdd
+                | ConflictCaseKind::BinaryOrUnknown => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_review_path_effect(
+        &self,
+        review_id: &ReviewProjectionId,
+        path: &str,
+        workspace_root: &Path,
+    ) -> Result<()> {
+        let review = self.show_review(review_id.as_str())?;
+        let target = workspace_root.join(path);
+        match self.file_bytes_at_snapshot(&review.final_snapshot, path)? {
+            Some(bytes) => {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(target, bytes)?;
+            }
+            None => {
+                if target.is_dir() {
+                    fs::remove_dir_all(target)?;
+                } else if target.exists() {
+                    fs::remove_file(target)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn auto_merge_text_path(
+        &self,
+        analysis: &ConflictAnalysis,
+        path_case: &ConflictPathCase,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(base_bytes) =
+            self.file_bytes_at_snapshot(&analysis.base_snapshot, &path_case.path)?
+        else {
+            return Ok(None);
+        };
+        let Ok(base_text) = String::from_utf8(base_bytes) else {
+            return Ok(None);
+        };
+        let mut lines = split_lines_preserve(&base_text);
+        let mut edits = Vec::new();
+        for hunk in &path_case.hunks {
+            let review = self.show_review(hunk.review_id.as_str())?;
+            let Some(final_bytes) =
+                self.file_bytes_at_snapshot(&review.final_snapshot, &path_case.path)?
+            else {
+                return Ok(None);
+            };
+            let Ok(final_text) = String::from_utf8(final_bytes) else {
+                return Ok(None);
+            };
+            let final_lines = split_lines_preserve(&final_text);
+            edits.push(TextEdit {
+                base_start: hunk.base_start as usize,
+                base_end: hunk.base_end as usize,
+                replacement: final_lines[hunk.final_start as usize..hunk.final_end as usize]
+                    .to_vec(),
+            });
+        }
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.base_start));
+        for edit in edits {
+            lines.splice(edit.base_start..edit.base_end, edit.replacement);
+        }
+        Ok(Some(lines.concat().into_bytes()))
+    }
+
+    fn verify_workspace_resolution(
+        &self,
+        thread: &WorkThread,
+        workspace: &WorkspaceView,
+    ) -> Result<ResolutionVerification> {
+        let mut findings = Vec::new();
+        let current_changed_paths = self.workspace_diff(workspace.id.as_str())?;
+        let Some(analysis_id) = &thread.conflict_analysis_id else {
+            return Ok(ResolutionVerification {
+                workspace_id: workspace.id.clone(),
+                thread_id: thread.id.clone(),
+                conflict_analysis_id: None,
+                passed: true,
+                findings,
+                current_changed_paths,
+                created_at: now_rfc3339()?,
+            });
+        };
+        let analysis = self.show_conflict_analysis(analysis_id.as_str())?;
+        let candidate_paths = analysis
+            .path_cases
+            .iter()
+            .map(|case| case.path.as_str())
+            .collect::<BTreeSet<_>>();
+        for changed in &current_changed_paths {
+            if !candidate_paths.contains(changed.path.as_str()) {
+                findings.push(format!("unrelated path changed: `{}`", changed.path));
+            }
+        }
+        for path_case in &analysis.path_cases {
+            if path_case.safety == MergeSafety::AutoMergeable {
+                if !self.workspace_preserves_safe_case(workspace, &analysis, path_case)? {
+                    findings.push(format!(
+                        "auto-mergeable change not preserved: `{}`",
+                        path_case.path
+                    ));
+                }
+            } else {
+                let touched = current_changed_paths
+                    .iter()
+                    .any(|changed| changed.path == path_case.path);
+                if !touched {
+                    findings.push(format!(
+                        "unresolved conflict case has no final change: `{}`",
+                        path_case.path
+                    ));
+                }
+            }
+        }
+        if thread.source_review_ids.len() < 2 {
+            findings.push("resolver thread is missing source review links".to_owned());
+        }
+        let evidence_count = self.thread_evidence(&thread.id)?.len();
+        if evidence_count == 0 {
+            findings.push("resolver thread has no compact evidence yet".to_owned());
+        }
+        Ok(ResolutionVerification {
+            workspace_id: workspace.id.clone(),
+            thread_id: thread.id.clone(),
+            conflict_analysis_id: Some(analysis.id),
+            passed: findings.is_empty(),
+            findings,
+            current_changed_paths,
+            created_at: now_rfc3339()?,
+        })
+    }
+
+    fn workspace_preserves_safe_case(
+        &self,
+        workspace: &WorkspaceView,
+        analysis: &ConflictAnalysis,
+        path_case: &ConflictPathCase,
+    ) -> Result<bool> {
+        let expected = match path_case.kind {
+            ConflictCaseKind::IndependentPath => {
+                let Some(review_id) = path_case.review_ids.first() else {
+                    return Ok(true);
+                };
+                let review = self.show_review(review_id.as_str())?;
+                self.file_bytes_at_snapshot(&review.final_snapshot, &path_case.path)?
+            }
+            ConflictCaseKind::SamePathNonOverlappingHunks => {
+                self.auto_merge_text_path(analysis, path_case)?
+            }
+            ConflictCaseKind::SamePathOverlappingHunks
+            | ConflictCaseKind::ModifyDelete
+            | ConflictCaseKind::AddAdd
+            | ConflictCaseKind::BinaryOrUnknown => return Ok(true),
+        };
+        let actual_path = Path::new(&workspace.materialized_path).join(&path_case.path);
+        let actual = if actual_path.exists() {
+            Some(fs::read(actual_path)?)
+        } else {
+            None
+        };
+        Ok(actual == expected)
     }
 
     fn write_agent_packet(
@@ -1858,6 +2337,14 @@ impl AnvicsStore {
         self.anvics_dir.join("reviews").join(format!("{id}.md"))
     }
 
+    fn conflict_analysis_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir.join("conflicts").join(format!("{id}.json"))
+    }
+
+    fn conflict_analysis_markdown_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir.join("conflicts").join(format!("{id}.md"))
+    }
+
     fn publication_path(&self, id: &str) -> PathBuf {
         self.anvics_dir
             .join("publications")
@@ -2041,9 +2528,52 @@ impl AnvicsStore {
         let overrides = self.list_review_policy_overrides(review.id.as_str())?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
-            render_review(&self.root, review, thread, &scans, &overrides),
+            render_review(
+                &self.root,
+                review,
+                thread,
+                &scans,
+                &overrides,
+                self.review_resolution_verification(thread, review)?
+                    .as_ref(),
+            ),
         )?;
         Ok(())
+    }
+
+    fn review_resolution_verification(
+        &self,
+        thread: &WorkThread,
+        review: &ReviewProjection,
+    ) -> Result<Option<ResolutionVerification>> {
+        if thread.conflict_analysis_id.is_none() {
+            return Ok(None);
+        }
+        let workspace = self
+            .latest_thread_workspace(&thread.id)?
+            .filter(|workspace| workspace.latest_snapshot.as_ref() == Some(&review.final_snapshot));
+        workspace
+            .map(|workspace| self.verify_workspace_resolution(thread, &workspace))
+            .transpose()
+    }
+
+    fn verify_review_resolution(
+        &self,
+        thread: &WorkThread,
+        review: &ReviewProjection,
+    ) -> Result<ResolutionVerification> {
+        if let Some(verification) = self.review_resolution_verification(thread, review)? {
+            return Ok(verification);
+        }
+        Ok(ResolutionVerification {
+            workspace_id: WorkspaceViewId::new(),
+            thread_id: thread.id.clone(),
+            conflict_analysis_id: thread.conflict_analysis_id.clone(),
+            passed: false,
+            findings: vec!["resolver workspace for review snapshot is unavailable".to_owned()],
+            current_changed_paths: review.changed_paths.clone(),
+            created_at: now_rfc3339()?,
+        })
     }
 
     fn risk_scan_for_publication(&self, review_id: &str) -> Result<RiskScan> {
@@ -3245,6 +3775,13 @@ struct WorkspaceFileStats {
     byte_count: u64,
 }
 
+#[derive(Clone, Debug)]
+struct TextEdit {
+    base_start: usize,
+    base_end: usize,
+    replacement: Vec<String>,
+}
+
 fn workspace_file_stats(source_root: &Path) -> Result<WorkspaceFileStats> {
     let mut stats = WorkspaceFileStats {
         file_count: 0,
@@ -3255,6 +3792,77 @@ fn workspace_file_stats(source_root: &Path) -> Result<WorkspaceFileStats> {
         stats.byte_count = stats.byte_count.saturating_add(fs::metadata(file)?.len());
     }
     Ok(stats)
+}
+
+fn detect_text_hunk(
+    review_id: &ReviewProjectionId,
+    base_bytes: &[u8],
+    final_bytes: &[u8],
+) -> Option<ConflictHunkCase> {
+    let base_text = std::str::from_utf8(base_bytes).ok()?;
+    let final_text = std::str::from_utf8(final_bytes).ok()?;
+    let base_lines = split_lines_preserve(base_text);
+    let final_lines = split_lines_preserve(final_text);
+
+    let mut prefix = 0;
+    while prefix < base_lines.len()
+        && prefix < final_lines.len()
+        && base_lines[prefix] == final_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix < base_lines.len().saturating_sub(prefix)
+        && suffix < final_lines.len().saturating_sub(prefix)
+        && base_lines[base_lines.len() - 1 - suffix] == final_lines[final_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    Some(ConflictHunkCase {
+        review_id: review_id.clone(),
+        base_start: prefix as u32,
+        base_end: (base_lines.len() - suffix) as u32,
+        final_start: prefix as u32,
+        final_end: (final_lines.len() - suffix) as u32,
+    })
+}
+
+fn hunk_ranges_overlap(hunks: &[ConflictHunkCase]) -> bool {
+    for (index, left) in hunks.iter().enumerate() {
+        for right in &hunks[index + 1..] {
+            if ranges_overlap_or_same_insert(
+                left.base_start as usize,
+                left.base_end as usize,
+                right.base_start as usize,
+                right.base_end as usize,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn ranges_overlap_or_same_insert(
+    left_start: usize,
+    left_end: usize,
+    right_start: usize,
+    right_end: usize,
+) -> bool {
+    if left_start == left_end && right_start == right_end {
+        return left_start == right_start;
+    }
+    left_start < right_end && right_start < left_end
+}
+
+fn split_lines_preserve(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split_inclusive('\n').map(str::to_owned).collect()
+    }
 }
 
 fn is_skipped(path: &Path) -> bool {
@@ -3522,6 +4130,7 @@ fn render_resolution_task(
     store: &AnvicsStore,
     reviews: &[ReviewProjection],
     operator_task: Option<String>,
+    analysis: Option<&ConflictAnalysis>,
 ) -> Result<String> {
     let mut task = String::new();
     task.push_str(
@@ -3534,6 +4143,41 @@ fn render_resolution_task(
             task.push_str(operator_task);
             task.push_str("\n\n");
         }
+    }
+
+    if let Some(analysis) = analysis {
+        task.push_str("## Deterministic Conflict Analysis\n\n");
+        task.push_str(&format!(
+            "- Analysis: `{}`\n- Markdown: `{}`\n- Base snapshot: `{}`\n",
+            analysis.id,
+            store
+                .conflict_analysis_markdown_path(analysis.id.as_str())
+                .display(),
+            analysis.base_snapshot
+        ));
+        let safe_count = analysis
+            .path_cases
+            .iter()
+            .filter(|case| case.safety == MergeSafety::AutoMergeable)
+            .count();
+        let unresolved_count = analysis
+            .path_cases
+            .iter()
+            .filter(|case| case.safety != MergeSafety::AutoMergeable)
+            .count();
+        task.push_str(&format!(
+            "- Safe auto-applied cases: {safe_count}\n- Unresolved cases: {unresolved_count}\n\n"
+        ));
+        task.push_str("Safe changes have already been applied into this resolver workspace. Resolve only the unresolved cases below unless verification reports a problem.\n\n");
+        for path_case in &analysis.path_cases {
+            if path_case.safety != MergeSafety::AutoMergeable {
+                task.push_str(&format!(
+                    "- {:?} {:?}: `{}` - {}\n",
+                    path_case.safety, path_case.kind, path_case.path, path_case.summary
+                ));
+            }
+        }
+        task.push('\n');
     }
 
     task.push_str("## Candidate Reviews\n\n");
@@ -3581,11 +4225,92 @@ fn render_resolution_task(
 
     task.push_str("## Resolution Expectations\n\n");
     task.push_str("- Read the candidate review markdown files before editing.\n");
-    task.push_str("- Preserve compatible intent from all candidates when possible.\n");
-    task.push_str("- If candidate intents conflict, choose the simplest behavior that satisfies the operator instructions and explain the tradeoff in your final report.\n");
+    task.push_str("- Preserve all deterministic safe changes that Anvics already applied.\n");
+    task.push_str("- For unresolved cases, make the smallest semantic choice that satisfies the operator instructions and explain the tradeoff in your final report.\n");
+    task.push_str("- Use `conflict status --workspace <workspace-id>` and `conflict verify --workspace <workspace-id>` before acceptance.\n");
     task.push_str("- Use Anvics `workspace diff`, checkpoint before risky edits, run coordination status before finishing, and report compact verification evidence.\n");
 
     Ok(task)
+}
+
+fn render_conflict_analysis_markdown(repo_root: &Path, analysis: &ConflictAnalysis) -> String {
+    let repo = shell_quote(&display_path(repo_root));
+    let mut markdown = format!(
+        "# Conflict Analysis {}\n\n- Base snapshot: `{}`\n- Created: `{}`\n\n",
+        analysis.id, analysis.base_snapshot, analysis.created_at
+    );
+
+    markdown.push_str("## Candidate Reviews\n\n");
+    for input in &analysis.input_reviews {
+        markdown.push_str(&format!(
+            "- Review `{}` from thread `{}` ({})\n  - Markdown: `{}`\n  - Final snapshot: `{}`\n",
+            input.review_id,
+            input.thread_id,
+            input.title,
+            repo_root
+                .join(".anvics")
+                .join("reviews")
+                .join(format!("{}.md", input.review_id))
+                .display(),
+            input.final_snapshot
+        ));
+        if !input.evidence_summaries.is_empty() {
+            markdown.push_str("  - Evidence:\n");
+            for summary in &input.evidence_summaries {
+                markdown.push_str(&format!("    - {summary}\n"));
+            }
+        }
+    }
+
+    markdown.push_str("\n## Safe Merge Candidates\n\n");
+    let mut safe_seen = false;
+    for path_case in &analysis.path_cases {
+        if path_case.safety == MergeSafety::AutoMergeable {
+            safe_seen = true;
+            markdown.push_str(&format!(
+                "- {:?}: `{}` - {}\n",
+                path_case.kind, path_case.path, path_case.summary
+            ));
+        }
+    }
+    if !safe_seen {
+        markdown.push_str("- None.\n");
+    }
+
+    markdown.push_str("\n## Conflict Cases\n\n");
+    let mut conflict_seen = false;
+    for path_case in &analysis.path_cases {
+        if path_case.safety != MergeSafety::AutoMergeable {
+            conflict_seen = true;
+            markdown.push_str(&format!(
+                "- {:?} {:?}: `{}` - {}\n",
+                path_case.safety, path_case.kind, path_case.path, path_case.summary
+            ));
+            if !path_case.hunks.is_empty() {
+                for hunk in &path_case.hunks {
+                    markdown.push_str(&format!(
+                        "  - Review `{}` base lines {}..{}, final lines {}..{}\n",
+                        hunk.review_id,
+                        hunk.base_start + 1,
+                        hunk.base_end,
+                        hunk.final_start + 1,
+                        hunk.final_end
+                    ));
+                }
+            }
+        }
+    }
+    if !conflict_seen {
+        markdown.push_str("- None.\n");
+    }
+
+    markdown.push_str("\n## Recommended Next Command\n\n");
+    markdown.push_str(&format!("```sh\nanvics --repo {repo} conflict prepare"));
+    for input in &analysis.input_reviews {
+        markdown.push_str(&format!(" --review {}", input.review_id));
+    }
+    markdown.push_str(" --title \"Resolve competing edits\" --task \"Preserve the best behavior from all candidates.\"\n```\n");
+    markdown
 }
 
 fn agent_command_prefix() -> String {
@@ -3864,6 +4589,7 @@ fn render_review(
     thread: &WorkThread,
     scans: &[RiskScan],
     overrides: &[PolicyOverride],
+    resolution: Option<&ResolutionVerification>,
 ) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let mut markdown = format!(
@@ -3900,6 +4626,36 @@ fn render_review(
                     .display()
             ));
         }
+    }
+
+    markdown.push_str("\n## Resolution Contract\n\n");
+    if let Some(conflict_analysis_id) = &review.conflict_analysis_id {
+        markdown.push_str(&format!("- Conflict analysis: `{conflict_analysis_id}`\n"));
+        if review.source_review_ids.is_empty() {
+            markdown.push_str("- Source reviews: missing.\n");
+        } else {
+            markdown.push_str("- Source reviews:");
+            for source_review_id in &review.source_review_ids {
+                markdown.push_str(&format!(" `{source_review_id}`"));
+            }
+            markdown.push('\n');
+        }
+        match resolution {
+            Some(verification) if verification.passed => {
+                markdown.push_str("- Verification: passed.\n");
+            }
+            Some(verification) => {
+                markdown.push_str("- Verification: failed or advisory findings remain.\n");
+                for finding in &verification.findings {
+                    markdown.push_str(&format!("  - {finding}\n"));
+                }
+            }
+            None => {
+                markdown.push_str("- Verification: unavailable for this review snapshot.\n");
+            }
+        }
+    } else {
+        markdown.push_str("- This review is not a resolver review.\n");
     }
 
     markdown.push_str("\n## File Effects\n\n");
@@ -4393,6 +5149,7 @@ mod tests {
             )
             .unwrap();
         let thread = store.show_thread(preparation.thread.id.as_str()).unwrap();
+        assert!(thread.conflict_analysis_id.is_some());
         assert_eq!(
             thread.source_review_ids,
             vec![
@@ -4411,6 +5168,7 @@ mod tests {
 
         let packet = fs::read_to_string(preparation.packet_path).unwrap();
         assert!(packet.contains("Keep both useful intents."));
+        assert!(packet.contains("Deterministic Conflict Analysis"));
         assert!(packet.contains(first_finish.review.id.as_str()));
         assert!(packet.contains(second_finish.review.id.as_str()));
         assert!(packet.contains("Candidate A"));
@@ -4438,8 +5196,13 @@ mod tests {
                 second_finish.review.id.clone()
             ]
         );
+        assert_eq!(
+            resolution_finish.review.conflict_analysis_id,
+            thread.conflict_analysis_id
+        );
         let markdown = fs::read_to_string(resolution_finish.review_markdown_path).unwrap();
         assert!(markdown.contains("## Source Reviews"));
+        assert!(markdown.contains("## Resolution Contract"));
         assert!(markdown.contains(first_finish.review_markdown_path.as_str()));
         assert!(markdown.contains(second_finish.review_markdown_path.as_str()));
     }
@@ -4507,6 +5270,288 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(mismatch, StoreError::SourceReviewBaseMismatch));
+    }
+
+    #[test]
+    fn conflict_analysis_classifies_and_prepare_applies_safe_changes() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("common.txt"), "one\ntwo\nthree\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+
+        let first = store
+            .prepare_agent("Candidate A".to_owned(), "Change first line".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("common.txt"),
+            "ONE\ntwo\nthree\n",
+        )
+        .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("a.txt"),
+            "from a\n",
+        )
+        .unwrap();
+        let first_finish = store
+            .finish_agent(
+                first.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate A verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let second = store
+            .prepare_agent("Candidate B".to_owned(), "Change last line".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("common.txt"),
+            "one\ntwo\nTHREE\n",
+        )
+        .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("b.txt"),
+            "from b\n",
+        )
+        .unwrap();
+        let second_finish = store
+            .finish_agent(
+                second.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate B verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let analysis = store
+            .create_conflict_analysis(vec![
+                first_finish.review.id.to_string(),
+                second_finish.review.id.to_string(),
+            ])
+            .unwrap();
+        assert!(analysis.path_cases.iter().any(|case| {
+            case.path == "common.txt"
+                && case.kind == ConflictCaseKind::SamePathNonOverlappingHunks
+                && case.safety == MergeSafety::AutoMergeable
+        }));
+        assert!(analysis.path_cases.iter().any(|case| {
+            case.path == "a.txt" && case.kind == ConflictCaseKind::IndependentPath
+        }));
+        let markdown = store
+            .conflict_analysis_markdown(analysis.id.as_str())
+            .unwrap();
+        assert!(markdown.contains("Safe Merge Candidates"));
+        assert!(markdown.contains("common.txt"));
+
+        let preparation = store
+            .prepare_conflict_resolution(
+                vec![
+                    first_finish.review.id.to_string(),
+                    second_finish.review.id.to_string(),
+                ],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let workspace_root = Path::new(&preparation.preparation.workspace.materialized_path);
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("common.txt")).unwrap(),
+            "ONE\ntwo\nTHREE\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("a.txt")).unwrap(),
+            "from a\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("b.txt")).unwrap(),
+            "from b\n"
+        );
+    }
+
+    #[test]
+    fn conflict_analysis_detects_true_conflict_cases() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        fs::write(dir.path().join("delete.txt"), "keep\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+
+        let first = store
+            .prepare_agent("Candidate A".to_owned(), "Edit alpha".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("app.txt"),
+            "ALPHA\nbeta\ngamma\n",
+        )
+        .unwrap();
+        fs::remove_file(Path::new(&first.workspace.materialized_path).join("delete.txt")).unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("same.txt"),
+            "from a\n",
+        )
+        .unwrap();
+        let first_finish = store
+            .finish_agent(
+                first.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate A verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let second = store
+            .prepare_agent(
+                "Candidate B".to_owned(),
+                "Edit alpha differently".to_owned(),
+            )
+            .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("app.txt"),
+            "alpha changed\nbeta\ngamma\n",
+        )
+        .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("delete.txt"),
+            "modified\n",
+        )
+        .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("same.txt"),
+            "from b\n",
+        )
+        .unwrap();
+        let second_finish = store
+            .finish_agent(
+                second.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate B verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let analysis = store
+            .create_conflict_analysis(vec![
+                first_finish.review.id.to_string(),
+                second_finish.review.id.to_string(),
+            ])
+            .unwrap();
+        assert!(analysis.path_cases.iter().any(|case| {
+            case.path == "app.txt"
+                && case.kind == ConflictCaseKind::SamePathOverlappingHunks
+                && case.safety == MergeSafety::NeedsResolution
+        }));
+        assert!(analysis.path_cases.iter().any(|case| {
+            case.path == "delete.txt" && case.kind == ConflictCaseKind::ModifyDelete
+        }));
+        assert!(analysis
+            .path_cases
+            .iter()
+            .any(|case| case.path == "same.txt" && case.kind == ConflictCaseKind::AddAdd));
+    }
+
+    #[test]
+    fn resolver_publication_blocks_lost_safe_change_until_override() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+
+        let first = store
+            .prepare_agent("Candidate A".to_owned(), "Add a".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("a.txt"),
+            "from a\n",
+        )
+        .unwrap();
+        let first_finish = store
+            .finish_agent(
+                first.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate A verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let second = store
+            .prepare_agent("Candidate B".to_owned(), "Add b".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("b.txt"),
+            "from b\n",
+        )
+        .unwrap();
+        let second_finish = store
+            .finish_agent(
+                second.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate B verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let preparation = store
+            .prepare_conflict_resolution(
+                vec![
+                    first_finish.review.id.to_string(),
+                    second_finish.review.id.to_string(),
+                ],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        fs::remove_file(
+            Path::new(&preparation.preparation.workspace.materialized_path).join("a.txt"),
+        )
+        .unwrap();
+        let finish = store
+            .finish_agent(
+                preparation.preparation.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "resolver verified".to_owned(),
+                None,
+            )
+            .unwrap();
+        let blocked = store
+            .create_publication(
+                preparation.preparation.thread.id.as_str(),
+                finish.review.id.as_str(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            blocked,
+            StoreError::PublicationBlockedResolutionRisk { .. }
+        ));
+
+        let publication = store
+            .create_publication_with_options(
+                preparation.preparation.thread.id.as_str(),
+                finish.review.id.as_str(),
+                PublicationOptions {
+                    allow_resolution_risk: true,
+                    resolution_risk_reason: Some(
+                        "operator accepted dropping candidate A".to_owned(),
+                    ),
+                    ..PublicationOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(publication.review_id, finish.review.id);
+        let markdown = store.review_markdown(finish.review.id.as_str()).unwrap();
+        assert!(markdown.contains("Resolution Contract"));
+        assert!(markdown.contains("operator accepted dropping candidate A"));
     }
 
     #[test]
@@ -6358,6 +7403,8 @@ mod tests {
                 PublicationOptions {
                     allow_secret_risk: true,
                     override_reason: Some("fixture secret is intentional".to_owned()),
+                    allow_resolution_risk: false,
+                    resolution_risk_reason: None,
                 },
             )
             .unwrap();
