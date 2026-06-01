@@ -407,7 +407,7 @@ fn agent_prepare_finish_and_legacy_patch_export_flow() {
     assert!(packet_text.contains("agent recover"));
     assert!(packet_text.contains("coordination status"));
     assert!(packet_text.contains("workspace diff"));
-    assert!(packet_text.contains("If you spawn subagents"));
+    assert!(packet_text.contains("Do not spawn or delegate to additional agents"));
     assert!(packet_text.contains("## Agent-Run Commands"));
     assert!(packet_text.contains("## Operator-Run Commands"));
     assert!(packet_text.contains("Do not run them as an agent"));

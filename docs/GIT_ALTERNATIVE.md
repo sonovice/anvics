@@ -198,7 +198,7 @@ Anvics should treat agent work as a first-class runtime object.
 Important primitives:
 
 - `AgentSession`: a running or completed agent execution with inputs, permissions, environment, trace, and output.
-- `WorkThread`: the task-level object that may contain multiple sessions, retries, subagents, and human edits.
+- `WorkThread`: the task-level object that may contain multiple sessions, retries, operator-approved delegated agents, and human edits.
 - `Attempt`: one run against a base state, with a plan, trace, snapshots, and result.
 - `SourceSnapshot`: immutable source tree state capture inside a work thread, not a publication object.
 - `WorkspaceView`: mutable or read-only API/filesystem view over a snapshot, implemented as a cheap overlay rather than a full repo copy.

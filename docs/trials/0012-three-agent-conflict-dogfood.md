@@ -7,7 +7,7 @@ Agent tool: `codex exec v0.135.0`
 
 ## Goal
 
-Validate whether Anvics can support a realistic conflict workflow where three agents edit the same function lines for different task intents, then a resolver agent combines the candidate reviews into one accepted patch.
+Validate whether Anvics can support a realistic conflict workflow where three agents edit the same function lines for different task intents, then a resolver step combines the candidate reviews into one accepted patch.
 
 This is not a test of native automatic conflict resolution. The current product only promises overlap detection, isolated workspaces, review notes, and operator-mediated resolution.
 
@@ -103,7 +103,7 @@ The exported patch applied cleanly to a clean copy and `cargo test` passed with 
 
 - Anvics handled the mechanical part well: isolated workspaces, known changed paths, candidate reviews, checkpointing, and final publication all worked.
 - The overlap signal was useful and clear once each agent checkpointed or finished. Before that, related work appeared as unknown possible changes.
-- Review markdown was enough for a resolver agent to understand the three candidate intents without reading full transcripts.
+- Review markdown was enough for a resolver to understand the three candidate intents without reading full transcripts.
 - The resolver workflow is still manually assembled. The operator had to create a resolver task and paste review paths into it.
 - Command-prefix hygiene remains important. The resolver packet used bare `anvics` because it was prepared without `ANVICS_AGENT_COMMAND`; the agent correctly stopped, but this is friction.
 - Coordination status compares changed paths, not semantic intent. It did not know the resolver was intentionally resolving candidates until the resolver changed `src/lib.rs`.
@@ -112,8 +112,8 @@ The exported patch applied cleanly to a clean copy and `cargo test` passed with 
 
 This validates the current product as an operator-mediated conflict workflow, not a native conflict-resolution system.
 
-Next meaningful product slice: add a first-class `agent resolve` or `conflict prepare` command that takes multiple review ids, creates a resolver thread/workspace, embeds the candidate review paths and command prefix correctly, and records the source candidate reviews on the resolver review.
+Next meaningful product slice: add a first-class `agent resolve` or `conflict prepare` command that takes multiple review ids, creates a resolver thread/workspace, embeds the candidate review paths and command prefix correctly, and records the source candidate reviews on the resolver review. This should prepare a resolver task, not spawn or require a new agent runtime.
 
 ## Follow-Up: MVP 0.41
 
-MVP 0.41 adds `anvics agent resolve --review ...` for this exact workflow. The command prepares a resolver thread/workspace from candidate reviews that share one base snapshot, writes a resolver packet with candidate review markdown paths and compact evidence/overlap context, supports an explicit `--agent-command` prefix, and carries `source_review_ids` into the final resolver review markdown.
+MVP 0.41 adds `anvics agent resolve --review ...` for this exact workflow. The command prepares a resolver thread/workspace from candidate reviews that share one base snapshot, writes a resolver packet with candidate review markdown paths and compact evidence/overlap context, supports an explicit `--agent-command` prefix, and carries `source_review_ids` into the final resolver review markdown. The operator decides whether the current agent, a human, or an operator-selected external agent handles that resolver packet.

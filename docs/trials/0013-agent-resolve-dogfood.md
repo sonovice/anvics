@@ -13,7 +13,7 @@ Validate MVP 0.41 by rerunning the three-agent conflict workflow with the new fi
 anvics agent resolve --review A --review B --review C ...
 ```
 
-Success means the operator no longer manually assembles the resolver task. The resolver packet should include candidate review context, the correct Anvics command prefix, and enough instructions for a real resolver agent to combine the candidates.
+Success means the operator no longer manually assembles the resolver task. The resolver packet should include candidate review context, the correct Anvics command prefix, and enough instructions for the current assigned agent, an operator, or any operator-chosen external agent to combine the candidates. Anvics must not assume a specific agent runtime is available.
 
 ## Setup
 
@@ -64,7 +64,7 @@ anvics agent resolve \
 Resolver thread: `ad7fae06-640e-4fd6-af67-9eca0ef590d4`
 Resolver workspace: `b79ea5d9-17e6-4a3e-b60b-e0b504c4a496`
 
-The resolver agent reported that it:
+For this validation, the resolver packet was handed to a real Codex CLI process. The product behavior under test was packet preparation, not agent spawning. The resolver reported that it:
 
 - read the Anvics skill;
 - read all three source review markdown files;
@@ -102,12 +102,12 @@ The resolver review markdown included a `Source Reviews` section with all three 
 
 - `agent resolve` removed the main manual step from trial 0012. The operator no longer had to hand-write a resolver task with copied review paths.
 - The explicit `--agent-command` solved the previous command-prefix failure. Candidate and resolver packets used the repo-local Cargo command successfully.
-- The resolver packet was sufficient for a real Codex agent to understand the candidate intents from review markdown alone.
+- The resolver packet was sufficient for an external agent to understand the candidate intents from review markdown alone.
 - Source-review provenance is now visible in the final resolver review, which makes the conflict-resolution audit trail much clearer.
-- The flow is still operator-directed: Anvics prepares the resolver workspace, but the human/operator chooses when to launch the resolver and which result to accept.
+- The flow is still operator-directed: Anvics prepares the resolver workspace, but the human/operator chooses whether the current agent, a human, or an operator-selected external agent performs the resolution.
 
 ## Recommendation
 
 This validates MVP 0.41 as a usable agent-driven conflict-resolution workflow.
 
-Next beta-facing slice should focus on reducing operator ceremony around multi-agent trials: either a small trial runner that collects review ids and calls `agent resolve`, or a private-beta first-run guide that teaches the current prepare -> finish -> resolve -> accept loop without exposing internal roadmap details.
+Next beta-facing slice should focus on reducing operator ceremony around multi-agent trials without turning Anvics into an agent runner: either a small helper that collects review ids and prepares `agent resolve`, or a private-beta first-run guide that teaches the current prepare -> finish -> resolve -> accept loop without exposing internal roadmap details.

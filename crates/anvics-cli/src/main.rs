@@ -2437,7 +2437,7 @@ fn resolve_agent(
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let preparation = store
         .prepare_resolution_agent(reviews, title, task, agent_command)
-        .context("failed to prepare resolver agent task")?;
+        .context("failed to prepare resolver task")?;
 
     print_agent_preparation(&root, preparation);
     Ok(())

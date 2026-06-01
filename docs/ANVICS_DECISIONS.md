@@ -10,6 +10,7 @@ This is the compact checkpoint of the grilled Anvics design. It captures the dec
 - Git is legacy interop, migration, backup, mirror, CI, package ecosystem, and export plumbing.
 - Anvics must be thinkable without Git: native repositories, native sync, native review, native permissions, native source APIs, native publication.
 - The first product surface is not an agent runner. It is a native repository/workspace/history/review UI plus ingestion/integration for external agents.
+- Anvics must not assume a specific agent runtime is available. Commands like `agent resolve` prepare source-control work for a current agent, human, or operator-selected external agent; they do not spawn or require a new agent.
 
 ## Foundation
 

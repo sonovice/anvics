@@ -277,7 +277,7 @@ To test same-file conflict pressure, prepare the conflict fixture:
 scripts/three_agent_conflict_trial_prepare.sh
 ```
 
-Launch the three generated prompts in external agents. Finish each workspace as a candidate review, then create a resolver task that references the three review markdown files. The resolver should combine the competing intents in a new workspace, not accept any single candidate. Accept the resolver workspace with Anvics-run verification and verify the exported patch applies to a clean copy.
+Launch the three generated prompts in external agents. Finish each workspace as a candidate review, then use `agent resolve --review ...` to prepare a resolver workspace from those candidate reviews. The current assigned agent, a human, or an operator-selected external agent can handle that resolver packet; Anvics does not spawn one. Accept the resolver workspace with Anvics-run verification and verify the exported patch applies to a clean copy.
 
 Current limitation: this is an operator-mediated workflow. Anvics detects overlap and records reviewable notes, but it does not yet create a first-class conflict session or structured resolution contract.
 
@@ -335,7 +335,7 @@ anvics --repo "$target_repo" agent resolve \
 
 `agent resolve` requires all source reviews to share one base snapshot. It creates a normal resolver thread/workspace, writes a packet containing candidate review paths, changed paths, evidence summaries, and overlap notes, and records the source review ids on the final resolver review.
 
-Use the generated resolver packet with a real agent CLI, then accept the resolver workspace through the normal operator flow:
+Use the generated resolver packet with the current assigned agent, an operator, or any external agent CLI the operator chooses. Anvics does not spawn or require a resolver agent. Then accept the resolver workspace through the normal operator flow:
 
 ```sh
 anvics --repo "$target_repo" agent accept \

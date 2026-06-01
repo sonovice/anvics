@@ -24,9 +24,11 @@ An Anvics workspace may not be a Git repository. If your CLI complains about a m
 11. Request `review` when the work is ready.
 12. `publish` after acceptance; export to Git only when a legacy system needs it.
 
-## Delegation And Subagents
+## Delegation And Resolution
 
-If you spawn or delegate to another agent, pass along the Anvics context before it reads or edits code:
+Do not spawn or delegate to additional agents for normal Anvics work unless the operator explicitly asks you to. Anvics prepares workspaces and packets; it does not require or assume Codex, Claude, Cursor, or any other specific agent runtime.
+
+When resolving competing reviews, the current assigned agent should usually read the source reviews and resolve the work in its own workspace instead of asking for a new agent. If the operator explicitly requests delegation, or if your harness automatically uses subagents, pass along the Anvics context before any delegated agent reads or edits code:
 
 - The path to this skill.
 - The task packet path when one exists.
@@ -35,7 +37,7 @@ If you spawn or delegate to another agent, pass along the Anvics context before 
 - The packet's `agent enter`, `agent context-pack`, `workspace diff`, and `coordination status` commands.
 - The rule that the workspace path is the only editable area.
 
-Each subagent must read this skill, use the packet's Anvics command prefix, run `agent enter` with its own agent name before editing, use `agent context-pack` when it needs a refreshed brief, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask subagents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
+Any delegated agent must read this skill, use the packet's Anvics command prefix, run `agent enter` with its own agent name before editing, use `agent context-pack` when it needs a refreshed brief, use `workspace diff` instead of Git diff/status, and report coordination status before returning work. Do not ask delegated agents to create Git branches, Git worktrees, Git commits, or publications unless the operator explicitly asks for legacy Git output.
 
 ## Source Access
 
