@@ -226,6 +226,8 @@ scripts/dogfood_trial_prepare.sh
 
 Paste the two generated prompts into two external agents. Accept one completed workspace with `scripts/live_agent_trial_verify.sh` using the target repo, thread id, workspace id, verification command, exit code, and summary printed or reported by the agents.
 
+- Treat each generated packet as authoritative, including its Anvics command prefix and final-report requirements.
+
 After the actual run, copy `docs/trials/0002-anvics-dogfood-template.md` to `docs/trials/0002-anvics-dogfood.md` and fill it with the observed friction, review quality, risk findings, and patch export result.
 
 ## Projection Runtime Checks

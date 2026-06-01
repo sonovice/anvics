@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_repo="$(mktemp -d)"
+export ANVICS_AGENT_COMMAND="custom-anvics"
 
 anvics() {
   cargo run -q -p anvics-cli --bin anvics --manifest-path "$repo_root/Cargo.toml" -- --repo "$target_repo" "$@"
@@ -33,7 +34,10 @@ printf 'changed\n' > "$workspace_path/app.txt"
 pack="$(anvics agent context-pack --workspace "$workspace")"
 printf '%s\n' "$pack" | grep -- '# Anvics Context Pack'
 printf '%s\n' "$pack" | grep -- 'Edit app.txt'
+printf '%s\n' "$pack" | grep -- 'custom-anvics --repo'
+printf '%s\n' "$pack" | grep -- 'agent context-pack'
 printf '%s\n' "$pack" | grep -- 'workspace diff'
+printf '%s\n' "$pack" | grep -- 'agent checkpoint'
 printf '%s\n' "$pack" | grep -- 'Modified: `app.txt` (source)'
 printf '%s\n' "$pack" | grep -- 'Potential clashes: none'
 
@@ -41,5 +45,6 @@ written="$(anvics agent context-pack --workspace "$workspace" --write)"
 context_path="$(printf '%s\n' "$written" | value_after_prefix "context_pack: ")"
 test -e "$context_path"
 grep -- '# Anvics Context Pack' "$context_path"
+grep -- 'custom-anvics --repo' "$context_path"
 
 echo "Agent context pack smoke test complete"

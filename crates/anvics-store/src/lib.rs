@@ -3523,6 +3523,7 @@ fn render_agent_context_pack(
     file_effects: &[FileEffect],
     coordination: &CoordinationStatus,
 ) -> String {
+    let anvics = agent_command_prefix();
     let repo = shell_quote(&display_path(repo_root));
     let mut markdown = format!(
         "# Anvics Context Pack\n\n\
@@ -3555,15 +3556,23 @@ fn render_agent_context_pack(
     markdown.push_str(&thread.task);
     markdown.push_str("\n\n## Agent-Run Commands\n\n```sh\n");
     markdown.push_str(&format!(
-        "anvics --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n",
+        "{anvics} --repo {repo} agent enter --workspace {} --name \"<agent-name>\"\n",
         workspace.id
     ));
     markdown.push_str(&format!(
-        "anvics --repo {repo} workspace diff {}\n",
+        "{anvics} --repo {repo} agent context-pack --workspace {}\n",
         workspace.id
     ));
     markdown.push_str(&format!(
-        "anvics --repo {repo} coordination status --workspace {}\n",
+        "{anvics} --repo {repo} workspace diff {}\n",
+        workspace.id
+    ));
+    markdown.push_str(&format!(
+        "{anvics} --repo {repo} agent checkpoint --workspace {} --summary \"<short salvage summary>\"\n",
+        workspace.id
+    ));
+    markdown.push_str(&format!(
+        "{anvics} --repo {repo} coordination status --workspace {}\n",
         workspace.id
     ));
     markdown.push_str("```\n");

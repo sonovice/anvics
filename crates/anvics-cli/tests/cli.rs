@@ -1051,6 +1051,7 @@ fn workspace_show_and_agent_status_by_workspace_report_overlay_state() {
         .stdout(predicate::str::contains(&thread))
         .stdout(predicate::str::contains(&workspace))
         .stdout(predicate::str::contains(&workspace_path))
+        .stdout(predicate::str::contains("latest_snapshot: none"))
         .stdout(predicate::str::contains("publication_status: unpublished"));
     anvics(
         dir.path(),
@@ -1081,18 +1082,30 @@ fn workspace_show_and_agent_status_by_workspace_report_overlay_state() {
     .stdout(predicate::str::contains("diff --git a/app.txt b/app.txt"))
     .stdout(predicate::str::contains("-base"))
     .stdout(predicate::str::contains("+changed"));
-    anvics(
+    let snapshot_output = anvics(
         dir.path(),
         &["workspace", "snapshot", &workspace, "--message", "changed"],
     )
     .assert()
-    .success();
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let latest_snapshot = value_after_prefix(&snapshot_output, "snapshot: ");
     anvics(dir.path(), &["workspace", "show", &workspace])
         .assert()
         .success()
-        .stdout(predicate::str::contains("latest_snapshot: "))
+        .stdout(predicate::str::contains(format!(
+            "latest_snapshot: {latest_snapshot}"
+        )))
         .stdout(predicate::str::contains("overlay_changed_paths:"))
         .stdout(predicate::str::contains("Modified: app.txt"));
+    anvics(dir.path(), &["agent", "status", "--workspace", &workspace])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "latest_snapshot: {latest_snapshot}"
+        )));
 }
 
 #[test]
