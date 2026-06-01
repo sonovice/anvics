@@ -19,6 +19,9 @@ scripts/agent_instructions_smoke.sh
 scripts/agent_context_pack_smoke.sh
 scripts/agent_recovery_smoke.sh
 scripts/agent_launch_prompt_smoke.sh
+scripts/beta_first_run_smoke.sh
+scripts/installed_binary_smoke.sh
+scripts/external_beta_trial_prepare.sh
 scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
 ```
@@ -48,6 +51,12 @@ scripts/live_agent_trial_prepare.sh
 `evidence_supersede_smoke.sh` proves the recovery path for obsolete risky evidence: a blocked accept preserves evidence, the operator supersedes that evidence with a reason, then a clean accept publishes without a secret-risk override.
 
 `agent_launch_prompt_smoke.sh` verifies the operator prompt for external agent CLIs, including Codex's non-Git workspace flag.
+
+`beta_first_run_smoke.sh` exercises the private-beta happy path: init, snapshot, prepare, launch prompt, workspace diff, checkpoint, coordination, accept, risk/review inspection, and patch application.
+
+`installed_binary_smoke.sh` installs `anvics` with `cargo install --path crates/anvics-cli --locked`, then runs the beta accept/export loop through the installed binary instead of repo-local `cargo run`.
+
+`external_beta_trial_prepare.sh` creates a disposable non-Anvics Rust repo, prepares two agent packets, and writes `.anvics/external-beta-trial-manifest.env` for a real two-agent private beta trial.
 
 `dogfood_trial_prepare.sh` creates a disposable copy of the Anvics repo, prepares two realistic agent packets, and writes `.anvics/dogfood-trial-manifest.env` for a real dogfood run.
 
@@ -238,6 +247,24 @@ Paste the two generated prompts into two external agents. Accept one completed w
 - Treat each generated packet as authoritative, including its Anvics command prefix and final-report requirements.
 
 After the actual run, copy `docs/trials/0002-anvics-dogfood-template.md` to `docs/trials/0002-anvics-dogfood.md` and fill it with the observed friction, review quality, risk findings, and patch export result.
+
+## Private Beta Trial
+
+For the private beta readiness gate, run the first path through an installed binary and a disposable external repo:
+
+```sh
+scripts/beta_first_run_smoke.sh
+scripts/installed_binary_smoke.sh
+scripts/external_beta_trial_prepare.sh
+```
+
+Then launch the generated prompts with real external agent CLIs. For Codex, use the generated `agent launch-prompt --tool codex` output or this shape:
+
+```sh
+codex exec --skip-git-repo-check --cd "<workspace-path>" - < "<prompt-file>"
+```
+
+Accept the finished workspaces with Anvics-run verification, export one patch per publication, and verify the patches apply to a clean copy. Record the result under `docs/trials/` with a clear `ship/private-beta/no-go` recommendation.
 
 ## Projection Runtime Checks
 

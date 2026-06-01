@@ -42,7 +42,8 @@ blocked_status=$?
 set -e
 test "$blocked_status" -ne 0
 printf '%s\n' "$blocked" | grep -- 'publication blocked'
-printf '%s\n' "$blocked" | grep -- 'evidence supersede <evidence-id>'
+printf '%s\n' "$blocked" | grep -- 'evidence supersede '
+printf '%s\n' "$blocked" | grep -- '--reason "<audited reason>"'
 
 status="$(anvics agent status --thread "$thread")"
 review="$(printf '%s\n' "$status" | value_after_prefix "review: ")"

@@ -2393,7 +2393,8 @@ fn agent_accept_run_blocks_when_command_stdout_contains_secret() {
     .stderr(predicate::str::contains("Recovery hint"))
     .stderr(predicate::str::contains("agent status --workspace"))
     .stderr(predicate::str::contains("risk list --review"))
-    .stderr(predicate::str::contains("evidence supersede <evidence-id>"))
+    .stderr(predicate::str::contains("evidence supersede "))
+    .stderr(predicate::str::contains("--reason \"<audited reason>\""))
     .stderr(predicate::str::contains("rerun agent accept"))
     .stderr(predicate::str::contains("--allow-secret-risk"));
     let status = anvics(dir.path(), &["agent", "status", "--thread", &thread])

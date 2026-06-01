@@ -3118,13 +3118,29 @@ fn print_accept_recovery_hint(
             shell_quote(&display_path(root)),
             review_id
         );
-        eprintln!(
-            "  If the finding belongs to obsolete evidence, use risk list to find the evidence id, then run:"
-        );
-        eprintln!(
-            "  anvics --repo {} evidence supersede <evidence-id> --reason \"<audited reason>\"",
-            shell_quote(&display_path(root))
-        );
+        let evidence_ids = store
+            .list_review_risk_findings(review_id.as_str())?
+            .into_iter()
+            .filter_map(|finding| finding.evidence_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if evidence_ids.is_empty() {
+            eprintln!(
+                "  If the finding belongs to obsolete evidence, use risk list to find the evidence id, then run:"
+            );
+            eprintln!(
+                "  anvics --repo {} evidence supersede <evidence-id> --reason \"<audited reason>\"",
+                shell_quote(&display_path(root))
+            );
+        } else {
+            eprintln!("  If the finding belongs to obsolete evidence, supersede it with:");
+            for evidence_id in evidence_ids {
+                eprintln!(
+                    "  anvics --repo {} evidence supersede {} --reason \"<audited reason>\"",
+                    shell_quote(&display_path(root)),
+                    evidence_id
+                );
+            }
+        }
         eprintln!("  Then rerun agent accept to create a clean review.");
         eprintln!("  If the risk is intentionally acceptable, override publication explicitly:");
         eprintln!(
