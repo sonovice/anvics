@@ -22,6 +22,7 @@ scripts/agent_launch_prompt_smoke.sh
 scripts/beta_first_run_smoke.sh
 scripts/installed_binary_smoke.sh
 scripts/external_beta_trial_prepare.sh
+scripts/three_agent_conflict_trial_prepare.sh
 scripts/dogfood_trial_prepare.sh
 scripts/live_agent_trial_prepare.sh
 ```
@@ -57,6 +58,8 @@ scripts/live_agent_trial_prepare.sh
 `installed_binary_smoke.sh` installs `anvics` with `cargo install --path crates/anvics-cli --locked`, then runs the beta accept/export loop through the installed binary instead of repo-local `cargo run`.
 
 `external_beta_trial_prepare.sh` creates a disposable non-Anvics Rust repo, prepares two agent packets, and writes `.anvics/external-beta-trial-manifest.env` for a real two-agent private beta trial.
+
+`three_agent_conflict_trial_prepare.sh` creates a disposable Rust repo where three agents intentionally edit the same function in `src/lib.rs`, then writes `.anvics/three-agent-conflict-manifest.env` for conflict-resolution dogfood.
 
 `dogfood_trial_prepare.sh` creates a disposable copy of the Anvics repo, prepares two realistic agent packets, and writes `.anvics/dogfood-trial-manifest.env` for a real dogfood run.
 
@@ -265,6 +268,18 @@ codex exec --skip-git-repo-check --cd "<workspace-path>" - < "<prompt-file>"
 ```
 
 Accept the finished workspaces with Anvics-run verification, export one patch per publication, and verify the patches apply to a clean copy. Record the result under `docs/trials/` with a clear `ship/private-beta/no-go` recommendation.
+
+## Three-Agent Conflict Trial
+
+To test same-file conflict pressure, prepare the conflict fixture:
+
+```sh
+scripts/three_agent_conflict_trial_prepare.sh
+```
+
+Launch the three generated prompts in external agents. Finish each workspace as a candidate review, then create a resolver task that references the three review markdown files. The resolver should combine the competing intents in a new workspace, not accept any single candidate. Accept the resolver workspace with Anvics-run verification and verify the exported patch applies to a clean copy.
+
+Current limitation: this is an operator-mediated workflow. Anvics detects overlap and records reviewable notes, but it does not yet create a first-class conflict session or structured resolution contract.
 
 ## Projection Runtime Checks
 
