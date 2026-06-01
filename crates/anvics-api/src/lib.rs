@@ -74,6 +74,17 @@ pub enum ApiMethod {
         summary: String,
         artifact_path: Option<String>,
     },
+    EvidenceList {
+        thread: String,
+        include_superseded: bool,
+    },
+    EvidenceShow {
+        id: String,
+    },
+    EvidenceSupersede {
+        id: String,
+        reason: String,
+    },
     CommandRun {
         workspace: String,
         argv: Vec<String>,
@@ -308,6 +319,15 @@ pub enum ApiResult {
     EvidenceAttached {
         evidence: EvidenceRecord,
     },
+    EvidenceList {
+        evidence: Vec<EvidenceRecord>,
+    },
+    EvidenceShow {
+        evidence: EvidenceRecord,
+    },
+    EvidenceSuperseded {
+        evidence: EvidenceRecord,
+    },
     CommandRun {
         command_event: Box<CommandEvent>,
         evidence: EvidenceRecord,
@@ -455,6 +475,17 @@ mod tests {
                 exit_code: 0,
                 summary: "ok".to_owned(),
                 artifact_path: None,
+            },
+            ApiMethod::EvidenceList {
+                thread: "thread-1".to_owned(),
+                include_superseded: false,
+            },
+            ApiMethod::EvidenceShow {
+                id: "evidence-1".to_owned(),
+            },
+            ApiMethod::EvidenceSupersede {
+                id: "evidence-1".to_owned(),
+                reason: "obsolete verification".to_owned(),
             },
             ApiMethod::CommandRun {
                 workspace: "workspace-1".to_owned(),
@@ -689,6 +720,8 @@ mod tests {
             stdout_path: Some(".anvics/artifacts/commands/command/stdout.txt".to_owned()),
             stderr_path: Some(".anvics/artifacts/commands/command/stderr.txt".to_owned()),
             created_at: "2026-05-28T00:00:04Z".to_owned(),
+            superseded_at: None,
+            superseded_reason: None,
         };
         let command_event = CommandEvent {
             id: command_event_id.clone(),
@@ -757,7 +790,7 @@ mod tests {
             }],
             overlap_notes: Vec::new(),
             evidence: vec![EvidenceSummary {
-                id: evidence_id,
+                id: evidence_id.clone(),
                 command_event_id: Some(command_event_id),
                 command: "true".to_owned(),
                 command_label: Some("verify".to_owned()),
@@ -791,6 +824,7 @@ mod tests {
             id: risk_finding_id,
             scan_id: risk_scan_id.clone(),
             review_id: review_id.clone(),
+            evidence_id: Some(evidence_id.clone()),
             detector: "openai_token".to_owned(),
             target_kind: RiskTargetKind::SourceFile,
             target_path: "app.txt".to_owned(),
@@ -978,6 +1012,15 @@ mod tests {
                 workspace: Box::new(workspace.clone()),
             },
             ApiResult::EvidenceAttached {
+                evidence: evidence.clone(),
+            },
+            ApiResult::EvidenceList {
+                evidence: vec![evidence.clone()],
+            },
+            ApiResult::EvidenceShow {
+                evidence: evidence.clone(),
+            },
+            ApiResult::EvidenceSuperseded {
                 evidence: evidence.clone(),
             },
             ApiResult::CommandRun {

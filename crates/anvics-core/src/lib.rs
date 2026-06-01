@@ -308,6 +308,10 @@ pub struct EvidenceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_path: Option<String>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -418,6 +422,8 @@ pub struct RiskFinding {
     pub id: RiskFindingId,
     pub scan_id: RiskScanId,
     pub review_id: ReviewProjectionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<EvidenceRecordId>,
     pub detector: String,
     pub target_kind: RiskTargetKind,
     pub target_path: String,
@@ -542,6 +548,7 @@ pub enum RepositoryEventKind {
     WorkThreadCreated,
     WorkspaceCreated,
     EvidenceAttached,
+    EvidenceSuperseded,
     ReviewCreated,
     PublicationCreated,
     LegacyPatchExported,
@@ -777,6 +784,8 @@ mod tests {
             stdout_path: Some(".anvics/artifacts/commands/event/stdout.txt".to_owned()),
             stderr_path: Some(".anvics/artifacts/commands/event/stderr.txt".to_owned()),
             created_at: "2026-05-28T00:00:02Z".to_owned(),
+            superseded_at: None,
+            superseded_reason: None,
         };
         let command_event = CommandEvent {
             id: command_event_id.clone(),
@@ -880,6 +889,7 @@ mod tests {
             id: RiskFindingId::new(),
             scan_id: risk_scan_id.clone(),
             review_id: review_id.clone(),
+            evidence_id: None,
             detector: "openai_token".to_owned(),
             target_kind: RiskTargetKind::SourceFile,
             target_path: "app.txt".to_owned(),

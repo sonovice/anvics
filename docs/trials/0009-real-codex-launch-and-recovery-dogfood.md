@@ -53,7 +53,7 @@ The generated dogfood prompts used `ANVICS_AGENT_COMMAND` so packet commands poi
 - Crash recovery checkpoints were useful in a real agent run. Both agents created checkpoints before final reporting, making interrupted work recoverable.
 - Coordination awareness worked: each agent saw the other active workspace and either unknown-change risk or known non-overlap.
 - Context packs exposed a bug: generated packets honored `ANVICS_AGENT_COMMAND`, but `agent context-pack` still rendered bare `anvics` commands. This was fixed immediately after the trial.
-- Secret-risk gating correctly preserved failed accept state, but the experience showed a rough edge: preserved risky evidence on a thread can contaminate later publish attempts even after a safer verification command is used. This needs a future supersede/ignore evidence flow rather than relying only on override.
+- Secret-risk gating correctly preserved failed accept state, but the experience showed a rough edge: preserved risky evidence on a thread can contaminate later publish attempts even after a safer verification command is used. MVP 0.35 adds audited evidence superseding so operators can exclude obsolete evidence from future reviews without deleting history.
 
 ## Patch Export
 
@@ -64,5 +64,5 @@ The generated dogfood prompts used `ANVICS_AGENT_COMMAND` so packet commands poi
 ## Takeaways
 
 - The current packet/skill/recovery loop is good enough for repeated real Codex dogfood.
-- The next meaningful reliability slice should address evidence superseding after blocked accept attempts.
+- Evidence superseding is now the expected recovery path when a blocked accept preserved obsolete or overly broad verification output.
 - Keep Anvics command-prefix propagation as a required invariant for all generated agent-facing artifacts.

@@ -14,6 +14,7 @@ scripts/coordination_smoke.sh
 scripts/command_worker_smoke.sh
 scripts/command_worker_process_smoke.sh
 scripts/secret_risk_smoke.sh
+scripts/evidence_supersede_smoke.sh
 scripts/agent_instructions_smoke.sh
 scripts/agent_context_pack_smoke.sh
 scripts/agent_recovery_smoke.sh
@@ -43,6 +44,8 @@ scripts/live_agent_trial_prepare.sh
 `agent_recovery_smoke.sh` proves interrupted agent work can be inspected with `agent recover` and preserved with `agent checkpoint` before acceptance.
 
 `secret_risk_smoke.sh` proves the safety gate: command output with a secret-like value blocks acceptance, risk output stays redacted, an explicit override records the reason, and the exported patch still applies.
+
+`evidence_supersede_smoke.sh` proves the recovery path for obsolete risky evidence: a blocked accept preserves evidence, the operator supersedes that evidence with a reason, then a clean accept publishes without a secret-risk override.
 
 `agent_launch_prompt_smoke.sh` verifies the operator prompt for external agent CLIs, including Codex's non-Git workspace flag.
 
@@ -183,7 +186,13 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" review show "<review-id>" --format markdown
    ```
 
-   Fix the workspace and rerun acceptance when the finding is real. Use an override only for a known false positive or intentionally local fixture:
+   Fix the workspace and rerun acceptance when the finding is real. If the risk belongs to obsolete evidence from a failed accept attempt, supersede that evidence with an audited reason, then rerun `agent accept` to create a clean review:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" evidence supersede "<evidence-id>" --reason "Obsolete failed verification output."
+   ```
+
+   Use an override only for a known false positive or intentionally local fixture:
 
    ```sh
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" publish create \

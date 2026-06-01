@@ -155,6 +155,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Review projection includes intent, acceptance criteria, final diff, conceptual summary, important decisions, tests/evidence, conflicts/resolutions, policy gates, risks, affected files/modules/symbols, native publication target, and optional legacy export preview.
 - Humans can drill into diffs/logs but should see conceptual context first.
 - Evidence in review projections is compact by default: command names, exit status, short summaries, key excerpts, and artifact links. Raw transcripts/logs are stored by reference unless explicitly requested.
+- Evidence is append-only but can be superseded with an audited reason. New reviews ignore superseded evidence; existing reviews remain immutable and continue to show the evidence they were created with.
 - `NativePublication` means accepted work is part of the official repository state.
 - Publication records why/how state became official, not only latest files.
 

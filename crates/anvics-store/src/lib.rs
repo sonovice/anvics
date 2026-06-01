@@ -52,6 +52,8 @@ pub enum StoreError {
     CommandEventNotFound(String),
     #[error("risk finding does not exist: {0}")]
     RiskFindingNotFound(String),
+    #[error("evidence does not exist: {0}")]
+    EvidenceNotFound(String),
     #[error("agent packet does not exist for thread: {0}")]
     AgentPacketNotFound(String),
     #[error("repository has no current snapshot")]
@@ -62,6 +64,8 @@ pub enum StoreError {
     EmptyEvidenceSummary,
     #[error("evidence command must not be empty")]
     EmptyEvidenceCommand,
+    #[error("evidence supersede reason must not be empty")]
+    EmptyEvidenceSupersedeReason,
     #[error("agent name must not be empty")]
     EmptyAgentName,
     #[error("agent checkpoint summary must not be empty")]
@@ -584,10 +588,57 @@ impl AnvicsStore {
             stdout_path: input.stdout_path,
             stderr_path: input.stderr_path,
             created_at: now_rfc3339()?,
+            superseded_at: None,
+            superseded_reason: None,
         };
         write_json_pretty(self.evidence_path(evidence.id.as_str()), &evidence)?;
         self.append_event(
             RepositoryEventKind::EvidenceAttached,
+            Some(evidence.id.to_string()),
+        )?;
+        Ok(evidence)
+    }
+
+    pub fn show_evidence(&self, id: &str) -> Result<EvidenceRecord> {
+        let path = self.evidence_path(id);
+        if !path.exists() {
+            return Err(StoreError::EvidenceNotFound(id.to_owned()));
+        }
+        read_json(path)
+    }
+
+    pub fn list_thread_evidence(
+        &self,
+        thread_id: &str,
+        include_superseded: bool,
+    ) -> Result<Vec<EvidenceRecord>> {
+        let thread = self.show_thread(thread_id)?;
+        let mut records: Vec<EvidenceRecord> = read_json_dir(self.anvics_dir.join("evidence"))?;
+        records.retain(|record| {
+            record.thread_id == thread.id && (include_superseded || record.superseded_at.is_none())
+        });
+        records.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(records)
+    }
+
+    pub fn supersede_evidence(&self, id: &str, reason: String) -> Result<EvidenceRecord> {
+        let reason = reason.trim().to_owned();
+        if reason.is_empty() {
+            return Err(StoreError::EmptyEvidenceSupersedeReason);
+        }
+        let mut evidence = self.show_evidence(id)?;
+        if evidence.superseded_at.is_some() {
+            return Ok(evidence);
+        }
+        evidence.superseded_at = Some(now_rfc3339()?);
+        evidence.superseded_reason = Some(reason);
+        write_json_pretty(self.evidence_path(evidence.id.as_str()), &evidence)?;
+        self.append_event(
+            RepositoryEventKind::EvidenceSuperseded,
             Some(evidence.id.to_string()),
         )?;
         Ok(evidence)
@@ -900,7 +951,15 @@ impl AnvicsStore {
                 };
                 if let Ok(bytes) = self.read_risk_target_bytes(path) {
                     let text = String::from_utf8_lossy(&bytes);
-                    collect_secret_findings(&mut findings, &scan_id, &review.id, kind, path, &text);
+                    collect_secret_findings(
+                        &mut findings,
+                        &scan_id,
+                        &review.id,
+                        Some(&evidence.id),
+                        kind,
+                        path,
+                        &text,
+                    );
                 }
             }
         }
@@ -2319,7 +2378,7 @@ impl AnvicsStore {
 
     fn thread_evidence(&self, thread_id: &WorkThreadId) -> Result<Vec<EvidenceSummary>> {
         let mut records: Vec<EvidenceRecord> = read_json_dir(self.anvics_dir.join("evidence"))?;
-        records.retain(|record| &record.thread_id == thread_id);
+        records.retain(|record| &record.thread_id == thread_id && record.superseded_at.is_none());
         records.sort_by(|left, right| {
             left.created_at
                 .cmp(&right.created_at)
@@ -2564,6 +2623,7 @@ fn collect_secret_findings(
     findings: &mut Vec<RiskFinding>,
     scan_id: &RiskScanId,
     review_id: &ReviewProjectionId,
+    evidence_id: Option<&EvidenceRecordId>,
     target_kind: RiskTargetKind,
     target_path: &str,
     text: &str,
@@ -2574,6 +2634,7 @@ fn collect_secret_findings(
                 id: RiskFindingId::new(),
                 scan_id: scan_id.clone(),
                 review_id: review_id.clone(),
+                evidence_id: evidence_id.cloned(),
                 detector,
                 target_kind: target_kind.clone(),
                 target_path: target_path.to_owned(),
@@ -2599,6 +2660,7 @@ fn collect_secret_findings_for_lines<'a>(
                 id: RiskFindingId::new(),
                 scan_id: scan_id.clone(),
                 review_id: review_id.clone(),
+                evidence_id: None,
                 detector,
                 target_kind: target_kind.clone(),
                 target_path: target_path.to_owned(),
@@ -4888,6 +4950,109 @@ mod tests {
     }
 
     #[test]
+    fn superseded_evidence_is_excluded_from_future_reviews_without_rewriting_old_reviews() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Supersede evidence".to_owned(), "Edit app.txt".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "changed\n",
+        )
+        .unwrap();
+        store
+            .workspace_snapshot(preparation.workspace.id.as_str(), Some("result".to_owned()))
+            .unwrap();
+
+        let obsolete = store
+            .attach_evidence(
+                preparation.thread.id.as_str(),
+                "rg broad trial output".to_owned(),
+                0,
+                "Broad verification produced noisy output.".to_owned(),
+                None,
+            )
+            .unwrap();
+        let first_review = store.create_review(preparation.thread.id.as_str()).unwrap();
+        assert_eq!(first_review.evidence.len(), 1);
+        assert_eq!(first_review.evidence[0].id, obsolete.id);
+
+        let err = store
+            .supersede_evidence(obsolete.id.as_str(), "  ".to_owned())
+            .unwrap_err();
+        assert!(matches!(err, StoreError::EmptyEvidenceSupersedeReason));
+
+        let superseded = store
+            .supersede_evidence(
+                obsolete.id.as_str(),
+                "Obsolete broad verification output.".to_owned(),
+            )
+            .unwrap();
+        assert!(superseded.superseded_at.is_some());
+        assert_eq!(
+            superseded.superseded_reason.as_deref(),
+            Some("Obsolete broad verification output.")
+        );
+        assert!(store
+            .events_since(0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::EvidenceSuperseded));
+
+        let active = store
+            .attach_evidence(
+                preparation.thread.id.as_str(),
+                "rg narrow line".to_owned(),
+                0,
+                "Narrow verification passed.".to_owned(),
+                None,
+            )
+            .unwrap();
+        let second_review = store.create_review(preparation.thread.id.as_str()).unwrap();
+        assert_eq!(second_review.evidence.len(), 1);
+        assert_eq!(second_review.evidence[0].id, active.id);
+
+        let old_review = store.show_review(first_review.id.as_str()).unwrap();
+        assert_eq!(old_review.evidence.len(), 1);
+        assert_eq!(old_review.evidence[0].id, obsolete.id);
+        assert_eq!(
+            store
+                .list_thread_evidence(preparation.thread.id.as_str(), false)
+                .unwrap()
+                .iter()
+                .map(|record| record.id.clone())
+                .collect::<Vec<_>>(),
+            vec![active.id]
+        );
+        assert_eq!(
+            store
+                .list_thread_evidence(preparation.thread.id.as_str(), true)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn old_evidence_json_without_supersede_fields_deserializes_active() {
+        let json = serde_json::json!({
+            "id": EvidenceRecordId::new(),
+            "thread_id": WorkThreadId::new(),
+            "command": "true",
+            "exit_code": 0,
+            "summary": "ok",
+            "created_at": "2026-05-28T00:00:00Z"
+        });
+        let evidence: EvidenceRecord = serde_json::from_value(json).unwrap();
+        assert!(evidence.superseded_at.is_none());
+        assert!(evidence.superseded_reason.is_none());
+    }
+
+    #[test]
     fn secret_detectors_redact_without_storing_raw_values() {
         let openai_line = "OPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnopqrstuvwxyz";
         let github_line = "token=github_pat_1234567890abcdefghijklmnopqrstuvwxyz";
@@ -6031,6 +6196,9 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| finding.target_kind == RiskTargetKind::EvidenceArtifact));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.evidence_id.as_ref() == Some(&finish.evidence.id)));
     }
 
     #[test]
@@ -6351,5 +6519,10 @@ mod tests {
         assert!(markdown.contains("CommandStdout"));
         assert!(markdown.contains("openai_token"));
         assert!(!markdown.contains(secret));
+        let findings = store
+            .list_review_risk_findings(status.review_ids[0].as_str())
+            .unwrap();
+        assert!(findings.iter().any(|finding| finding.evidence_id.is_some()
+            && finding.target_kind == RiskTargetKind::CommandStdout));
     }
 }

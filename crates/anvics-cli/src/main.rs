@@ -149,6 +149,20 @@ enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 enum EvidenceCommand {
+    List {
+        #[arg(long)]
+        thread: String,
+        #[arg(long)]
+        include_superseded: bool,
+    },
+    Show {
+        id: String,
+    },
+    Supersede {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
     Attach {
         #[arg(long)]
         thread: String,
@@ -694,6 +708,37 @@ fn main() -> Result<()> {
                 snapshot_workspace_via_daemon(root, socket, id, message)
             } else {
                 snapshot_workspace(root, &id, message)
+            }
+        }
+        CliCommand::Evidence {
+            command:
+                EvidenceCommand::List {
+                    thread,
+                    include_superseded,
+                },
+        } => {
+            if let Some(socket) = daemon {
+                list_evidence_via_daemon(root, socket, thread, include_superseded)
+            } else {
+                list_evidence(root, &thread, include_superseded)
+            }
+        }
+        CliCommand::Evidence {
+            command: EvidenceCommand::Show { id },
+        } => {
+            if let Some(socket) = daemon {
+                show_evidence_via_daemon(root, socket, id)
+            } else {
+                show_evidence(root, &id)
+            }
+        }
+        CliCommand::Evidence {
+            command: EvidenceCommand::Supersede { id, reason },
+        } => {
+            if let Some(socket) = daemon {
+                supersede_evidence_via_daemon(root, socket, id, reason)
+            } else {
+                supersede_evidence(root, &id, reason)
             }
         }
         CliCommand::Evidence {
@@ -1601,6 +1646,140 @@ fn print_workspace_snapshot(workspace: anvics_core::WorkspaceView) {
     }
 }
 
+fn list_evidence(root: PathBuf, thread_id: &str, include_superseded: bool) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let evidence = store
+        .list_thread_evidence(thread_id, include_superseded)
+        .context("failed to list evidence")?;
+    print_evidence_list(evidence);
+    Ok(())
+}
+
+fn list_evidence_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    thread: String,
+    include_superseded: bool,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::EvidenceList {
+            thread,
+            include_superseded,
+        },
+    )? {
+        ApiResult::EvidenceList { evidence } => {
+            print_evidence_list(evidence);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn show_evidence(root: PathBuf, id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let evidence = store.show_evidence(id).context("failed to show evidence")?;
+    print_evidence_detail(&evidence);
+    Ok(())
+}
+
+fn show_evidence_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::EvidenceShow { id })? {
+        ApiResult::EvidenceShow { evidence } => {
+            print_evidence_detail(&evidence);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn supersede_evidence(root: PathBuf, id: &str, reason: String) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let evidence = store
+        .supersede_evidence(id, reason)
+        .context("failed to supersede evidence")?;
+    println!("Superseded evidence {}", evidence.id);
+    print_evidence_detail(&evidence);
+    Ok(())
+}
+
+fn supersede_evidence_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    id: String,
+    reason: String,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::EvidenceSupersede { id, reason })? {
+        ApiResult::EvidenceSuperseded { evidence } => {
+            println!("Superseded evidence {}", evidence.id);
+            print_evidence_detail(&evidence);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_evidence_list(records: Vec<anvics_core::EvidenceRecord>) {
+    if records.is_empty() {
+        println!("No evidence");
+        return;
+    }
+    for evidence in records {
+        let status = if evidence.superseded_at.is_some() {
+            "superseded"
+        } else {
+            "active"
+        };
+        let label = evidence
+            .command_label
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(&evidence.command);
+        println!(
+            "{}  {}  exit={}  {}",
+            evidence.id, status, evidence.exit_code, label
+        );
+    }
+}
+
+fn print_evidence_detail(evidence: &anvics_core::EvidenceRecord) {
+    println!("evidence: {}", evidence.id);
+    println!("thread: {}", evidence.thread_id);
+    println!(
+        "status: {}",
+        if evidence.superseded_at.is_some() {
+            "superseded"
+        } else {
+            "active"
+        }
+    );
+    if let Some(command_event_id) = &evidence.command_event_id {
+        println!("command_event: {command_event_id}");
+    }
+    if let Some(label) = &evidence.command_label {
+        println!("label: {label}");
+    }
+    println!("command: {}", evidence.command);
+    println!("exit_code: {}", evidence.exit_code);
+    println!("summary: {}", evidence.summary);
+    if let Some(path) = &evidence.artifact_path {
+        println!("artifact: {path}");
+    }
+    if let Some(path) = &evidence.stdout_path {
+        println!("stdout: {path}");
+    }
+    if let Some(path) = &evidence.stderr_path {
+        println!("stderr: {path}");
+    }
+    if let Some(at) = &evidence.superseded_at {
+        println!("superseded_at: {at}");
+    }
+    if let Some(reason) = &evidence.superseded_reason {
+        println!("superseded_reason: {reason}");
+    }
+}
+
 fn attach_evidence(
     root: PathBuf,
     thread_id: &str,
@@ -2114,6 +2293,9 @@ fn print_risk_finding(finding: &anvics_core::RiskFinding) {
         .unwrap_or_default();
     println!("finding: {}", finding.id);
     println!("review: {}", finding.review_id);
+    if let Some(evidence_id) = &finding.evidence_id {
+        println!("evidence: {evidence_id}");
+    }
     println!("severity: {:?}", finding.severity);
     println!("detector: {}", finding.detector);
     println!(
@@ -2936,6 +3118,15 @@ fn print_accept_recovery_hint(
             shell_quote(&display_path(root)),
             review_id
         );
+        eprintln!(
+            "  If the finding belongs to obsolete evidence, use risk list to find the evidence id, then run:"
+        );
+        eprintln!(
+            "  anvics --repo {} evidence supersede <evidence-id> --reason \"<audited reason>\"",
+            shell_quote(&display_path(root))
+        );
+        eprintln!("  Then rerun agent accept to create a clean review.");
+        eprintln!("  If the risk is intentionally acceptable, override publication explicitly:");
         eprintln!(
             "  anvics --repo {} publish create --thread {} --review {} --allow-secret-risk --override-reason \"<audited reason>\"",
             shell_quote(&display_path(root)),

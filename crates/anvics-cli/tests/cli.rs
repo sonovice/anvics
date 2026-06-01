@@ -1162,6 +1162,110 @@ fn evidence_command_attaches_file_backed_evidence() {
 }
 
 #[test]
+fn evidence_list_show_and_supersede_work_direct_and_daemon() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let thread_output = anvics(
+        dir.path(),
+        &[
+            "thread",
+            "create",
+            "--title",
+            "Evidence",
+            "--task",
+            "Attach command evidence",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let thread = value_after_prefix(&thread_output, "Created thread ");
+    let evidence_output = anvics(
+        dir.path(),
+        &[
+            "evidence",
+            "attach",
+            "--thread",
+            &thread,
+            "--command",
+            "true",
+            "--exit-code",
+            "0",
+            "--summary",
+            "Verification passed",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let evidence = value_after_prefix(&evidence_output, "Attached evidence ");
+
+    anvics(dir.path(), &["evidence", "list", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&evidence))
+        .stdout(predicate::str::contains("active"));
+    anvics(dir.path(), &["evidence", "show", &evidence])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status: active"))
+        .stdout(predicate::str::contains("summary: Verification passed"));
+    anvics(
+        dir.path(),
+        &[
+            "evidence",
+            "supersede",
+            &evidence,
+            "--reason",
+            "Obsolete broad verification",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("status: superseded"))
+    .stdout(predicate::str::contains(
+        "superseded_reason: Obsolete broad verification",
+    ));
+    anvics(dir.path(), &["evidence", "list", "--thread", &thread])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No evidence"));
+    anvics(
+        dir.path(),
+        &[
+            "evidence",
+            "list",
+            "--thread",
+            &thread,
+            "--include-superseded",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(&evidence))
+    .stdout(predicate::str::contains("superseded"));
+
+    let socket_dir = tempdir().unwrap();
+    let socket = socket_dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(dir.path(), &socket, &["evidence", "show", &evidence])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status: superseded"));
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn command_run_records_artifacts_and_review_evidence() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("app.txt"), "base\n").unwrap();
@@ -2289,6 +2393,8 @@ fn agent_accept_run_blocks_when_command_stdout_contains_secret() {
     .stderr(predicate::str::contains("Recovery hint"))
     .stderr(predicate::str::contains("agent status --workspace"))
     .stderr(predicate::str::contains("risk list --review"))
+    .stderr(predicate::str::contains("evidence supersede <evidence-id>"))
+    .stderr(predicate::str::contains("rerun agent accept"))
     .stderr(predicate::str::contains("--allow-secret-risk"));
     let status = anvics(dir.path(), &["agent", "status", "--thread", &thread])
         .assert()
@@ -2299,6 +2405,14 @@ fn agent_accept_run_blocks_when_command_stdout_contains_secret() {
         .stdout
         .clone();
     let review = value_after_prefix(&status, "review: ");
+    let risk_list = anvics(dir.path(), &["risk", "list", "--review", &review])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("evidence: "))
+        .get_output()
+        .stdout
+        .clone();
+    let evidence = value_after_prefix(&risk_list, "evidence: ");
     anvics(
         dir.path(),
         &["review", "show", &review, "--format", "markdown"],
@@ -2308,6 +2422,19 @@ fn agent_accept_run_blocks_when_command_stdout_contains_secret() {
     .stdout(predicate::str::contains("CommandStdout"))
     .stdout(predicate::str::contains("openai_token"))
     .stdout(predicate::str::contains(secret).not());
+    anvics(
+        dir.path(),
+        &[
+            "evidence",
+            "supersede",
+            &evidence,
+            "--reason",
+            "Obsolete leaky verification",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("status: superseded"));
 }
 
 #[test]

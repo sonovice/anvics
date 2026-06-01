@@ -221,6 +221,22 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             let evidence = AnvicsStore::open(&repo)?.attach_command_evidence(&thread, input)?;
             Ok(ApiResult::EvidenceAttached { evidence })
         }
+        ApiMethod::EvidenceList {
+            thread,
+            include_superseded,
+        } => {
+            let evidence =
+                AnvicsStore::open(&repo)?.list_thread_evidence(&thread, include_superseded)?;
+            Ok(ApiResult::EvidenceList { evidence })
+        }
+        ApiMethod::EvidenceShow { id } => {
+            let evidence = AnvicsStore::open(&repo)?.show_evidence(&id)?;
+            Ok(ApiResult::EvidenceShow { evidence })
+        }
+        ApiMethod::EvidenceSupersede { id, reason } => {
+            let evidence = AnvicsStore::open(&repo)?.supersede_evidence(&id, reason)?;
+            Ok(ApiResult::EvidenceSuperseded { evidence })
+        }
         ApiMethod::CommandRun {
             workspace,
             argv,
