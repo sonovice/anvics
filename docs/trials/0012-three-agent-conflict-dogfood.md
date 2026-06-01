@@ -113,3 +113,7 @@ The exported patch applied cleanly to a clean copy and `cargo test` passed with 
 This validates the current product as an operator-mediated conflict workflow, not a native conflict-resolution system.
 
 Next meaningful product slice: add a first-class `agent resolve` or `conflict prepare` command that takes multiple review ids, creates a resolver thread/workspace, embeds the candidate review paths and command prefix correctly, and records the source candidate reviews on the resolver review.
+
+## Follow-Up: MVP 0.41
+
+MVP 0.41 adds `anvics agent resolve --review ...` for this exact workflow. The command prepares a resolver thread/workspace from candidate reviews that share one base snapshot, writes a resolver packet with candidate review markdown paths and compact evidence/overlap context, supports an explicit `--agent-command` prefix, and carries `source_review_ids` into the final resolver review markdown.

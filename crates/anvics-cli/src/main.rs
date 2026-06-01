@@ -361,6 +361,18 @@ enum AgentCommand {
         title: String,
         #[arg(long)]
         task: String,
+        #[arg(long)]
+        agent_command: Option<String>,
+    },
+    Resolve {
+        #[arg(long = "review", required = true)]
+        reviews: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        agent_command: Option<String>,
     },
     Enter {
         #[arg(long)]
@@ -920,12 +932,32 @@ fn main() -> Result<()> {
             }
         }
         CliCommand::Agent {
-            command: AgentCommand::Prepare { title, task },
+            command:
+                AgentCommand::Prepare {
+                    title,
+                    task,
+                    agent_command,
+                },
         } => {
             if let Some(socket) = daemon {
-                prepare_agent_via_daemon(root, socket, title, task)
+                prepare_agent_via_daemon(root, socket, title, task, agent_command)
             } else {
-                prepare_agent(root, title, task)
+                prepare_agent(root, title, task, agent_command)
+            }
+        }
+        CliCommand::Agent {
+            command:
+                AgentCommand::Resolve {
+                    reviews,
+                    title,
+                    task,
+                    agent_command,
+                },
+        } => {
+            if let Some(socket) = daemon {
+                resolve_agent_via_daemon(root, socket, reviews, title, task, agent_command)
+            } else {
+                resolve_agent(root, reviews, title, task, agent_command)
             }
         }
         CliCommand::Agent {
@@ -2356,10 +2388,15 @@ fn print_publication_created(root: &std::path::Path, publication: anvics_core::N
     );
 }
 
-fn prepare_agent(root: PathBuf, title: String, task: String) -> Result<()> {
+fn prepare_agent(
+    root: PathBuf,
+    title: String,
+    task: String,
+    agent_command: Option<String>,
+) -> Result<()> {
     let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
     let preparation = store
-        .prepare_agent(title, task)
+        .prepare_agent_with_command(title, task, agent_command)
         .context("failed to prepare agent task")?;
 
     print_agent_preparation(&root, preparation);
@@ -2371,11 +2408,58 @@ fn prepare_agent_via_daemon(
     socket: PathBuf,
     title: String,
     task: String,
+    agent_command: Option<String>,
 ) -> Result<()> {
     match daemon_request(
         &socket,
         root.clone(),
-        ApiMethod::AgentPrepare { title, task },
+        ApiMethod::AgentPrepare {
+            title,
+            task,
+            agent_command,
+        },
+    )? {
+        ApiResult::AgentPrepare { preparation } => {
+            print_agent_preparation(&root, *preparation);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn resolve_agent(
+    root: PathBuf,
+    reviews: Vec<String>,
+    title: Option<String>,
+    task: Option<String>,
+    agent_command: Option<String>,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let preparation = store
+        .prepare_resolution_agent(reviews, title, task, agent_command)
+        .context("failed to prepare resolver agent task")?;
+
+    print_agent_preparation(&root, preparation);
+    Ok(())
+}
+
+fn resolve_agent_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    reviews: Vec<String>,
+    title: Option<String>,
+    task: Option<String>,
+    agent_command: Option<String>,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root.clone(),
+        ApiMethod::AgentResolve {
+            reviews,
+            title,
+            task,
+            agent_command,
+        },
     )? {
         ApiResult::AgentPrepare { preparation } => {
             print_agent_preparation(&root, *preparation);
@@ -2386,6 +2470,7 @@ fn prepare_agent_via_daemon(
 }
 
 fn print_agent_preparation(root: &std::path::Path, preparation: anvics_core::AgentPreparation) {
+    let anvics = preparation.agent_command.as_deref().unwrap_or("anvics");
     println!("Prepared agent task");
     println!("thread: {}", preparation.thread.id);
     println!("workspace: {}", preparation.workspace.id);
@@ -2394,18 +2479,24 @@ fn print_agent_preparation(root: &std::path::Path, preparation: anvics_core::Age
         preparation.workspace.materialized_path
     );
     println!("packet: {}", preparation.packet_path);
+    println!("agent_command: {anvics}");
     println!(
-        "accept_run: anvics --repo {} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]",
+        "launch_prompt: {anvics} --repo {} agent launch-prompt --workspace {} --tool codex",
         shell_quote(&display_path(root)),
         preparation.workspace.id
     );
     println!(
-        "accept: anvics --repo {} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        "accept_run: {anvics} --repo {} agent accept --workspace {} --run-label \"<short label>\" --run-summary \"<short summary>\" -- <program> [args...]",
         shell_quote(&display_path(root)),
         preparation.workspace.id
     );
     println!(
-        "finish: anvics --repo {} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        "accept: {anvics} --repo {} agent accept --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
+        shell_quote(&display_path(root)),
+        preparation.workspace.id
+    );
+    println!(
+        "finish: {anvics} --repo {} agent finish --workspace {} --command \"<command>\" --exit-code <code> --summary \"<short summary>\"",
         shell_quote(&display_path(root)),
         preparation.workspace.id
     );

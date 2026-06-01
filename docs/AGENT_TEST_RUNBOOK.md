@@ -318,3 +318,30 @@ Use `--projection auto` when testing VFS behavior without making FUSE availabili
 - Patch export is the only legacy Git artifact in this slice; commit creation and push come later.
 - Conflict handling is path-level overlap notes, not semantic resolution.
 - The live-agent flow is manual and tool-agnostic; Anvics does not run the agent yet.
+
+## Three-Agent Conflict Resolution
+
+After candidate agents finish and produce reviews, prepare a resolver workspace directly from the competing reviews:
+
+```sh
+anvics --repo "$target_repo" agent resolve \
+  --review "<agent-a-review>" \
+  --review "<agent-b-review>" \
+  --review "<agent-c-review>" \
+  --title "Resolve competing edits" \
+  --task "Combine the compatible intent from all candidates." \
+  --agent-command "$ANVICS_AGENT_COMMAND"
+```
+
+`agent resolve` requires all source reviews to share one base snapshot. It creates a normal resolver thread/workspace, writes a packet containing candidate review paths, changed paths, evidence summaries, and overlap notes, and records the source review ids on the final resolver review.
+
+Use the generated resolver packet with a real agent CLI, then accept the resolver workspace through the normal operator flow:
+
+```sh
+anvics --repo "$target_repo" agent accept \
+  --workspace "<resolver-workspace>" \
+  --run-label "cargo test" \
+  --run-summary "Resolved candidate behavior passed tests." \
+  --output resolved.patch \
+  -- cargo test
+```

@@ -114,6 +114,13 @@ pub enum ApiMethod {
     AgentPrepare {
         title: String,
         task: String,
+        agent_command: Option<String>,
+    },
+    AgentResolve {
+        reviews: Vec<String>,
+        title: Option<String>,
+        task: Option<String>,
+        agent_command: Option<String>,
     },
     AgentEnter {
         workspace: String,
@@ -536,6 +543,13 @@ mod tests {
             ApiMethod::AgentPrepare {
                 title: "title".to_owned(),
                 task: "task".to_owned(),
+                agent_command: None,
+            },
+            ApiMethod::AgentResolve {
+                reviews: vec!["review-1".to_owned(), "review-2".to_owned()],
+                title: Some("Resolve".to_owned()),
+                task: Some("Combine candidates".to_owned()),
+                agent_command: Some("cargo run -q -p anvics-cli --bin anvics --".to_owned()),
             },
             ApiMethod::AgentEnter {
                 workspace: "workspace-1".to_owned(),
@@ -695,6 +709,7 @@ mod tests {
             title: "title".to_owned(),
             task: "task".to_owned(),
             base_snapshot: base_snapshot.clone(),
+            source_review_ids: Vec::new(),
             status: WorkThreadStatus::Active,
             created_at: "2026-05-28T00:00:02Z".to_owned(),
         };
@@ -770,6 +785,7 @@ mod tests {
             thread_id: thread_id.clone(),
             base_snapshot: base_snapshot.clone(),
             final_snapshot: final_snapshot.clone(),
+            source_review_ids: Vec::new(),
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -849,6 +865,7 @@ mod tests {
             thread: thread.clone(),
             workspace: workspace.clone(),
             packet_path: ".anvics/agent-packets/thread.md".to_owned(),
+            agent_command: Some("anvics".to_owned()),
         };
         let launch_prompt = AgentLaunchPrompt {
             tool: AgentLaunchTool::Codex,

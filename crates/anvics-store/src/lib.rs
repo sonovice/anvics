@@ -44,6 +44,10 @@ pub enum StoreError {
     WorkspaceNotFound(String),
     #[error("review does not exist: {0}")]
     ReviewNotFound(String),
+    #[error("agent resolve needs at least two source reviews")]
+    NotEnoughSourceReviews,
+    #[error("source reviews must share one base snapshot")]
+    SourceReviewBaseMismatch,
     #[error("publication does not exist: {0}")]
     PublicationNotFound(String),
     #[error("agent session does not exist: {0}")]
@@ -401,11 +405,22 @@ impl AnvicsStore {
 
     pub fn create_thread(&self, title: String, task: String) -> Result<WorkThread> {
         let base_snapshot = self.current_snapshot()?.id;
+        self.create_thread_on_base(title, task, base_snapshot, Vec::new())
+    }
+
+    fn create_thread_on_base(
+        &self,
+        title: String,
+        task: String,
+        base_snapshot: SourceSnapshotId,
+        source_review_ids: Vec<ReviewProjectionId>,
+    ) -> Result<WorkThread> {
         let thread = WorkThread {
             id: WorkThreadId::new(),
             title,
             task,
             base_snapshot,
+            source_review_ids,
             status: WorkThreadStatus::Active,
             created_at: now_rfc3339()?,
         };
@@ -864,6 +879,7 @@ impl AnvicsStore {
             thread_id: thread.id.clone(),
             base_snapshot: thread.base_snapshot.clone(),
             final_snapshot,
+            source_review_ids: thread.source_review_ids.clone(),
             changed_paths,
             file_effects,
             change_units,
@@ -1085,21 +1101,75 @@ impl AnvicsStore {
     }
 
     pub fn prepare_agent(&self, title: String, task: String) -> Result<AgentPreparation> {
+        self.prepare_agent_with_command(title, task, None)
+    }
+
+    pub fn prepare_agent_with_command(
+        &self,
+        title: String,
+        task: String,
+        agent_command: Option<String>,
+    ) -> Result<AgentPreparation> {
         let thread = self.create_thread(title, task)?;
         let workspace = self.create_workspace(thread.id.as_str())?;
+        self.write_agent_packet(&thread, &workspace, agent_command)
+    }
+
+    pub fn prepare_resolution_agent(
+        &self,
+        review_ids: Vec<String>,
+        title: Option<String>,
+        task: Option<String>,
+        agent_command: Option<String>,
+    ) -> Result<AgentPreparation> {
+        if review_ids.len() < 2 {
+            return Err(StoreError::NotEnoughSourceReviews);
+        }
+
+        let mut reviews = Vec::new();
+        for review_id in review_ids {
+            reviews.push(self.show_review(&review_id)?);
+        }
+        let base_snapshot = reviews[0].base_snapshot.clone();
+        if reviews
+            .iter()
+            .any(|review| review.base_snapshot != base_snapshot)
+        {
+            return Err(StoreError::SourceReviewBaseMismatch);
+        }
+
+        let source_review_ids = reviews
+            .iter()
+            .map(|review| review.id.clone())
+            .collect::<Vec<_>>();
+        let title = title.unwrap_or_else(|| format!("Resolve {} candidate reviews", reviews.len()));
+        let task = render_resolution_task(self, &reviews, task)?;
+        let thread = self.create_thread_on_base(title, task, base_snapshot, source_review_ids)?;
+        let workspace = self.create_workspace(thread.id.as_str())?;
+        self.write_agent_packet(&thread, &workspace, agent_command)
+    }
+
+    fn write_agent_packet(
+        &self,
+        thread: &WorkThread,
+        workspace: &WorkspaceView,
+        agent_command: Option<String>,
+    ) -> Result<AgentPreparation> {
+        let agent_command = normalize_agent_command(agent_command);
         let packet_path = self.agent_packet_path(thread.id.as_str());
         if let Some(parent) = packet_path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(
             &packet_path,
-            render_agent_packet(&self.root, &thread, &workspace),
+            render_agent_packet(&self.root, thread, workspace, Some(&agent_command)),
         )?;
 
         Ok(AgentPreparation {
-            thread,
-            workspace,
+            thread: thread.clone(),
+            workspace: workspace.clone(),
             packet_path: packet_path.to_string_lossy().to_string(),
+            agent_command: Some(agent_command),
         })
     }
 
@@ -3448,18 +3518,101 @@ fn wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
     pattern_index == pattern.len()
 }
 
+fn render_resolution_task(
+    store: &AnvicsStore,
+    reviews: &[ReviewProjection],
+    operator_task: Option<String>,
+) -> Result<String> {
+    let mut task = String::new();
+    task.push_str(
+        "Resolve the candidate Anvics reviews below into one coherent workspace change.\n\n",
+    );
+    if let Some(operator_task) = operator_task {
+        let operator_task = operator_task.trim();
+        if !operator_task.is_empty() {
+            task.push_str("## Operator Resolution Instructions\n\n");
+            task.push_str(operator_task);
+            task.push_str("\n\n");
+        }
+    }
+
+    task.push_str("## Candidate Reviews\n\n");
+    for (index, review) in reviews.iter().enumerate() {
+        let thread = store.show_thread(review.thread_id.as_str())?;
+        let review_path = store.review_markdown_path(review.id.as_str());
+        task.push_str(&format!("### Candidate {}: `{}`\n\n", index + 1, review.id));
+        task.push_str(&format!(
+            "- Thread: `{}`\n- Title: {}\n- Review markdown: `{}`\n- Base snapshot: `{}`\n- Final snapshot: `{}`\n",
+            review.thread_id,
+            thread.title,
+            review_path.display(),
+            review.base_snapshot,
+            review.final_snapshot
+        ));
+        task.push_str("- Changed paths:");
+        if review.changed_paths.is_empty() {
+            task.push_str(" none\n");
+        } else {
+            task.push('\n');
+            for path in &review.changed_paths {
+                task.push_str(&format!("  - {:?}: `{}`\n", path.status, path.path));
+            }
+        }
+        task.push_str("- Evidence summaries:");
+        if review.evidence.is_empty() {
+            task.push_str(" none\n");
+        } else {
+            task.push('\n');
+            for evidence in &review.evidence {
+                task.push_str(&format!("  - {}\n", evidence.summary));
+            }
+        }
+        task.push_str("- Overlap notes:");
+        if review.overlap_notes.is_empty() {
+            task.push_str(" none\n\n");
+        } else {
+            task.push('\n');
+            for note in &review.overlap_notes {
+                task.push_str(&format!("  - {note}\n"));
+            }
+            task.push('\n');
+        }
+    }
+
+    task.push_str("## Resolution Expectations\n\n");
+    task.push_str("- Read the candidate review markdown files before editing.\n");
+    task.push_str("- Preserve compatible intent from all candidates when possible.\n");
+    task.push_str("- If candidate intents conflict, choose the simplest behavior that satisfies the operator instructions and explain the tradeoff in your final report.\n");
+    task.push_str("- Use Anvics `workspace diff`, checkpoint before risky edits, run coordination status before finishing, and report compact verification evidence.\n");
+
+    Ok(task)
+}
+
 fn agent_command_prefix() -> String {
-    std::env::var("ANVICS_AGENT_COMMAND")
-        .ok()
+    normalize_agent_command(None)
+}
+
+fn normalize_agent_command(agent_command: Option<String>) -> String {
+    agent_command
+        .or_else(|| std::env::var("ANVICS_AGENT_COMMAND").ok())
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "anvics".to_owned())
 }
 
-fn render_agent_packet(repo_root: &Path, thread: &WorkThread, workspace: &WorkspaceView) -> String {
+fn render_agent_packet(
+    repo_root: &Path,
+    thread: &WorkThread,
+    workspace: &WorkspaceView,
+    agent_command: Option<&str>,
+) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let workspace_path = shell_quote(&workspace.materialized_path);
-    let anvics = agent_command_prefix();
+    let anvics = agent_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(agent_command_prefix);
     let thread_id = thread.id.to_string();
     let workspace_id = workspace.id.to_string();
     let skill_path = Path::new(&workspace.materialized_path).join("skills/anvics-skill/SKILL.md");
@@ -3729,6 +3882,23 @@ fn render_review(
     } else {
         for path in &review.changed_paths {
             markdown.push_str(&format!("- {:?}: `{}`\n", path.status, path.path));
+        }
+    }
+
+    markdown.push_str("\n## Source Reviews\n\n");
+    if review.source_review_ids.is_empty() {
+        markdown.push_str("- This review does not resolve earlier candidate reviews.\n");
+    } else {
+        for source_review_id in &review.source_review_ids {
+            markdown.push_str(&format!(
+                "- `{}`: `{}`\n",
+                source_review_id,
+                repo_root
+                    .join(".anvics")
+                    .join("reviews")
+                    .join(format!("{source_review_id}.md"))
+                    .display()
+            ));
         }
     }
 
@@ -4162,6 +4332,181 @@ mod tests {
         assert!(fs::read_to_string(dir.path().join("AGENTS.md"))
             .unwrap()
             .contains("Do not create Git branches"));
+    }
+
+    #[test]
+    fn prepare_resolution_agent_records_source_reviews_and_renders_packet() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+
+        let first = store
+            .prepare_agent("Candidate A".to_owned(), "Change app one way".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("app.txt"),
+            "candidate a\n",
+        )
+        .unwrap();
+        let first_finish = store
+            .finish_agent(
+                first.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate A verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let second = store
+            .prepare_agent(
+                "Candidate B".to_owned(),
+                "Change app another way".to_owned(),
+            )
+            .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("app.txt"),
+            "candidate b\n",
+        )
+        .unwrap();
+        let second_finish = store
+            .finish_agent(
+                second.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate B verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let preparation = store
+            .prepare_resolution_agent(
+                vec![
+                    first_finish.review.id.to_string(),
+                    second_finish.review.id.to_string(),
+                ],
+                Some("Resolve candidates".to_owned()),
+                Some("Keep both useful intents.".to_owned()),
+                Some("cargo run -q -p anvics-cli --bin anvics --".to_owned()),
+            )
+            .unwrap();
+        let thread = store.show_thread(preparation.thread.id.as_str()).unwrap();
+        assert_eq!(
+            thread.source_review_ids,
+            vec![
+                first_finish.review.id.clone(),
+                second_finish.review.id.clone()
+            ]
+        );
+        assert_eq!(
+            preparation.workspace.base_snapshot,
+            first.thread.base_snapshot
+        );
+        assert_eq!(
+            preparation.agent_command.as_deref(),
+            Some("cargo run -q -p anvics-cli --bin anvics --")
+        );
+
+        let packet = fs::read_to_string(preparation.packet_path).unwrap();
+        assert!(packet.contains("Keep both useful intents."));
+        assert!(packet.contains(first_finish.review.id.as_str()));
+        assert!(packet.contains(second_finish.review.id.as_str()));
+        assert!(packet.contains("Candidate A"));
+        assert!(packet.contains("candidate A verified"));
+        assert!(packet.contains("cargo run -q -p anvics-cli --bin anvics --"));
+
+        fs::write(
+            Path::new(&preparation.workspace.materialized_path).join("app.txt"),
+            "resolved\n",
+        )
+        .unwrap();
+        let resolution_finish = store
+            .finish_agent(
+                preparation.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "resolved candidates".to_owned(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            resolution_finish.review.source_review_ids,
+            vec![
+                first_finish.review.id.clone(),
+                second_finish.review.id.clone()
+            ]
+        );
+        let markdown = fs::read_to_string(resolution_finish.review_markdown_path).unwrap();
+        assert!(markdown.contains("## Source Reviews"));
+        assert!(markdown.contains(first_finish.review_markdown_path.as_str()));
+        assert!(markdown.contains(second_finish.review_markdown_path.as_str()));
+    }
+
+    #[test]
+    fn prepare_resolution_agent_rejects_invalid_review_sets() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base one".to_owned())).unwrap();
+
+        let first = store
+            .prepare_agent("Candidate A".to_owned(), "Change app".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("app.txt"),
+            "candidate a\n",
+        )
+        .unwrap();
+        let first_finish = store
+            .finish_agent(
+                first.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate A verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let too_few = store
+            .prepare_resolution_agent(vec![first_finish.review.id.to_string()], None, None, None)
+            .unwrap_err();
+        assert!(matches!(too_few, StoreError::NotEnoughSourceReviews));
+
+        fs::write(dir.path().join("app.txt"), "new base\n").unwrap();
+        store.create_snapshot(Some("base two".to_owned())).unwrap();
+        let second = store
+            .prepare_agent("Candidate B".to_owned(), "Change app again".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&second.workspace.materialized_path).join("app.txt"),
+            "candidate b\n",
+        )
+        .unwrap();
+        let second_finish = store
+            .finish_agent(
+                second.workspace.id.as_str(),
+                "true".to_owned(),
+                0,
+                "candidate B verified".to_owned(),
+                None,
+            )
+            .unwrap();
+
+        let mismatch = store
+            .prepare_resolution_agent(
+                vec![
+                    first_finish.review.id.to_string(),
+                    second_finish.review.id.to_string(),
+                ],
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(mismatch, StoreError::SourceReviewBaseMismatch));
     }
 
     #[test]

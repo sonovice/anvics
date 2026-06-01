@@ -170,6 +170,8 @@ pub struct WorkThread {
     pub title: String,
     pub task: String,
     pub base_snapshot: SourceSnapshotId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_review_ids: Vec<ReviewProjectionId>,
     pub status: WorkThreadStatus,
     pub created_at: String,
 }
@@ -399,6 +401,8 @@ pub struct ReviewProjection {
     pub thread_id: WorkThreadId,
     pub base_snapshot: SourceSnapshotId,
     pub final_snapshot: SourceSnapshotId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_review_ids: Vec<ReviewProjectionId>,
     pub changed_paths: Vec<ChangedPath>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<FileEffect>,
@@ -612,6 +616,8 @@ pub struct AgentPreparation {
     pub thread: WorkThread,
     pub workspace: WorkspaceView,
     pub packet_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_command: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -747,6 +753,7 @@ mod tests {
             title: "Agent task".to_owned(),
             task: "Edit a file".to_owned(),
             base_snapshot: base_snapshot.clone(),
+            source_review_ids: Vec::new(),
             status: WorkThreadStatus::Active,
             created_at: "2026-05-28T00:00:00Z".to_owned(),
         };
@@ -834,6 +841,7 @@ mod tests {
             thread_id: thread_id.clone(),
             base_snapshot: base_snapshot.clone(),
             final_snapshot: final_snapshot.clone(),
+            source_review_ids: Vec::new(),
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,

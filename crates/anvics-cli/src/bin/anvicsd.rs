@@ -286,8 +286,29 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 review: Box::new(review),
             })
         }
-        ApiMethod::AgentPrepare { title, task } => {
-            let preparation = AnvicsStore::open(&repo)?.prepare_agent(title, task)?;
+        ApiMethod::AgentPrepare {
+            title,
+            task,
+            agent_command,
+        } => {
+            let preparation =
+                AnvicsStore::open(&repo)?.prepare_agent_with_command(title, task, agent_command)?;
+            Ok(ApiResult::AgentPrepare {
+                preparation: Box::new(preparation),
+            })
+        }
+        ApiMethod::AgentResolve {
+            reviews,
+            title,
+            task,
+            agent_command,
+        } => {
+            let preparation = AnvicsStore::open(&repo)?.prepare_resolution_agent(
+                reviews,
+                title,
+                task,
+                agent_command,
+            )?;
             Ok(ApiResult::AgentPrepare {
                 preparation: Box::new(preparation),
             })

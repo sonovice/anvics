@@ -149,6 +149,8 @@ Success checklist:
 - All three agents edit only their workspace.
 - All three agents use workspace diff, checkpoint, and coordination status.
 - All three candidate reviews report overlap on src/lib.rs.
+- Prepare the resolver with:
+  anvics agent resolve --review "<agent-a-review>" --review "<agent-b-review>" --review "<agent-c-review>" --title "Resolve score candidates" --task "Combine the compatible intent from all candidates."
 - A resolver workspace combines the three intents.
 - The resolved patch applies cleanly and cargo test passes.
 EOF

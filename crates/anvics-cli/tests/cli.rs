@@ -3450,6 +3450,164 @@ fn two_prepared_agents_report_overlap_notes() {
     .stdout(predicate::str::contains("also changed: app.txt"));
 }
 
+#[test]
+fn agent_resolve_prepares_resolver_packet_and_daemon_matches() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+
+    let first_prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Candidate A",
+            "--task",
+            "Write candidate A",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let first_workspace = value_after_prefix(&first_prepare, "workspace: ");
+    let first_workspace_path = value_after_prefix(&first_prepare, "workspace_path: ");
+    fs::write(
+        std::path::Path::new(&first_workspace_path).join("app.txt"),
+        "candidate a\n",
+    )
+    .unwrap();
+    let first_finish = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &first_workspace,
+            "--command",
+            "true",
+            "--exit-code",
+            "0",
+            "--summary",
+            "candidate A verified",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let first_review = value_after_prefix(&first_finish, "review: ");
+
+    let second_prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "Candidate B",
+            "--task",
+            "Write candidate B",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let second_workspace = value_after_prefix(&second_prepare, "workspace: ");
+    let second_workspace_path = value_after_prefix(&second_prepare, "workspace_path: ");
+    fs::write(
+        std::path::Path::new(&second_workspace_path).join("app.txt"),
+        "candidate b\n",
+    )
+    .unwrap();
+    let second_finish = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &second_workspace,
+            "--command",
+            "true",
+            "--exit-code",
+            "0",
+            "--summary",
+            "candidate B verified",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let second_review = value_after_prefix(&second_finish, "review: ");
+
+    let command_prefix = "cargo run -q -p anvics-cli --bin anvics --";
+    let resolve = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "resolve",
+            "--review",
+            &first_review,
+            "--review",
+            &second_review,
+            "--title",
+            "Resolve candidates",
+            "--task",
+            "Keep useful behavior from both candidates.",
+            "--agent-command",
+            command_prefix,
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Prepared agent task"))
+    .stdout(predicate::str::contains("agent_command: cargo run"))
+    .stdout(predicate::str::contains("launch_prompt: cargo run"))
+    .get_output()
+    .stdout
+    .clone();
+    let packet = value_after_prefix(&resolve, "packet: ");
+    let packet_text = fs::read_to_string(packet).unwrap();
+    assert!(packet_text.contains(&first_review));
+    assert!(packet_text.contains(&second_review));
+    assert!(packet_text.contains("Keep useful behavior from both candidates."));
+    assert!(packet_text.contains("candidate A verified"));
+    assert!(packet_text.contains(command_prefix));
+
+    let socket = dir.path().join("anvics.sock");
+    let mut daemon = start_daemon(&socket);
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "resolve",
+            "--review",
+            &first_review,
+            "--review",
+            &second_review,
+            "--agent-command",
+            command_prefix,
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Prepared agent task"))
+    .stdout(predicate::str::contains("agent_command: cargo run"));
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
 fn anvics(repo: &std::path::Path, args: &[&str]) -> Command {
     let mut command = Command::cargo_bin("anvics").unwrap();
     command.args(["--repo", repo.to_str().unwrap()]).args(args);
