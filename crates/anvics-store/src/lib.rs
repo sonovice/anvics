@@ -10,11 +10,13 @@ use anvics_core::{
     FileEffectClassification, FileEffectLabel, FileEffectProvenance, FileEffectSet,
     FileEffectSetId, MergeSafety, NativePublication, NativePublicationId, ObjectId, OverlayEntry,
     PolicyOverride, PolicyOverrideId, ProjectionCapabilities, ProjectionKind, ProjectionRequest,
-    RelatedWork, RepoDoctorReport, RepositoryEvent, RepositoryEventId, RepositoryEventKind,
-    RepositoryId, RepositoryManifest, ResolutionVerification, ReviewProjection, ReviewProjectionId,
-    RiskFinding, RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
+    PublicationRevertCaseKind, PublicationRevertPathCase, PublicationRevertPlan,
+    PublicationRevertPlanId, PublicationRevertPreparation, RelatedWork, RepoDoctorReport,
+    RepositoryEvent, RepositoryEventId, RepositoryEventKind, RepositoryId, RepositoryManifest,
+    ResolutionVerification, RestoreSourceKind, ReviewProjection, ReviewProjectionId, RiskFinding,
+    RiskFindingId, RiskScan, RiskScanId, RiskSeverity, RiskTargetKind, SourceSnapshot,
     SourceSnapshotId, Tree, TreeEntry, TreeEntryKind, WorkThread, WorkThreadId, WorkThreadStatus,
-    WorkspaceOverlay, WorkspaceView, WorkspaceViewId,
+    WorkspaceOverlay, WorkspaceRestore, WorkspaceRestoreId, WorkspaceView, WorkspaceViewId,
 };
 use ignore::WalkBuilder;
 use std::{
@@ -78,6 +80,21 @@ pub enum StoreError {
     EmptyAgentName,
     #[error("agent checkpoint summary must not be empty")]
     EmptyCheckpointSummary,
+    #[error("agent checkpoint does not exist: {0}")]
+    AgentCheckpointNotFound(String),
+    #[error("agent checkpoint {checkpoint_id} does not belong to workspace {workspace_id}")]
+    AgentCheckpointWorkspaceMismatch {
+        checkpoint_id: String,
+        workspace_id: String,
+    },
+    #[error("restore reason must not be empty")]
+    EmptyRestoreReason,
+    #[error("workspace has no latest snapshot: {0}")]
+    MissingLatestSnapshot(String),
+    #[error("invalid restore source: {0}")]
+    InvalidRestoreSource(String),
+    #[error("publication revert plan does not exist: {0}")]
+    PublicationRevertPlanNotFound(String),
     #[error("command label must not be empty")]
     EmptyCommandLabel,
     #[error("command argv must not be empty")]
@@ -252,6 +269,8 @@ impl AnvicsStore {
         fs::create_dir_all(anvics_dir.join("publications"))?;
         fs::create_dir_all(anvics_dir.join("agent-packets"))?;
         fs::create_dir_all(anvics_dir.join("agent-checkpoints"))?;
+        fs::create_dir_all(anvics_dir.join("restores"))?;
+        fs::create_dir_all(anvics_dir.join("publication-reverts"))?;
         fs::create_dir_all(anvics_dir.join("events"))?;
         fs::create_dir_all(anvics_dir.join("sessions"))?;
         fs::create_dir_all(anvics_dir.join("command-events"))?;
@@ -416,7 +435,7 @@ impl AnvicsStore {
 
     pub fn create_thread(&self, title: String, task: String) -> Result<WorkThread> {
         let base_snapshot = self.current_snapshot()?.id;
-        self.create_thread_on_base(title, task, base_snapshot, Vec::new(), None)
+        self.create_thread_on_base(title, task, base_snapshot, Vec::new(), None, None)
     }
 
     fn create_thread_on_base(
@@ -426,6 +445,7 @@ impl AnvicsStore {
         base_snapshot: SourceSnapshotId,
         source_review_ids: Vec<ReviewProjectionId>,
         conflict_analysis_id: Option<ConflictAnalysisId>,
+        publication_revert_plan_id: Option<PublicationRevertPlanId>,
     ) -> Result<WorkThread> {
         let thread = WorkThread {
             id: WorkThreadId::new(),
@@ -434,6 +454,7 @@ impl AnvicsStore {
             base_snapshot,
             source_review_ids,
             conflict_analysis_id,
+            publication_revert_plan_id,
             status: WorkThreadStatus::Active,
             created_at: now_rfc3339()?,
         };
@@ -554,6 +575,124 @@ impl AnvicsStore {
         self.write_workspace_overlay(&overlay)?;
         write_json_pretty(self.workspace_path(id), &workspace)?;
         Ok(workspace)
+    }
+
+    pub fn workspace_restore(
+        &self,
+        workspace_id: &str,
+        source: &str,
+        paths: Vec<String>,
+        reason: String,
+        dry_run: bool,
+    ) -> Result<WorkspaceRestore> {
+        let reason = reason.trim().to_owned();
+        if reason.is_empty() {
+            return Err(StoreError::EmptyRestoreReason);
+        }
+        let workspace = self.show_workspace(workspace_id)?;
+        let (source_kind, source_id, source_snapshot_id) =
+            self.resolve_restore_source(&workspace, source)?;
+        let source_files = self.snapshot_file_map(&source_snapshot_id)?;
+        let workspace_root = Path::new(&workspace.materialized_path);
+        let current_files = workspace_file_map(workspace_root)?;
+        let selected_paths = restore_selected_paths(&source_files, &current_files, paths);
+        let changed_paths = diff_selected_file_maps(&source_files, &current_files, &selected_paths);
+        let created_at = now_rfc3339()?;
+
+        if dry_run {
+            return Ok(WorkspaceRestore {
+                id: WorkspaceRestoreId::new(),
+                workspace_id: workspace.id,
+                thread_id: workspace.thread_id,
+                source: source_kind,
+                source_id,
+                paths: selected_paths,
+                reason,
+                pre_restore_checkpoint_id: None,
+                changed_paths,
+                dry_run: true,
+                created_at,
+            });
+        }
+
+        let checkpoint = self.agent_checkpoint(
+            workspace_id,
+            format!(
+                "pre-restore: {}",
+                reason.chars().take(120).collect::<String>()
+            ),
+        )?;
+        let restore = WorkspaceRestore {
+            id: WorkspaceRestoreId::new(),
+            workspace_id: workspace.id.clone(),
+            thread_id: workspace.thread_id.clone(),
+            source: source_kind,
+            source_id,
+            paths: selected_paths.clone(),
+            reason,
+            pre_restore_checkpoint_id: Some(checkpoint.id.clone()),
+            changed_paths: changed_paths.clone(),
+            dry_run: false,
+            created_at,
+        };
+        self.append_event(
+            RepositoryEventKind::WorkspaceRestorePlanned,
+            Some(restore.id.to_string()),
+        )?;
+        for path in &selected_paths {
+            self.apply_snapshot_path_to_workspace(&source_snapshot_id, path, workspace_root)?;
+        }
+        write_json_pretty(self.workspace_restore_path(restore.id.as_str()), &restore)?;
+        self.append_event(
+            RepositoryEventKind::WorkspaceRestored,
+            Some(restore.id.to_string()),
+        )?;
+        Ok(restore)
+    }
+
+    pub fn list_agent_checkpoints(&self, workspace_id: &str) -> Result<Vec<AgentCheckpoint>> {
+        let workspace = self.show_workspace(workspace_id)?;
+        let mut checkpoints: Vec<AgentCheckpoint> =
+            read_json_dir::<AgentCheckpoint>(self.anvics_dir.join("agent-checkpoints"))?
+                .into_iter()
+                .filter(|checkpoint| checkpoint.workspace_id == workspace.id)
+                .collect();
+        checkpoints.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(checkpoints)
+    }
+
+    pub fn show_agent_checkpoint(&self, id: &str) -> Result<AgentCheckpoint> {
+        let path = self.agent_checkpoint_path(id);
+        if !path.exists() {
+            return Err(StoreError::AgentCheckpointNotFound(id.to_owned()));
+        }
+        read_json(path)
+    }
+
+    pub fn restore_agent_checkpoint(
+        &self,
+        workspace_id: &str,
+        checkpoint_id: &str,
+        reason: String,
+    ) -> Result<WorkspaceRestore> {
+        let checkpoint = self.show_agent_checkpoint(checkpoint_id)?;
+        if checkpoint.workspace_id.as_str() != workspace_id {
+            return Err(StoreError::AgentCheckpointWorkspaceMismatch {
+                checkpoint_id: checkpoint_id.to_owned(),
+                workspace_id: workspace_id.to_owned(),
+            });
+        }
+        self.workspace_restore(
+            workspace_id,
+            &format!("checkpoint:{checkpoint_id}"),
+            Vec::new(),
+            reason,
+            false,
+        )
     }
 
     pub fn workspace_overlay(&self, id: &str) -> Result<Option<WorkspaceOverlay>> {
@@ -894,6 +1033,7 @@ impl AnvicsStore {
             final_snapshot,
             source_review_ids: thread.source_review_ids.clone(),
             conflict_analysis_id: thread.conflict_analysis_id.clone(),
+            publication_revert_plan_id: thread.publication_revert_plan_id.clone(),
             changed_paths,
             file_effects,
             change_units,
@@ -903,9 +1043,26 @@ impl AnvicsStore {
         };
         write_json_pretty(self.review_path(review.id.as_str()), &review)?;
         let resolution = self.review_resolution_verification(&thread, &review)?;
+        let restores = self.thread_workspace_restores(&thread.id)?;
+        let revert_plan = review
+            .publication_revert_plan_id
+            .as_ref()
+            .map(|id| self.show_publication_revert_plan(id.as_str()))
+            .transpose()?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
-            render_review(&self.root, &review, &thread, &[], &[], resolution.as_ref()),
+            render_review(
+                &self.root,
+                &review,
+                &thread,
+                ReviewRenderContext {
+                    scans: &[],
+                    overrides: &[],
+                    resolution: resolution.as_ref(),
+                    restores: &restores,
+                    revert_plan: revert_plan.as_ref(),
+                },
+            ),
         )?;
         self.append_event(
             RepositoryEventKind::ReviewCreated,
@@ -1136,6 +1293,80 @@ impl AnvicsStore {
         read_json(path)
     }
 
+    pub fn prepare_publication_revert(
+        &self,
+        publication_id: &str,
+        base_snapshot: Option<String>,
+        reason: String,
+    ) -> Result<PublicationRevertPreparation> {
+        let reason = reason.trim().to_owned();
+        if reason.is_empty() {
+            return Err(StoreError::EmptyRestoreReason);
+        }
+        let source_publication = self.show_publication(publication_id)?;
+        let source_review = self.show_review(source_publication.review_id.as_str())?;
+        let revert_base_snapshot = match base_snapshot {
+            Some(id) => self.show_snapshot(&id)?.id,
+            None => self.current_snapshot()?.id,
+        };
+        let title = format!("Revert publication {}", source_publication.id);
+        let task = format!(
+            "Prepare an append-only revert of publication `{}`.\n\nReason: {}\n\nSource review: `{}`.\nDo not treat this as new feature work; preserve only the inverse changes that are safe and resolve any listed unresolved inverse cases before acceptance.",
+            source_publication.id, reason, source_review.id
+        );
+        let mut thread = self.create_thread_on_base(
+            title,
+            task,
+            revert_base_snapshot.clone(),
+            Vec::new(),
+            None,
+            None,
+        )?;
+        let workspace = self.create_workspace(thread.id.as_str())?;
+        let path_cases = self.apply_publication_inverse(
+            &source_review.base_snapshot,
+            &source_review.final_snapshot,
+            &revert_base_snapshot,
+            Path::new(&workspace.materialized_path),
+        )?;
+        let unresolved_cases = path_cases
+            .iter()
+            .filter(|case| case.kind != PublicationRevertCaseKind::CleanInverse)
+            .cloned()
+            .collect::<Vec<_>>();
+        let plan = PublicationRevertPlan {
+            id: PublicationRevertPlanId::new(),
+            source_publication_id: source_publication.id,
+            source_review_id: source_review.id,
+            source_base_snapshot: source_review.base_snapshot,
+            source_final_snapshot: source_review.final_snapshot,
+            revert_base_snapshot,
+            path_cases,
+            unresolved_cases,
+            reason,
+            thread_id: thread.id.clone(),
+            workspace_id: workspace.id.clone(),
+            created_at: now_rfc3339()?,
+        };
+        write_json_pretty(self.publication_revert_plan_path(plan.id.as_str()), &plan)?;
+        self.append_event(
+            RepositoryEventKind::PublicationRevertPrepared,
+            Some(plan.id.to_string()),
+        )?;
+        thread.publication_revert_plan_id = Some(plan.id.clone());
+        write_json_pretty(self.thread_path(thread.id.as_str()), &thread)?;
+        let preparation = self.write_agent_packet(&thread, &workspace, None)?;
+        Ok(PublicationRevertPreparation { plan, preparation })
+    }
+
+    pub fn show_publication_revert_plan(&self, id: &str) -> Result<PublicationRevertPlan> {
+        let path = self.publication_revert_plan_path(id);
+        if !path.exists() {
+            return Err(StoreError::PublicationRevertPlanNotFound(id.to_owned()));
+        }
+        read_json(path)
+    }
+
     pub fn prepare_agent(&self, title: String, task: String) -> Result<AgentPreparation> {
         self.prepare_agent_with_command(title, task, None)
     }
@@ -1257,6 +1488,7 @@ impl AnvicsStore {
             analysis.base_snapshot.clone(),
             source_review_ids,
             Some(analysis.id.clone()),
+            None,
         )?;
         let workspace = self.create_workspace(thread.id.as_str())?;
         self.apply_conflict_safe_changes(&analysis, &workspace)?;
@@ -1488,6 +1720,131 @@ impl AnvicsStore {
             }
         }
         Ok(())
+    }
+
+    fn apply_snapshot_path_to_workspace(
+        &self,
+        snapshot_id: &SourceSnapshotId,
+        path: &str,
+        workspace_root: &Path,
+    ) -> Result<()> {
+        let target = workspace_root.join(path);
+        match self.file_bytes_at_snapshot(snapshot_id, path)? {
+            Some(bytes) => {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(target, bytes)?;
+            }
+            None => remove_path_if_exists(&target)?,
+        }
+        Ok(())
+    }
+
+    fn resolve_restore_source(
+        &self,
+        workspace: &WorkspaceView,
+        source: &str,
+    ) -> Result<(RestoreSourceKind, Option<String>, SourceSnapshotId)> {
+        match source {
+            "base" => Ok((
+                RestoreSourceKind::Base,
+                None,
+                workspace.base_snapshot.clone(),
+            )),
+            "latest" => Ok((
+                RestoreSourceKind::Latest,
+                workspace.latest_snapshot.clone().map(|id| id.to_string()),
+                workspace
+                    .latest_snapshot
+                    .clone()
+                    .ok_or_else(|| StoreError::MissingLatestSnapshot(workspace.id.to_string()))?,
+            )),
+            _ if source.starts_with("snapshot:") => {
+                let id = source.trim_start_matches("snapshot:");
+                Ok((
+                    RestoreSourceKind::Snapshot,
+                    Some(id.to_owned()),
+                    self.show_snapshot(id)?.id,
+                ))
+            }
+            _ if source.starts_with("checkpoint:") => {
+                let id = source.trim_start_matches("checkpoint:");
+                let checkpoint = self.show_agent_checkpoint(id)?;
+                if checkpoint.workspace_id != workspace.id {
+                    return Err(StoreError::AgentCheckpointWorkspaceMismatch {
+                        checkpoint_id: id.to_owned(),
+                        workspace_id: workspace.id.to_string(),
+                    });
+                }
+                Ok((
+                    RestoreSourceKind::Checkpoint,
+                    Some(id.to_owned()),
+                    checkpoint.snapshot_id,
+                ))
+            }
+            _ if source.starts_with("publication:") => {
+                let id = source.trim_start_matches("publication:");
+                let publication = self.show_publication(id)?;
+                Ok((
+                    RestoreSourceKind::Publication,
+                    Some(id.to_owned()),
+                    publication.accepted_snapshot,
+                ))
+            }
+            _ => Err(StoreError::InvalidRestoreSource(source.to_owned())),
+        }
+    }
+
+    fn apply_publication_inverse(
+        &self,
+        source_base_snapshot: &SourceSnapshotId,
+        source_final_snapshot: &SourceSnapshotId,
+        revert_base_snapshot: &SourceSnapshotId,
+        workspace_root: &Path,
+    ) -> Result<Vec<PublicationRevertPathCase>> {
+        let source_base_files = self.snapshot_file_map(source_base_snapshot)?;
+        let source_final_files = self.snapshot_file_map(source_final_snapshot)?;
+        let revert_base_files = self.snapshot_file_map(revert_base_snapshot)?;
+        let changed_paths = diff_file_maps(&source_base_files, &source_final_files);
+        let mut cases = Vec::new();
+        for changed in changed_paths {
+            let path = changed.path.clone();
+            let expected_current = source_final_files.get(&path);
+            let actual_current = revert_base_files.get(&path);
+            let kind = if expected_current == actual_current {
+                self.apply_snapshot_path_to_workspace(source_base_snapshot, &path, workspace_root)?;
+                PublicationRevertCaseKind::CleanInverse
+            } else if actual_current.is_none() {
+                PublicationRevertCaseKind::TargetMissing
+            } else {
+                PublicationRevertCaseKind::TargetChanged
+            };
+            let summary = match kind {
+                PublicationRevertCaseKind::CleanInverse => {
+                    format!("`{path}` inverse applied cleanly.")
+                }
+                PublicationRevertCaseKind::TargetMissing => {
+                    format!("`{path}` cannot be inverted automatically because the revert base is missing the expected final path.")
+                }
+                PublicationRevertCaseKind::TargetChanged => {
+                    format!("`{path}` cannot be inverted automatically because the revert base differs from the source publication final state.")
+                }
+                PublicationRevertCaseKind::BinaryOrUnknown => {
+                    format!("`{path}` cannot be inverted automatically because the path is binary or unknown.")
+                }
+                PublicationRevertCaseKind::DeleteModifyRisk => {
+                    format!("`{path}` has a delete/modify risk and needs operator review.")
+                }
+            };
+            cases.push(PublicationRevertPathCase {
+                path,
+                status: changed.status,
+                kind,
+                summary,
+            });
+        }
+        Ok(cases)
     }
 
     fn auto_merge_text_path(
@@ -2387,6 +2744,16 @@ impl AnvicsStore {
             .join(format!("{id}.json"))
     }
 
+    fn workspace_restore_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir.join("restores").join(format!("{id}.json"))
+    }
+
+    fn publication_revert_plan_path(&self, id: &str) -> PathBuf {
+        self.anvics_dir
+            .join("publication-reverts")
+            .join(format!("{id}.json"))
+    }
+
     fn append_event(
         &self,
         kind: RepositoryEventKind,
@@ -2526,16 +2893,27 @@ impl AnvicsStore {
     ) -> Result<()> {
         let scans = self.list_review_risk_scans(review.id.as_str())?;
         let overrides = self.list_review_policy_overrides(review.id.as_str())?;
+        let restores = self.thread_workspace_restores(&thread.id)?;
+        let revert_plan = review
+            .publication_revert_plan_id
+            .as_ref()
+            .map(|id| self.show_publication_revert_plan(id.as_str()))
+            .transpose()?;
         fs::write(
             self.review_markdown_path(review.id.as_str()),
             render_review(
                 &self.root,
                 review,
                 thread,
-                &scans,
-                &overrides,
-                self.review_resolution_verification(thread, review)?
-                    .as_ref(),
+                ReviewRenderContext {
+                    scans: &scans,
+                    overrides: &overrides,
+                    resolution: self
+                        .review_resolution_verification(thread, review)?
+                        .as_ref(),
+                    restores: &restores,
+                    revert_plan: revert_plan.as_ref(),
+                },
             ),
         )?;
         Ok(())
@@ -2595,6 +2973,17 @@ impl AnvicsStore {
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
         Ok(overrides)
+    }
+
+    fn thread_workspace_restores(&self, thread_id: &WorkThreadId) -> Result<Vec<WorkspaceRestore>> {
+        let mut restores: Vec<WorkspaceRestore> = read_json_dir(self.anvics_dir.join("restores"))?;
+        restores.retain(|restore| &restore.thread_id == thread_id);
+        restores.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        Ok(restores)
     }
 
     fn read_risk_target_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
@@ -2783,16 +3172,7 @@ impl AnvicsStore {
     }
 
     fn latest_agent_checkpoint(&self, workspace_id: &str) -> Result<Option<AgentCheckpoint>> {
-        let mut checkpoints: Vec<AgentCheckpoint> =
-            read_json_dir::<AgentCheckpoint>(self.anvics_dir.join("agent-checkpoints"))?
-                .into_iter()
-                .filter(|checkpoint| checkpoint.workspace_id.as_str() == workspace_id)
-                .collect();
-        checkpoints.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-        });
+        let mut checkpoints = self.list_agent_checkpoints(workspace_id)?;
         Ok(checkpoints.pop())
     }
 
@@ -3182,6 +3562,66 @@ fn write_json_pretty(path: impl AsRef<Path>, value: &impl serde::Serialize) -> R
     let bytes = serde_json::to_vec_pretty(value)?;
     fs::write(path, bytes)?;
     Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn restore_selected_paths(
+    source_files: &BTreeMap<String, ObjectId>,
+    current_files: &BTreeMap<String, ObjectId>,
+    paths: Vec<String>,
+) -> Vec<String> {
+    if paths.is_empty() {
+        source_files
+            .keys()
+            .chain(current_files.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        paths
+            .into_iter()
+            .map(|path| path.trim().trim_start_matches("./").to_owned())
+            .filter(|path| !path.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+fn diff_selected_file_maps(
+    source_files: &BTreeMap<String, ObjectId>,
+    current_files: &BTreeMap<String, ObjectId>,
+    selected_paths: &[String],
+) -> Vec<ChangedPath> {
+    selected_paths
+        .iter()
+        .filter_map(
+            |path| match (source_files.get(path), current_files.get(path)) {
+                (Some(source), Some(current)) if source != current => Some(ChangedPath {
+                    path: path.clone(),
+                    status: ChangeStatus::Modified,
+                }),
+                (Some(_), None) => Some(ChangedPath {
+                    path: path.clone(),
+                    status: ChangeStatus::Added,
+                }),
+                (None, Some(_)) => Some(ChangedPath {
+                    path: path.clone(),
+                    status: ChangeStatus::Deleted,
+                }),
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 fn remove_empty_mount_dir(path: &Path) -> Result<()> {
@@ -4396,7 +4836,7 @@ If your Codex CLI defaults to a read-only sandbox, choose an operator-approved w
 Follow the skill and packet exactly. Work only inside the workspace path above. \
 Run the packet's `agent enter` command before editing. Use `agent context-pack` to refresh context and `workspace diff` to inspect changes. \
 Run `agent checkpoint` before long pauses, handoffs, risky edits, or expected context loss. \
-Run `coordination status` before finishing and report potential clashes. Operators can use `agent recover` after an interruption.\n\n\
+Run `coordination status` before finishing and report potential clashes. Operators can use `agent recover`, `agent checkpoint restore`, or `workspace restore` after an interruption or bad edit.\n\n\
 When done, report whether you read the skill, whether you refreshed the context pack, whether you used `workspace diff`, \
 what verification command you ran, its exit code, a one-sentence summary, and any compact artifact path.",
         packet_path = packet_path.display(),
@@ -4583,13 +5023,19 @@ fn render_agent_context_pack(
     markdown
 }
 
+struct ReviewRenderContext<'a> {
+    scans: &'a [RiskScan],
+    overrides: &'a [PolicyOverride],
+    resolution: Option<&'a ResolutionVerification>,
+    restores: &'a [WorkspaceRestore],
+    revert_plan: Option<&'a PublicationRevertPlan>,
+}
+
 fn render_review(
     repo_root: &Path,
     review: &ReviewProjection,
     thread: &WorkThread,
-    scans: &[RiskScan],
-    overrides: &[PolicyOverride],
-    resolution: Option<&ResolutionVerification>,
+    context: ReviewRenderContext<'_>,
 ) -> String {
     let repo = shell_quote(&display_path(repo_root));
     let mut markdown = format!(
@@ -4640,7 +5086,7 @@ fn render_review(
             }
             markdown.push('\n');
         }
-        match resolution {
+        match context.resolution {
             Some(verification) if verification.passed => {
                 markdown.push_str("- Verification: passed.\n");
             }
@@ -4713,10 +5159,66 @@ fn render_review(
         }
     }
 
+    markdown.push_str("\n## Workspace Restore\n\n");
+    if context.restores.is_empty() {
+        markdown.push_str("- No workspace restore records are linked to this thread.\n");
+    } else {
+        for restore in context.restores {
+            let source_id = restore
+                .source_id
+                .as_deref()
+                .map(|id| format!(" `{id}`"))
+                .unwrap_or_default();
+            markdown.push_str(&format!(
+                "- Restore `{}` from {:?}{source_id}; reason: {}; pre-restore checkpoint: `{}`\n",
+                restore.id,
+                restore.source,
+                restore.reason,
+                restore
+                    .pre_restore_checkpoint_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "none".to_owned())
+            ));
+            if restore.changed_paths.is_empty() {
+                markdown.push_str("  - No paths changed by restore.\n");
+            } else {
+                for changed in &restore.changed_paths {
+                    markdown.push_str(&format!("  - {:?}: `{}`\n", changed.status, changed.path));
+                }
+            }
+        }
+    }
+
+    markdown.push_str("\n## Publication Revert\n\n");
+    if let Some(plan) = context.revert_plan {
+        markdown.push_str(&format!(
+            "- Revert plan: `{}`\n- Source publication: `{}`\n- Source review: `{}`\n- Reason: {}\n",
+            plan.id, plan.source_publication_id, plan.source_review_id, plan.reason
+        ));
+        if plan.unresolved_cases.is_empty() {
+            markdown.push_str("- Unresolved inverse cases: none.\n");
+        } else {
+            markdown.push_str("- Unresolved inverse cases:\n");
+            for case in &plan.unresolved_cases {
+                markdown.push_str(&format!(
+                    "  - {:?}: `{}` - {}\n",
+                    case.kind, case.path, case.summary
+                ));
+            }
+        }
+    } else {
+        markdown.push_str("- This review is not a publication revert.\n");
+    }
+
     markdown.push_str("\n## Risk Notes\n\n");
-    let findings: Vec<&RiskFinding> = scans.iter().flat_map(|scan| scan.findings.iter()).collect();
+    let findings: Vec<&RiskFinding> = context
+        .scans
+        .iter()
+        .flat_map(|scan| scan.findings.iter())
+        .collect();
     if findings.is_empty() {
-        if scans.is_empty() {
+        if context.scans.is_empty() {
             markdown.push_str("- No risk scan has run for this review.\n");
         } else {
             markdown.push_str("- No secret-risk findings detected.\n");
@@ -4741,10 +5243,10 @@ fn render_review(
             ));
         }
     }
-    if overrides.is_empty() {
+    if context.overrides.is_empty() {
         markdown.push_str("- Override: none.\n");
     } else {
-        for override_record in overrides {
+        for override_record in context.overrides {
             markdown.push_str(&format!(
                 "- Override `{}` recorded: {}\n",
                 override_record.id, override_record.reason
@@ -7916,5 +8418,191 @@ mod tests {
             .unwrap();
         assert!(findings.iter().any(|finding| finding.evidence_id.is_some()
             && finding.target_kind == RiskTargetKind::CommandStdout));
+    }
+
+    #[test]
+    fn workspace_restore_from_base_creates_pre_restore_checkpoint() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        fs::write(dir.path().join("keep.txt"), "keep\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Restore".to_owned(), "Edit app".to_owned())
+            .unwrap();
+        let workspace_root = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace_root.join("app.txt"), "bad\n").unwrap();
+        fs::write(workspace_root.join("new.txt"), "new\n").unwrap();
+
+        let dry_run = store
+            .workspace_restore(
+                preparation.workspace.id.as_str(),
+                "base",
+                vec!["app.txt".to_owned(), "new.txt".to_owned()],
+                "preview restore".to_owned(),
+                true,
+            )
+            .unwrap();
+        assert!(dry_run.dry_run);
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("app.txt")).unwrap(),
+            "bad\n"
+        );
+        assert!(store
+            .list_agent_checkpoints(preparation.workspace.id.as_str())
+            .unwrap()
+            .is_empty());
+
+        let restore = store
+            .workspace_restore(
+                preparation.workspace.id.as_str(),
+                "base",
+                vec!["app.txt".to_owned(), "new.txt".to_owned()],
+                "back out bad edit".to_owned(),
+                false,
+            )
+            .unwrap();
+        assert!(!restore.dry_run);
+        assert!(restore.pre_restore_checkpoint_id.is_some());
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("app.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(!workspace_root.join("new.txt").exists());
+        assert!(
+            read_json_dir::<WorkspaceRestore>(store.anvics_dir.join("restores"))
+                .unwrap()
+                .iter()
+                .any(|record| record.id == restore.id)
+        );
+        let events = store.events_since(0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::WorkspaceRestorePlanned));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == RepositoryEventKind::WorkspaceRestored));
+    }
+
+    #[test]
+    fn checkpoint_restore_validates_workspace_ownership() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let first = store
+            .prepare_agent("First".to_owned(), "Edit first".to_owned())
+            .unwrap();
+        let second = store
+            .prepare_agent("Second".to_owned(), "Edit second".to_owned())
+            .unwrap();
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("app.txt"),
+            "checkpointed\n",
+        )
+        .unwrap();
+        let checkpoint = store
+            .agent_checkpoint(first.workspace.id.as_str(), "saved first".to_owned())
+            .unwrap();
+
+        let err = store
+            .restore_agent_checkpoint(
+                second.workspace.id.as_str(),
+                checkpoint.id.as_str(),
+                "wrong workspace".to_owned(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::AgentCheckpointWorkspaceMismatch { .. }
+        ));
+
+        fs::write(
+            Path::new(&first.workspace.materialized_path).join("app.txt"),
+            "lost\n",
+        )
+        .unwrap();
+        store
+            .restore_agent_checkpoint(
+                first.workspace.id.as_str(),
+                checkpoint.id.as_str(),
+                "restore saved first".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&first.workspace.materialized_path).join("app.txt"))
+                .unwrap(),
+            "checkpointed\n"
+        );
+    }
+
+    #[test]
+    fn publication_revert_prepare_creates_inverse_workspace() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+        fs::write(dir.path().join("delete.txt"), "delete me\n").unwrap();
+        AnvicsStore::init(dir.path()).unwrap();
+        let store = AnvicsStore::open(dir.path()).unwrap();
+        store.create_snapshot(Some("base".to_owned())).unwrap();
+        let preparation = store
+            .prepare_agent("Publish".to_owned(), "Change files".to_owned())
+            .unwrap();
+        let workspace_root = Path::new(&preparation.workspace.materialized_path);
+        fs::write(workspace_root.join("app.txt"), "published\n").unwrap();
+        fs::write(workspace_root.join("added.txt"), "added\n").unwrap();
+        fs::remove_file(workspace_root.join("delete.txt")).unwrap();
+        let acceptance = store
+            .accept_agent_with_evidence_and_options(
+                preparation.workspace.id.as_str(),
+                CommandEvidenceInput {
+                    command: "true".to_owned(),
+                    command_event_id: None,
+                    command_label: None,
+                    command_file: None,
+                    cwd: None,
+                    exit_code: 0,
+                    summary: "published verified".to_owned(),
+                    artifact_path: None,
+                    stdout_path: None,
+                    stderr_path: None,
+                },
+                None,
+                PublicationOptions::default(),
+            )
+            .unwrap();
+
+        fs::write(dir.path().join("app.txt"), "published\n").unwrap();
+        fs::write(dir.path().join("added.txt"), "added\n").unwrap();
+        fs::remove_file(dir.path().join("delete.txt")).unwrap();
+        store
+            .create_snapshot(Some("published head".to_owned()))
+            .unwrap();
+        let revert = store
+            .prepare_publication_revert(
+                acceptance.publication.id.as_str(),
+                None,
+                "undo publication".to_owned(),
+            )
+            .unwrap();
+        let revert_root = Path::new(&revert.preparation.workspace.materialized_path);
+        assert_eq!(
+            fs::read_to_string(revert_root.join("app.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(!revert_root.join("added.txt").exists());
+        assert_eq!(
+            fs::read_to_string(revert_root.join("delete.txt")).unwrap(),
+            "delete me\n"
+        );
+        assert!(revert.plan.unresolved_cases.is_empty());
+        let thread = store
+            .show_thread(revert.preparation.thread.id.as_str())
+            .unwrap();
+        assert_eq!(thread.publication_revert_plan_id, Some(revert.plan.id));
+        let packet = fs::read_to_string(revert.preparation.packet_path).unwrap();
+        assert!(packet.contains("publication"));
+        assert!(packet.contains("undo publication"));
     }
 }

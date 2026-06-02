@@ -3,9 +3,9 @@ use anvics_core::{
     AgentInstructionTarget, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentRecovery,
     AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision, ConflictAnalysis,
     ConflictPreparation, CoordinationStatus, EvidenceRecord, FileEffect, NativePublication,
-    ProjectionRequest, RepoDoctorReport, RepositoryEvent, RepositoryManifest,
-    ResolutionVerification, ReviewProjection, RiskFinding, RiskScan, SourceSnapshot, WorkThread,
-    WorkspaceView,
+    ProjectionRequest, PublicationRevertPreparation, RepoDoctorReport, RepositoryEvent,
+    RepositoryManifest, ResolutionVerification, ReviewProjection, RiskFinding, RiskScan,
+    SourceSnapshot, WorkThread, WorkspaceRestore, WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,13 @@ pub enum ApiMethod {
     WorkspaceSnapshot {
         id: String,
         message: Option<String>,
+    },
+    WorkspaceRestore {
+        id: String,
+        source: String,
+        paths: Vec<String>,
+        reason: String,
+        dry_run: bool,
     },
     EvidenceAttach {
         thread: String,
@@ -210,6 +217,17 @@ pub enum ApiMethod {
         workspace: String,
         summary: String,
     },
+    AgentCheckpointList {
+        workspace: String,
+    },
+    AgentCheckpointShow {
+        id: String,
+    },
+    AgentCheckpointRestore {
+        workspace: String,
+        checkpoint: String,
+        reason: String,
+    },
     AgentRecover {
         workspace: String,
     },
@@ -238,6 +256,11 @@ pub enum ApiMethod {
         #[serde(default)]
         allow_resolution_risk: bool,
         resolution_risk_reason: Option<String>,
+    },
+    PublishRevertPrepare {
+        publication: String,
+        base_snapshot: Option<String>,
+        reason: String,
     },
     RiskScan {
         review: String,
@@ -420,6 +443,15 @@ pub enum ApiResult {
     AgentCheckpoint {
         checkpoint: Box<AgentCheckpoint>,
     },
+    AgentCheckpointList {
+        checkpoints: Vec<AgentCheckpoint>,
+    },
+    AgentCheckpointShow {
+        checkpoint: Box<AgentCheckpoint>,
+    },
+    WorkspaceRestore {
+        restore: Box<WorkspaceRestore>,
+    },
     AgentRecover {
         recovery: Box<AgentRecovery>,
     },
@@ -437,6 +469,9 @@ pub enum ApiResult {
     },
     PublishCreate {
         publication: NativePublication,
+    },
+    PublishRevertPrepare {
+        revert: Box<PublicationRevertPreparation>,
     },
     RiskScan {
         scan: Box<RiskScan>,
@@ -505,6 +540,13 @@ mod tests {
                 id: "workspace-1".to_owned(),
                 message: None,
             },
+            ApiMethod::WorkspaceRestore {
+                id: "workspace-1".to_owned(),
+                source: "base".to_owned(),
+                paths: vec!["app.txt".to_owned()],
+                reason: "back out app change".to_owned(),
+                dry_run: false,
+            },
             ApiMethod::EvidenceAttach {
                 thread: "thread-1".to_owned(),
                 command: "true".to_owned(),
@@ -571,6 +613,11 @@ mod tests {
                 override_reason: None,
                 allow_resolution_risk: false,
                 resolution_risk_reason: None,
+            },
+            ApiMethod::PublishRevertPrepare {
+                publication: "publication-1".to_owned(),
+                base_snapshot: Some("snapshot-1".to_owned()),
+                reason: "revert publication".to_owned(),
             },
             ApiMethod::RiskScan {
                 review: "review-1".to_owned(),
@@ -640,6 +687,17 @@ mod tests {
             ApiMethod::AgentCheckpoint {
                 workspace: "workspace-1".to_owned(),
                 summary: "salvage docs edits".to_owned(),
+            },
+            ApiMethod::AgentCheckpointList {
+                workspace: "workspace-1".to_owned(),
+            },
+            ApiMethod::AgentCheckpointShow {
+                id: "checkpoint-1".to_owned(),
+            },
+            ApiMethod::AgentCheckpointRestore {
+                workspace: "workspace-1".to_owned(),
+                checkpoint: "checkpoint-1".to_owned(),
+                reason: "restore checkpoint".to_owned(),
             },
             ApiMethod::AgentRecover {
                 workspace: "workspace-1".to_owned(),
@@ -771,6 +829,7 @@ mod tests {
             base_snapshot: base_snapshot.clone(),
             source_review_ids: Vec::new(),
             conflict_analysis_id: None,
+            publication_revert_plan_id: None,
             status: WorkThreadStatus::Active,
             created_at: "2026-05-28T00:00:02Z".to_owned(),
         };
@@ -848,6 +907,7 @@ mod tests {
             final_snapshot: final_snapshot.clone(),
             source_review_ids: Vec::new(),
             conflict_analysis_id: None,
+            publication_revert_plan_id: None,
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,
@@ -994,6 +1054,45 @@ mod tests {
                 status: ChangeStatus::Modified,
             }],
             created_at: "2026-05-28T00:00:09Z".to_owned(),
+        };
+        let restore = WorkspaceRestore {
+            id: WorkspaceRestoreId::new(),
+            workspace_id: workspace.id.clone(),
+            thread_id: thread.id.clone(),
+            source: RestoreSourceKind::Base,
+            source_id: None,
+            paths: vec!["app.txt".to_owned()],
+            reason: "back out app change".to_owned(),
+            pre_restore_checkpoint_id: Some(checkpoint.id.clone()),
+            changed_paths: vec![ChangedPath {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+            }],
+            dry_run: false,
+            created_at: "2026-05-28T00:00:10Z".to_owned(),
+        };
+        let revert_plan = PublicationRevertPlan {
+            id: PublicationRevertPlanId::new(),
+            source_publication_id: publication.id.clone(),
+            source_review_id: review.id.clone(),
+            source_base_snapshot: base_snapshot.clone(),
+            source_final_snapshot: final_snapshot.clone(),
+            revert_base_snapshot: final_snapshot.clone(),
+            path_cases: vec![PublicationRevertPathCase {
+                path: "app.txt".to_owned(),
+                status: ChangeStatus::Modified,
+                kind: PublicationRevertCaseKind::CleanInverse,
+                summary: "app.txt inverse applied cleanly".to_owned(),
+            }],
+            unresolved_cases: Vec::new(),
+            reason: "revert publication".to_owned(),
+            thread_id: thread.id.clone(),
+            workspace_id: workspace.id.clone(),
+            created_at: "2026-05-28T00:00:10Z".to_owned(),
+        };
+        let revert_preparation = PublicationRevertPreparation {
+            plan: revert_plan,
+            preparation: preparation.clone(),
         };
         let finish = AgentFinish {
             evidence: evidence.clone(),
@@ -1196,7 +1295,16 @@ mod tests {
                 pack: Box::new(context_pack),
             },
             ApiResult::AgentCheckpoint {
+                checkpoint: Box::new(checkpoint.clone()),
+            },
+            ApiResult::AgentCheckpointList {
+                checkpoints: vec![checkpoint.clone()],
+            },
+            ApiResult::AgentCheckpointShow {
                 checkpoint: Box::new(checkpoint),
+            },
+            ApiResult::WorkspaceRestore {
+                restore: Box::new(restore),
             },
             ApiResult::AgentRecover {
                 recovery: Box::new(recovery),
@@ -1214,6 +1322,9 @@ mod tests {
                 path: ".anvics/reviews/review.md".to_owned(),
             },
             ApiResult::PublishCreate { publication },
+            ApiResult::PublishRevertPrepare {
+                revert: Box::new(revert_preparation),
+            },
             ApiResult::RiskScan {
                 scan: Box::new(risk_scan),
             },

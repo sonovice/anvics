@@ -69,6 +69,8 @@ opaque_id!(PolicyOverrideId);
 opaque_id!(FileEffectSetId);
 opaque_id!(ChangeUnitId);
 opaque_id!(ConflictAnalysisId);
+opaque_id!(WorkspaceRestoreId);
+opaque_id!(PublicationRevertPlanId);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(transparent)]
@@ -175,6 +177,8 @@ pub struct WorkThread {
     pub source_review_ids: Vec<ReviewProjectionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_analysis_id: Option<ConflictAnalysisId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_revert_plan_id: Option<PublicationRevertPlanId>,
     pub status: WorkThreadStatus,
     pub created_at: String,
 }
@@ -408,6 +412,8 @@ pub struct ReviewProjection {
     pub source_review_ids: Vec<ReviewProjectionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_analysis_id: Option<ConflictAnalysisId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_revert_plan_id: Option<PublicationRevertPlanId>,
     pub changed_paths: Vec<ChangedPath>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_effects: Vec<FileEffect>,
@@ -416,6 +422,75 @@ pub struct ReviewProjection {
     pub overlap_notes: Vec<String>,
     pub evidence: Vec<EvidenceSummary>,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceRestore {
+    pub id: WorkspaceRestoreId,
+    pub workspace_id: WorkspaceViewId,
+    pub thread_id: WorkThreadId,
+    pub source: RestoreSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_restore_checkpoint_id: Option<AgentCheckpointId>,
+    pub changed_paths: Vec<ChangedPath>,
+    pub dry_run: bool,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreSourceKind {
+    Base,
+    Latest,
+    Snapshot,
+    Checkpoint,
+    Publication,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PublicationRevertPlan {
+    pub id: PublicationRevertPlanId,
+    pub source_publication_id: NativePublicationId,
+    pub source_review_id: ReviewProjectionId,
+    pub source_base_snapshot: SourceSnapshotId,
+    pub source_final_snapshot: SourceSnapshotId,
+    pub revert_base_snapshot: SourceSnapshotId,
+    pub path_cases: Vec<PublicationRevertPathCase>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_cases: Vec<PublicationRevertPathCase>,
+    pub reason: String,
+    pub thread_id: WorkThreadId,
+    pub workspace_id: WorkspaceViewId,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PublicationRevertPathCase {
+    pub path: String,
+    pub status: ChangeStatus,
+    pub kind: PublicationRevertCaseKind,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationRevertCaseKind {
+    CleanInverse,
+    TargetMissing,
+    TargetChanged,
+    BinaryOrUnknown,
+    DeleteModifyRisk,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct PublicationRevertPreparation {
+    pub plan: PublicationRevertPlan,
+    pub preparation: AgentPreparation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -648,6 +723,9 @@ pub enum RepositoryEventKind {
     SecretRiskDetected,
     PolicyOverrideRecorded,
     ConflictAnalysisCreated,
+    WorkspaceRestorePlanned,
+    WorkspaceRestored,
+    PublicationRevertPrepared,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -838,6 +916,7 @@ mod tests {
             base_snapshot: base_snapshot.clone(),
             source_review_ids: Vec::new(),
             conflict_analysis_id: None,
+            publication_revert_plan_id: None,
             status: WorkThreadStatus::Active,
             created_at: "2026-05-28T00:00:00Z".to_owned(),
         };
@@ -927,6 +1006,7 @@ mod tests {
             final_snapshot: final_snapshot.clone(),
             source_review_ids: Vec::new(),
             conflict_analysis_id: None,
+            publication_revert_plan_id: None,
             changed_paths: vec![ChangedPath {
                 path: "app.txt".to_owned(),
                 status: ChangeStatus::Modified,

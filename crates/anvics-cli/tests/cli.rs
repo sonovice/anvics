@@ -714,6 +714,20 @@ fn agent_checkpoint_and_recover_report_salvage_state() {
     .clone();
     let checkpoint = created_id(&checkpoint_output, "Created agent checkpoint ");
 
+    anvics(
+        dir.path(),
+        &["agent", "checkpoint", "list", "--workspace", &workspace],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(&checkpoint))
+    .stdout(predicate::str::contains("salvaged app edit"));
+    anvics(dir.path(), &["agent", "checkpoint", "show", &checkpoint])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("summary: salvaged app edit"));
+    fs::write(format!("{workspace_path}/app.txt"), "lost\n").unwrap();
+
     let socket = dir.path().join("anvics.sock");
     let mut daemon = start_daemon(&socket);
     daemon_anvics(
@@ -728,6 +742,51 @@ fn agent_checkpoint_and_recover_report_salvage_state() {
     )))
     .stdout(predicate::str::contains("checkpoint_changed_paths:"))
     .stdout(predicate::str::contains("next_commands:"));
+    daemon_anvics(
+        dir.path(),
+        &socket,
+        &[
+            "agent",
+            "checkpoint",
+            "restore",
+            "--workspace",
+            &workspace,
+            "--checkpoint",
+            &checkpoint,
+            "--reason",
+            "restore checkpoint in cli test",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Restored workspace"))
+    .stdout(predicate::str::contains("pre_restore_checkpoint:"));
+    assert_eq!(
+        fs::read_to_string(format!("{workspace_path}/app.txt")).unwrap(),
+        "salvaged\n"
+    );
+
+    anvics(
+        dir.path(),
+        &[
+            "workspace",
+            "restore",
+            &workspace,
+            "--source",
+            "base",
+            "--path",
+            "app.txt",
+            "--reason",
+            "restore app to base",
+        ],
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Restored workspace"));
+    assert_eq!(
+        fs::read_to_string(format!("{workspace_path}/app.txt")).unwrap(),
+        "base\n"
+    );
 
     daemon.kill().unwrap();
     daemon.wait().unwrap();

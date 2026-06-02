@@ -149,6 +149,17 @@ enum WorkspaceCommand {
         #[arg(short, long)]
         message: Option<String>,
     },
+    Restore {
+        id: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -274,6 +285,22 @@ enum PublishCommand {
         allow_resolution_risk: bool,
         #[arg(long)]
         resolution_risk_reason: Option<String>,
+    },
+    Revert {
+        #[command(subcommand)]
+        command: PublishRevertCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PublishRevertCommand {
+    Prepare {
+        #[arg(long)]
+        publication: String,
+        #[arg(long)]
+        base_snapshot: Option<String>,
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -431,10 +458,12 @@ enum AgentCommand {
         write: bool,
     },
     Checkpoint {
+        #[command(subcommand)]
+        command: Option<AgentCheckpointCommand>,
         #[arg(long)]
-        workspace: String,
+        workspace: Option<String>,
         #[arg(long)]
-        summary: String,
+        summary: Option<String>,
     },
     Recover {
         #[arg(long)]
@@ -507,6 +536,31 @@ enum AgentCommand {
         resolution_risk_reason: Option<String>,
         #[arg(last = true)]
         argv: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCheckpointCommand {
+    Create {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        summary: String,
+    },
+    List {
+        #[arg(long)]
+        workspace: String,
+    },
+    Show {
+        id: String,
+    },
+    Restore {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        checkpoint: String,
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -774,6 +828,22 @@ fn main() -> Result<()> {
                 snapshot_workspace(root, &id, message)
             }
         }
+        CliCommand::Workspace {
+            command:
+                WorkspaceCommand::Restore {
+                    id,
+                    source,
+                    paths,
+                    reason,
+                    dry_run,
+                },
+        } => {
+            if let Some(socket) = daemon {
+                restore_workspace_via_daemon(root, socket, id, source, paths, reason, dry_run)
+            } else {
+                restore_workspace(root, &id, &source, paths, reason, dry_run)
+            }
+        }
         CliCommand::Evidence {
             command:
                 EvidenceCommand::List {
@@ -987,6 +1057,29 @@ fn main() -> Result<()> {
                 create_publication(root, &thread, &review, options)
             }
         }
+        CliCommand::Publish {
+            command:
+                PublishCommand::Revert {
+                    command:
+                        PublishRevertCommand::Prepare {
+                            publication,
+                            base_snapshot,
+                            reason,
+                        },
+                },
+        } => {
+            if let Some(socket) = daemon {
+                prepare_publication_revert_via_daemon(
+                    root,
+                    socket,
+                    publication,
+                    base_snapshot,
+                    reason,
+                )
+            } else {
+                prepare_publication_revert(root, &publication, base_snapshot, reason)
+            }
+        }
         CliCommand::Agent {
             command:
                 AgentCommand::Prepare {
@@ -1085,14 +1178,13 @@ fn main() -> Result<()> {
             }
         }
         CliCommand::Agent {
-            command: AgentCommand::Checkpoint { workspace, summary },
-        } => {
-            if let Some(socket) = daemon {
-                agent_checkpoint_via_daemon(root, socket, workspace, summary)
-            } else {
-                agent_checkpoint(root, &workspace, summary)
-            }
-        }
+            command:
+                AgentCommand::Checkpoint {
+                    command,
+                    workspace,
+                    summary,
+                },
+        } => handle_agent_checkpoint_command(root, daemon, command, workspace, summary),
         CliCommand::Agent {
             command: AgentCommand::Recover { workspace },
         } => {
@@ -1778,6 +1870,70 @@ fn print_workspace_snapshot(workspace: anvics_core::WorkspaceView) {
     if let Some(snapshot) = workspace.latest_snapshot {
         println!("snapshot: {snapshot}");
     }
+}
+
+fn restore_workspace(
+    root: PathBuf,
+    workspace_id: &str,
+    source: &str,
+    paths: Vec<String>,
+    reason: String,
+    dry_run: bool,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let restore = store
+        .workspace_restore(workspace_id, source, paths, reason, dry_run)
+        .context("failed to restore workspace")?;
+    print_workspace_restore(&restore);
+    Ok(())
+}
+
+fn restore_workspace_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    id: String,
+    source: String,
+    paths: Vec<String>,
+    reason: String,
+    dry_run: bool,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::WorkspaceRestore {
+            id,
+            source,
+            paths,
+            reason,
+            dry_run,
+        },
+    )? {
+        ApiResult::WorkspaceRestore { restore } => {
+            print_workspace_restore(&restore);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_workspace_restore(restore: &anvics_core::WorkspaceRestore) {
+    if restore.dry_run {
+        println!("Workspace restore dry run {}", restore.id);
+    } else {
+        println!("Restored workspace {}", restore.workspace_id);
+        println!("restore: {}", restore.id);
+    }
+    println!("thread: {}", restore.thread_id);
+    println!("source: {:?}", restore.source);
+    if let Some(source_id) = &restore.source_id {
+        println!("source_id: {source_id}");
+    }
+    println!("reason: {}", restore.reason);
+    match &restore.pre_restore_checkpoint_id {
+        Some(id) => println!("pre_restore_checkpoint: {id}"),
+        None => println!("pre_restore_checkpoint: none"),
+    }
+    print_changed_paths("changed_paths", &restore.changed_paths);
 }
 
 fn list_evidence(root: PathBuf, thread_id: &str, include_superseded: bool) -> Result<()> {
@@ -2492,6 +2648,62 @@ fn print_publication_created(root: &std::path::Path, publication: anvics_core::N
     );
 }
 
+fn prepare_publication_revert(
+    root: PathBuf,
+    publication_id: &str,
+    base_snapshot: Option<String>,
+    reason: String,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let revert = store
+        .prepare_publication_revert(publication_id, base_snapshot, reason)
+        .context("failed to prepare publication revert")?;
+    print_publication_revert_preparation(&root, revert);
+    Ok(())
+}
+
+fn prepare_publication_revert_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    publication: String,
+    base_snapshot: Option<String>,
+    reason: String,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root.clone(),
+        ApiMethod::PublishRevertPrepare {
+            publication,
+            base_snapshot,
+            reason,
+        },
+    )? {
+        ApiResult::PublishRevertPrepare { revert } => {
+            print_publication_revert_preparation(&root, *revert);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_publication_revert_preparation(
+    root: &std::path::Path,
+    revert: anvics_core::PublicationRevertPreparation,
+) {
+    println!("Prepared publication revert");
+    println!("revert_plan: {}", revert.plan.id);
+    println!("source_publication: {}", revert.plan.source_publication_id);
+    println!("source_review: {}", revert.plan.source_review_id);
+    println!("unresolved_cases: {}", revert.plan.unresolved_cases.len());
+    for case in &revert.plan.unresolved_cases {
+        println!(
+            "unresolved: {:?} {} - {}",
+            case.kind, case.path, case.summary
+        );
+    }
+    print_agent_preparation(root, revert.preparation);
+}
+
 fn prepare_agent(
     root: PathBuf,
     title: String,
@@ -3015,6 +3227,58 @@ fn agent_checkpoint_via_daemon(
     }
 }
 
+fn handle_agent_checkpoint_command(
+    root: PathBuf,
+    daemon: Option<PathBuf>,
+    command: Option<AgentCheckpointCommand>,
+    workspace: Option<String>,
+    summary: Option<String>,
+) -> Result<()> {
+    match command {
+        Some(AgentCheckpointCommand::Create { workspace, summary }) => {
+            if let Some(socket) = daemon {
+                agent_checkpoint_via_daemon(root, socket, workspace, summary)
+            } else {
+                agent_checkpoint(root, &workspace, summary)
+            }
+        }
+        Some(AgentCheckpointCommand::List { workspace }) => {
+            if let Some(socket) = daemon {
+                list_agent_checkpoints_via_daemon(root, socket, workspace)
+            } else {
+                list_agent_checkpoints(root, &workspace)
+            }
+        }
+        Some(AgentCheckpointCommand::Show { id }) => {
+            if let Some(socket) = daemon {
+                show_agent_checkpoint_via_daemon(root, socket, id)
+            } else {
+                show_agent_checkpoint(root, &id)
+            }
+        }
+        Some(AgentCheckpointCommand::Restore {
+            workspace,
+            checkpoint,
+            reason,
+        }) => {
+            if let Some(socket) = daemon {
+                restore_agent_checkpoint_via_daemon(root, socket, workspace, checkpoint, reason)
+            } else {
+                restore_agent_checkpoint(root, &workspace, &checkpoint, reason)
+            }
+        }
+        None => {
+            let workspace = workspace.context("agent checkpoint requires --workspace")?;
+            let summary = summary.context("agent checkpoint requires --summary")?;
+            if let Some(socket) = daemon {
+                agent_checkpoint_via_daemon(root, socket, workspace, summary)
+            } else {
+                agent_checkpoint(root, &workspace, summary)
+            }
+        }
+    }
+}
+
 fn print_agent_checkpoint(checkpoint: &anvics_core::AgentCheckpoint) {
     println!("Created agent checkpoint {}", checkpoint.id);
     println!("thread: {}", checkpoint.thread_id);
@@ -3022,6 +3286,99 @@ fn print_agent_checkpoint(checkpoint: &anvics_core::AgentCheckpoint) {
     println!("snapshot: {}", checkpoint.snapshot_id);
     println!("summary: {}", checkpoint.summary);
     print_changed_paths("changed_paths", &checkpoint.changed_paths);
+}
+
+fn list_agent_checkpoints(root: PathBuf, workspace_id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let checkpoints = store
+        .list_agent_checkpoints(workspace_id)
+        .context("failed to list agent checkpoints")?;
+    print_agent_checkpoint_list(&checkpoints);
+    Ok(())
+}
+
+fn list_agent_checkpoints_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::AgentCheckpointList { workspace })? {
+        ApiResult::AgentCheckpointList { checkpoints } => {
+            print_agent_checkpoint_list(&checkpoints);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn show_agent_checkpoint(root: PathBuf, id: &str) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let checkpoint = store
+        .show_agent_checkpoint(id)
+        .context("failed to show agent checkpoint")?;
+    print_agent_checkpoint(&checkpoint);
+    Ok(())
+}
+
+fn show_agent_checkpoint_via_daemon(root: PathBuf, socket: PathBuf, id: String) -> Result<()> {
+    match daemon_request(&socket, root, ApiMethod::AgentCheckpointShow { id })? {
+        ApiResult::AgentCheckpointShow { checkpoint } => {
+            print_agent_checkpoint(&checkpoint);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn restore_agent_checkpoint(
+    root: PathBuf,
+    workspace_id: &str,
+    checkpoint_id: &str,
+    reason: String,
+) -> Result<()> {
+    let store = AnvicsStore::open(&root).context("failed to open Anvics repository")?;
+    let restore = store
+        .restore_agent_checkpoint(workspace_id, checkpoint_id, reason)
+        .context("failed to restore agent checkpoint")?;
+    print_workspace_restore(&restore);
+    Ok(())
+}
+
+fn restore_agent_checkpoint_via_daemon(
+    root: PathBuf,
+    socket: PathBuf,
+    workspace: String,
+    checkpoint: String,
+    reason: String,
+) -> Result<()> {
+    match daemon_request(
+        &socket,
+        root,
+        ApiMethod::AgentCheckpointRestore {
+            workspace,
+            checkpoint,
+            reason,
+        },
+    )? {
+        ApiResult::WorkspaceRestore { restore } => {
+            print_workspace_restore(&restore);
+            Ok(())
+        }
+        result => unexpected_daemon_result(result),
+    }
+}
+
+fn print_agent_checkpoint_list(checkpoints: &[anvics_core::AgentCheckpoint]) {
+    if checkpoints.is_empty() {
+        println!("No agent checkpoints");
+        return;
+    }
+    for checkpoint in checkpoints {
+        println!(
+            "{} workspace={} snapshot={} summary={}",
+            checkpoint.id, checkpoint.workspace_id, checkpoint.snapshot_id, checkpoint.summary
+        );
+    }
 }
 
 fn agent_recover(root: PathBuf, workspace_id: &str) -> Result<()> {

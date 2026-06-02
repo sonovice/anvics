@@ -183,6 +183,19 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 workspace: Box::new(workspace),
             })
         }
+        ApiMethod::WorkspaceRestore {
+            id,
+            source,
+            paths,
+            reason,
+            dry_run,
+        } => {
+            let restore = AnvicsStore::open(&repo)?
+                .workspace_restore(&id, &source, paths, reason, dry_run)?;
+            Ok(ApiResult::WorkspaceRestore {
+                restore: Box::new(restore),
+            })
+        }
         ApiMethod::EvidenceAttach {
             thread,
             command,
@@ -412,6 +425,30 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 checkpoint: Box::new(checkpoint),
             })
         }
+        ApiMethod::AgentCheckpointList { workspace } => {
+            let checkpoints = AnvicsStore::open(&repo)?.list_agent_checkpoints(&workspace)?;
+            Ok(ApiResult::AgentCheckpointList { checkpoints })
+        }
+        ApiMethod::AgentCheckpointShow { id } => {
+            let checkpoint = AnvicsStore::open(&repo)?.show_agent_checkpoint(&id)?;
+            Ok(ApiResult::AgentCheckpointShow {
+                checkpoint: Box::new(checkpoint),
+            })
+        }
+        ApiMethod::AgentCheckpointRestore {
+            workspace,
+            checkpoint,
+            reason,
+        } => {
+            let restore = AnvicsStore::open(&repo)?.restore_agent_checkpoint(
+                &workspace,
+                &checkpoint,
+                reason,
+            )?;
+            Ok(ApiResult::WorkspaceRestore {
+                restore: Box::new(restore),
+            })
+        }
         ApiMethod::AgentRecover { workspace } => {
             let recovery = AnvicsStore::open(&repo)?.agent_recovery(&workspace)?;
             Ok(ApiResult::AgentRecover {
@@ -565,6 +602,20 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
                 },
             )?;
             Ok(ApiResult::PublishCreate { publication })
+        }
+        ApiMethod::PublishRevertPrepare {
+            publication,
+            base_snapshot,
+            reason,
+        } => {
+            let revert = AnvicsStore::open(&repo)?.prepare_publication_revert(
+                &publication,
+                base_snapshot,
+                reason,
+            )?;
+            Ok(ApiResult::PublishRevertPrepare {
+                revert: Box::new(revert),
+            })
         }
         ApiMethod::RiskScan { review } => {
             let scan = AnvicsStore::open(&repo)?.scan_review_risks(&review)?;

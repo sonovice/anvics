@@ -73,6 +73,7 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 - Failed/abandoned work is preserved in the work graph but collapsed/summarized by default.
 - Failed work can produce `LearningNote`s, not raw failed traces by default.
 - Unfinished agent progress should remain recoverable from the workspace projection. MVP 0.34 starts this with explicit `agent checkpoint` and `agent recover` commands before relying on agents to remember to finish.
+- Revert/restore is append-only. `workspace restore` may rewrite a mutable workspace view, but only after creating a pre-restore checkpoint and restore audit record. Published work is never hidden or moved backward; `publish revert prepare` creates a new inverse work thread that must pass normal review, risk, verification, publication, and legacy export flows.
 
 ## Parallel Work And Worktree Replacement
 

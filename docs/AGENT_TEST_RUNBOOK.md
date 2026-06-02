@@ -191,6 +191,20 @@ ANVICS_DAEMON_SOCKET="$socket" cargo run -q -p anvics-cli --bin anvics -- --repo
    cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent checkpoint --workspace "<workspace-id>" --summary "Salvaged interrupted agent progress."
    ```
 
+   To restore a workspace safely, use an audited Anvics restore command instead of deleting files by hand:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent checkpoint list --workspace "<workspace-id>"
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" agent checkpoint restore --workspace "<workspace-id>" --checkpoint "<checkpoint-id>" --reason "Recover checkpointed progress."
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" workspace restore "<workspace-id>" --source base --path "app.txt" --reason "Back out the bad app.txt edit."
+   ```
+
+   To revert accepted work, prepare an inverse publication thread. The original publication stays immutable:
+
+   ```sh
+   cargo run -q -p anvics-cli --bin anvics -- --repo "$target_repo" publish revert prepare --publication "<publication-id>" --reason "Revert accepted change after validation."
+   ```
+
    If publication is blocked by a secret-risk finding, inspect the review and risk list:
 
    ```sh

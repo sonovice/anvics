@@ -401,6 +401,7 @@ Current status:
 - MVP 0.32 adds `anvics agent context-pack`, a refreshable workspace briefing with task, packet/skill paths, agent-run commands, classified workspace changes, and coordination status.
 - MVP 0.33 wires context packs into generated packets, launch prompts, dogfood prompts, and the Anvics skill so external agents naturally refresh context instead of relying on stale packet text.
 - MVP 0.34 adds first crash-progress recovery with `agent checkpoint` and `agent recover`. A crashed or interrupted agent can leave salvageable progress as current workspace changes plus a durable checkpoint snapshot, without requiring autosave daemons or agent wrapping.
+- Native revert/restore adds audited workspace restore, checkpoint restore, and publication revert preparation. It keeps Anvics append-only: workspace state can be restored with a pre-restore checkpoint, while accepted publications are reverted only through a new inverse work thread/review/publication.
 
 Acceptance criteria:
 

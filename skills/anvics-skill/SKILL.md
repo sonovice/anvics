@@ -60,6 +60,7 @@ Every write belongs to the current thread and workspace.
 - Refresh task, diff, and coordination context with the packet's `agent context-pack` command when useful.
 - Inspect local changes with the packet's `workspace diff` command.
 - Preserve recoverable progress with `agent checkpoint` before long pauses, risky edits, handoffs, or context loss.
+- If work needs to be backed out, ask the operator to use `workspace restore` or `agent checkpoint restore` with an audited reason. Do not manually delete files to simulate a restore.
 - Keep generated-file edits explicit.
 - If the base is stale, refresh or fork the workspace instead of forcing the edit.
 - If another thread touches the same path or hunk, record the overlap before continuing.
@@ -69,7 +70,7 @@ Every write belongs to the current thread and workspace.
 - Do not run `agent accept`, `publish create`, or `legacy git export` unless the operator explicitly asks you to accept, publish, or export.
 
 Do not use commits as scratchpad history. Keep failed or abandoned attempts attached to the thread as summarized evidence.
-If an agent crashes or exits before finishing, the operator should use `agent recover --workspace <id>` to inspect current changed paths and the latest checkpoint.
+If an agent crashes or exits before finishing, the operator should use `agent recover --workspace <id>` to inspect current changed paths and the latest checkpoint. If checkpointed progress should become the workspace state again, the operator should use `agent checkpoint restore --workspace <id> --checkpoint <checkpoint-id> --reason "<audited reason>"`.
 
 ## Evidence Budget
 
