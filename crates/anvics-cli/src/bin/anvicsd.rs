@@ -1,4 +1,6 @@
-use anvics_api::{ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat};
+use anvics_api::{
+    ApiMethod, ApiRequest, ApiResponse, ApiResult, ReviewFormat, ReviewInboxItem, API_VERSION,
+};
 use anvics_store::{
     classify_command_policy, AnvicsStore, CommandEvidenceInput, CommandPolicyInput,
     CommandRunInput, PublicationOptions, StoreError,
@@ -6,10 +8,13 @@ use anvics_store::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::{
+    collections::BTreeMap,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
+    thread,
 };
 
 #[derive(Debug, Parser)]
@@ -18,6 +23,9 @@ use std::{
 struct Cli {
     #[arg(long, value_name = "PATH")]
     socket: PathBuf,
+
+    #[arg(long, value_name = "HOST:PORT")]
+    http: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -39,6 +47,14 @@ fn main() -> Result<()> {
     let listener = UnixListener::bind(&cli.socket)
         .with_context(|| format!("failed to bind socket {}", cli.socket.display()))?;
 
+    if let Some(http_addr) = cli.http.clone() {
+        thread::spawn(move || {
+            if let Err(error) = run_http_server(http_addr) {
+                eprintln!("anvicsd http error: {error:?}");
+            }
+        });
+    }
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -50,6 +66,238 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_http_server(addr: String) -> Result<()> {
+    let listener =
+        TcpListener::bind(&addr).with_context(|| format!("failed to bind HTTP bridge {addr}"))?;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(error) = handle_http_client(stream) {
+                    eprintln!("anvicsd http client error: {error:?}");
+                }
+            }
+            Err(error) => eprintln!("anvicsd http accept error: {error:?}"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_http_client(mut stream: TcpStream) -> Result<()> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = find_header_end(&buffer) {
+            break index;
+        }
+        if buffer.len() > 1024 * 1024 {
+            anyhow::bail!("HTTP request headers too large");
+        }
+    };
+
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = header_text.lines();
+    let Some(request_line) = lines.next() else {
+        write_http_json(
+            &mut stream,
+            400,
+            None,
+            br#"{"error":"missing request line"}"#,
+        )?;
+        return Ok(());
+    };
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default().to_owned();
+    let target = request_parts.next().unwrap_or_default().to_owned();
+
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
+    }
+    let origin = headers
+        .get("origin")
+        .and_then(|origin| allowed_localhost_origin(origin));
+
+    if method == "OPTIONS" {
+        write_http_empty(&mut stream, 204, origin.as_deref())?;
+        return Ok(());
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    let body = &buffer[body_start..buffer.len().min(body_start + content_length)];
+
+    match (method.as_str(), target.split('?').next().unwrap_or(&target)) {
+        ("GET", "/api/health") => {
+            let payload = serde_json::json!({
+                "ok": true,
+                "version": API_VERSION,
+            });
+            let body = serde_json::to_vec(&payload)?;
+            write_http_json(&mut stream, 200, origin.as_deref(), &body)?;
+        }
+        ("GET", "/api/review-inbox") => {
+            let query = target.split_once('?').map(|(_, query)| query).unwrap_or("");
+            let params = parse_query(query);
+            let Some(repo) = params.get("repo").filter(|repo| !repo.is_empty()) else {
+                write_http_json(
+                    &mut stream,
+                    400,
+                    origin.as_deref(),
+                    br#"{"error":"missing repo query parameter"}"#,
+                )?;
+                return Ok(());
+            };
+            let response = handle_request(ApiRequest {
+                id: 1,
+                repo: repo.clone(),
+                method: ApiMethod::ReviewInbox,
+            });
+            let body = serde_json::to_vec(&response)?;
+            write_http_json(&mut stream, 200, origin.as_deref(), &body)?;
+        }
+        ("POST", "/api/rpc") => {
+            let response = match serde_json::from_slice::<ApiRequest>(body) {
+                Ok(request) => handle_request(request),
+                Err(error) => ApiResponse::error(0, format!("invalid request: {error}")),
+            };
+            let body = serde_json::to_vec(&response)?;
+            write_http_json(&mut stream, 200, origin.as_deref(), &body)?;
+        }
+        ("GET", "/") => {
+            let body = br#"{"ok":true,"message":"Anvics local HTTP bridge is running","endpoints":["/api/health","/api/review-inbox?repo=<path>","/api/rpc"]}"#;
+            write_http_json(&mut stream, 200, origin.as_deref(), body)?;
+        }
+        _ => {
+            write_http_json(
+                &mut stream,
+                404,
+                origin.as_deref(),
+                br#"{"error":"not found"}"#,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn allowed_localhost_origin(origin: &str) -> Option<String> {
+    if origin.starts_with("http://localhost:")
+        || origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("http://[::1]:")
+    {
+        Some(origin.to_owned())
+    } else {
+        None
+    }
+}
+
+fn parse_query(query: &str) -> BTreeMap<String, String> {
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &value[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    decoded.push(byte);
+                    index += 3;
+                } else {
+                    decoded.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn write_http_empty(stream: &mut TcpStream, status: u16, origin: Option<&str>) -> Result<()> {
+    write_http_response(stream, status, origin, None, &[])
+}
+
+fn write_http_json(
+    stream: &mut TcpStream,
+    status: u16,
+    origin: Option<&str>,
+    body: &[u8],
+) -> Result<()> {
+    write_http_response(stream, status, origin, Some("application/json"), body)
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    origin: Option<&str>,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Result<()> {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        _ => "OK",
+    };
+    write!(stream, "HTTP/1.1 {status} {reason}\r\n")?;
+    if let Some(content_type) = content_type {
+        write!(stream, "Content-Type: {content_type}\r\n")?;
+    }
+    if let Some(origin) = origin {
+        write!(stream, "Access-Control-Allow-Origin: {origin}\r\n")?;
+        write!(
+            stream,
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        )?;
+        write!(stream, "Access-Control-Allow-Headers: Content-Type\r\n")?;
+    }
+    write!(stream, "Content-Length: {}\r\n", body.len())?;
+    write!(stream, "Connection: close\r\n\r\n")?;
+    stream.write_all(body)?;
+    stream.flush()?;
     Ok(())
 }
 
@@ -298,6 +546,33 @@ fn run_request(request: ApiRequest) -> Result<ApiResult> {
             Ok(ApiResult::ReviewCreate {
                 review: Box::new(review),
             })
+        }
+        ApiMethod::ReviewInbox => {
+            let store = AnvicsStore::open(&repo)?;
+            let mut items = Vec::new();
+            for thread in store.list_threads()? {
+                let status = store.agent_status(thread.id.as_str())?;
+                let latest_review = status
+                    .review_ids
+                    .last()
+                    .map(|review_id| store.show_review(review_id.as_str()))
+                    .transpose()?;
+                let latest_risk_findings = latest_review
+                    .as_ref()
+                    .map(|review| store.list_review_risk_findings(review.id.as_str()))
+                    .transpose()?
+                    .unwrap_or_default();
+                items.push(ReviewInboxItem {
+                    thread,
+                    workspaces: status.workspaces,
+                    evidence_count: status.evidence_count,
+                    review_ids: status.review_ids,
+                    publication_ids: status.publication_ids,
+                    latest_review,
+                    latest_risk_findings,
+                });
+            }
+            Ok(ApiResult::ReviewInbox { items })
         }
         ApiMethod::AgentPrepare {
             title,

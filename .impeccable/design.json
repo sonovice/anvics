@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-02T12:14:40Z",
+  "title": "Design System: Anvics",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "neutral",
+        "displayName": "Workbench Ink",
+        "canonical": "#20231f"
+      },
+      "app-bg": {
+        "role": "neutral",
+        "displayName": "Canvas Neutral",
+        "canonical": "#f7f7f4"
+      },
+      "selected": {
+        "role": "primary",
+        "displayName": "Selection Green",
+        "canonical": "#eef2e8"
+      },
+      "status-success-text": {
+        "role": "primary",
+        "displayName": "Operator Green",
+        "canonical": "#38633c"
+      },
+      "status-risk-text": {
+        "role": "tertiary",
+        "displayName": "Risk Rust",
+        "canonical": "#8a341f"
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Thread titles, selected review headings, and page-level product labels."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Task descriptions, summaries, changed paths, and review copy."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Short metadata and state labels."
+      }
+    },
+    "elevation": {
+      "strategy": "Flat by default. Use borders and tonal layers before shadows."
+    },
+    "motion": {
+      "strategy": "Stateful and restrained. Avoid page-load choreography.",
+      "durationMs": {
+        "fast": 150,
+        "normal": 200
+      }
+    },
+    "rules": [
+      "Make agent work legible to humans.",
+      "Show provenance before persuasion.",
+      "Keep Git concepts out of primary navigation.",
+      "Use status color sparingly and always with text labels."
+    ]
+  }
+}

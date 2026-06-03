@@ -3,9 +3,10 @@ use anvics_core::{
     AgentInstructionTarget, AgentLaunchPrompt, AgentLaunchTool, AgentPreparation, AgentRecovery,
     AgentSession, AgentStatus, ChangedPath, CommandEvent, CommandPolicyDecision, ConflictAnalysis,
     ConflictPreparation, CoordinationStatus, EvidenceRecord, FileEffect, NativePublication,
-    ProjectionRequest, PublicationRevertPreparation, RepoDoctorReport, RepositoryEvent,
-    RepositoryManifest, ResolutionVerification, ReviewProjection, RiskFinding, RiskScan,
-    SourceSnapshot, WorkThread, WorkspaceRestore, WorkspaceView,
+    NativePublicationId, ProjectionRequest, PublicationRevertPreparation, RepoDoctorReport,
+    RepositoryEvent, RepositoryManifest, ResolutionVerification, ReviewProjection,
+    ReviewProjectionId, RiskFinding, RiskScan, SourceSnapshot, WorkThread, WorkspaceRestore,
+    WorkspaceView,
 };
 use serde::{Deserialize, Serialize};
 
@@ -119,6 +120,7 @@ pub enum ApiMethod {
     ReviewCreate {
         thread: String,
     },
+    ReviewInbox,
     AgentPrepare {
         title: String,
         task: String,
@@ -396,6 +398,9 @@ pub enum ApiResult {
     ReviewCreate {
         review: Box<ReviewProjection>,
     },
+    ReviewInbox {
+        items: Vec<ReviewInboxItem>,
+    },
     AgentPrepare {
         preparation: Box<AgentPreparation>,
     },
@@ -494,6 +499,19 @@ pub enum ApiResult {
     Error {
         message: String,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ReviewInboxItem {
+    pub thread: WorkThread,
+    pub workspaces: Vec<WorkspaceView>,
+    pub evidence_count: usize,
+    pub review_ids: Vec<ReviewProjectionId>,
+    pub publication_ids: Vec<NativePublicationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_review: Option<ReviewProjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_risk_findings: Vec<RiskFinding>,
 }
 
 #[cfg(test)]
@@ -599,6 +617,7 @@ mod tests {
             ApiMethod::ReviewCreate {
                 thread: "thread-1".to_owned(),
             },
+            ApiMethod::ReviewInbox,
             ApiMethod::ReviewShow {
                 id: "review-1".to_owned(),
                 format: ReviewFormat::Markdown,
@@ -1243,6 +1262,17 @@ mod tests {
             },
             ApiResult::ReviewCreate {
                 review: Box::new(review.clone()),
+            },
+            ApiResult::ReviewInbox {
+                items: vec![ReviewInboxItem {
+                    thread: thread.clone(),
+                    workspaces: vec![workspace.clone()],
+                    evidence_count: 1,
+                    review_ids: vec![review_id.clone()],
+                    publication_ids: vec![publication.id.clone()],
+                    latest_review: Some(review.clone()),
+                    latest_risk_findings: vec![risk_finding.clone()],
+                }],
             },
             ApiResult::AgentPrepare {
                 preparation: Box::new(preparation),

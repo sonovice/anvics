@@ -416,10 +416,18 @@ Goal: make Anvics useful to a human supervising agent work.
 
 Surface:
 
-- Web or desktop UI over `anvicsd` API.
+- Local web UI over an opt-in `anvicsd` localhost HTTP bridge.
+- Hosted web UI over the same typed client contract.
+
+Current direction:
+
+- MVP 0.47 starts with a local HTTP bridge in `anvicsd`, separate from the Unix-socket JSON-RPC API.
+- MVP 0.48 starts the SolidStart/Tailwind operator app with a Review Inbox as the first screen.
+- Hosted account/project shell, native push sync, and hosted source/review UI remain the next hosted milestones, not prerequisites for local UI validation.
 
 Scope:
 
+- Review Inbox for pending/active agent work.
 - Publication-centric source browser.
 - Current `NativePublication` file tree.
 - Work thread list.

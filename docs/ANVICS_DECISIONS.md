@@ -369,6 +369,8 @@ These are internal product/domain objects. They are not all mandatory agent-faci
 ## UI And Product Surface
 
 - First UI is repo/workspace/history/review control plane, not full forge replacement and not agent wrapper.
+- First local UI surface is a Review Inbox over an opt-in `anvicsd` localhost HTTP bridge; the Unix-socket API remains the daemon mutation spine.
+- Hosted UI should reuse the same typed client contract, backed by hosted native Anvics repo data rather than GitHub integration.
 - Default repo UI: publication-centric source browser.
 - It shows current `NativePublication`, file tree/search, recent publication graph/history, active work by file/module, freshness/conflict indicators, review/evidence status.
 - History UI: linked work graph and publication graph, not commit log.

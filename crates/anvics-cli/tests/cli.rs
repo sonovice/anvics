@@ -1,6 +1,8 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::Command as StdCommand;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -124,6 +126,90 @@ fn repo_doctor_reports_config_classification_and_daemon_matches() {
         .stdout(predicate::str::contains(
             "Modified: dist/bundle.js (generated_untracked)",
         ));
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn daemon_http_bridge_serves_health_rpc_and_review_inbox() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("app.txt"), "base\n").unwrap();
+    anvics(dir.path(), &["repo", "init"]).assert().success();
+    anvics(dir.path(), &["snapshot", "create", "--message", "base"])
+        .assert()
+        .success();
+    let prepare = anvics(
+        dir.path(),
+        &[
+            "agent",
+            "prepare",
+            "--title",
+            "HTTP inbox",
+            "--task",
+            "Change app text",
+        ],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let workspace = value_after_prefix(&prepare, "workspace: ");
+    let workspace_path = value_after_prefix(&prepare, "workspace_path: ");
+    fs::write(format!("{workspace_path}/app.txt"), "agent edit\n").unwrap();
+    anvics(
+        dir.path(),
+        &[
+            "agent",
+            "finish",
+            "--workspace",
+            &workspace,
+            "--command",
+            "true",
+            "--exit-code",
+            "0",
+            "--summary",
+            "changed app text",
+        ],
+    )
+    .assert()
+    .success();
+
+    let socket_dir = tempdir().unwrap();
+    let socket = socket_dir.path().join("anvics.sock");
+    let http_addr = free_http_addr();
+    let mut daemon = start_daemon_with_http(&socket, &http_addr);
+    wait_for_http(&http_addr);
+
+    let health = http_request(
+        &http_addr,
+        "GET",
+        "/api/health",
+        Some("http://localhost:3000"),
+        None,
+    );
+    assert!(health.contains("\"ok\":true"));
+    assert!(health.contains("Access-Control-Allow-Origin: http://localhost:3000"));
+
+    let rpc_body = format!(
+        r#"{{"id":7,"repo":"{}","method":{{"method":"thread_list"}}}}"#,
+        json_escape(&dir.path().to_string_lossy())
+    );
+    let rpc = http_request(&http_addr, "POST", "/api/rpc", None, Some(&rpc_body));
+    assert!(rpc.contains("\"id\":7"));
+    assert!(rpc.contains("\"type\":\"thread_list\""));
+    assert!(rpc.contains("HTTP inbox"));
+
+    let inbox_path = format!(
+        "/api/review-inbox?repo={}",
+        url_encode(&dir.path().to_string_lossy())
+    );
+    let inbox = http_request(&http_addr, "GET", &inbox_path, None, None);
+    assert!(inbox.contains("\"type\":\"review_inbox\""));
+    assert!(inbox.contains("HTTP inbox"));
+    assert!(inbox.contains("\"evidence_count\":1"));
+    assert!(inbox.contains("\"latest_review\""));
+
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
@@ -3691,6 +3777,15 @@ fn start_daemon(socket: &std::path::Path) -> std::process::Child {
     daemon
 }
 
+fn start_daemon_with_http(socket: &std::path::Path, http_addr: &str) -> std::process::Child {
+    let daemon = StdCommand::new(assert_cmd::cargo::cargo_bin("anvicsd"))
+        .args(["--socket", socket.to_str().unwrap(), "--http", http_addr])
+        .spawn()
+        .unwrap();
+    wait_for_socket(socket);
+    daemon
+}
+
 fn wait_for_socket(socket: &std::path::Path) {
     let started = Instant::now();
     while !socket.exists() {
@@ -3700,6 +3795,72 @@ fn wait_for_socket(socket: &std::path::Path) {
         );
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn free_http_addr() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().to_string()
+}
+
+fn wait_for_http(addr: &str) {
+    let started = Instant::now();
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timed out waiting for HTTP bridge"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn http_request(
+    addr: &str,
+    method: &str,
+    path: &str,
+    origin: Option<&str>,
+    body: Option<&str>,
+) -> String {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let body = body.unwrap_or("");
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if let Some(origin) = origin {
+        request.push_str(&format!("Origin: {origin}\r\n"));
+    }
+    if !body.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn url_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            byte => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 #[cfg(feature = "vfs-fuse")]

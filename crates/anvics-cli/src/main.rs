@@ -592,6 +592,12 @@ enum EventsCommand {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    Start {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long, value_name = "HOST:PORT")]
+        http: Option<String>,
+    },
     Ping {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -1312,6 +1318,9 @@ fn main() -> Result<()> {
         CliCommand::Daemon {
             command: DaemonCommand::Ping { socket },
         } => ping_daemon(socket.or(daemon)),
+        CliCommand::Daemon {
+            command: DaemonCommand::Start { socket, http },
+        } => start_daemon(socket, http),
         CliCommand::Coordination {
             command: CoordinationCommand::Status { workspace },
         } => {
@@ -4199,6 +4208,40 @@ fn ping_daemon(socket: Option<PathBuf>) -> Result<()> {
             Ok(())
         }
         result => unexpected_daemon_result(result),
+    }
+}
+
+fn start_daemon(socket: PathBuf, http: Option<String>) -> Result<()> {
+    let daemon = daemon_binary_path()?;
+    let mut command = Command::new(&daemon);
+    command.arg("--socket").arg(&socket);
+    if let Some(http) = http {
+        command.arg("--http").arg(http);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("failed to start {}", daemon.display()))?;
+    if !status.success() {
+        anyhow::bail!("anvicsd exited with status {status}");
+    }
+    Ok(())
+}
+
+fn daemon_binary_path() -> Result<PathBuf> {
+    let mut path = std::env::current_exe().context("failed to resolve current executable")?;
+    path.set_file_name(if cfg!(windows) {
+        "anvicsd.exe"
+    } else {
+        "anvicsd"
+    });
+    if path.exists() {
+        Ok(path)
+    } else {
+        Ok(PathBuf::from(if cfg!(windows) {
+            "anvicsd.exe"
+        } else {
+            "anvicsd"
+        }))
     }
 }
 

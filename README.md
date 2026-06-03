@@ -18,6 +18,7 @@ Anvics is a working alpha moving toward private beta. The core loop works today:
 - review changed paths, evidence, risk notes, and overlap notes
 - publish accepted native work
 - export a legacy Git patch
+- inspect review inbox data through an opt-in localhost HTTP bridge and early web UI scaffold
 
 Materialized workspaces are the default execution surface. The FUSE/VFS projection remains optional and experimental.
 
@@ -120,10 +121,29 @@ For a real external-repo trial:
 scripts/external_beta_trial_prepare.sh
 ```
 
+## Local Review UI
+
+The first web surface is an operator Review Inbox, not a marketing site. Start the local daemon bridge:
+
+```sh
+anvics daemon start --socket /tmp/anvics.sock --http 127.0.0.1:3897
+```
+
+Then run the SolidStart app from `apps/anvics-web` with `VITE_ANVICS_REPO` pointed at an initialized Anvics repo:
+
+```sh
+cd apps/anvics-web
+VITE_ANVICS_HTTP_URL=http://127.0.0.1:3897 \
+VITE_ANVICS_REPO="$target_repo" \
+bun run dev
+```
+
+See [Local And Hosted UI](docs/UI.md) for the current bridge endpoints and hosted roadmap.
+
 ## Known Limitations
 
 - Local-only: no native sync, hosted remote, or team relay yet.
-- CLI-first: no review UI yet.
+- CLI-first: the review UI is an early scaffold and not yet a complete operator console.
 - Materialized workspaces are the default; VFS/FUSE support is opt-in and experimental.
 - Command policy is a coarse provenance gate, not a sandbox.
 - Secret scanning is intentionally conservative and can false-positive.
