@@ -9,6 +9,19 @@ Use Anvics as the source-control interface. Treat the filesystem as a compatibil
 
 An Anvics workspace may not be a Git repository. If your CLI complains about a missing Git repository, use the tool's non-Git workspace option and continue with the packet's Anvics commands.
 
+## First-Run Operator Setup
+
+If the operator asks you to "use Anvics", "set up Anvics", "run the Anvics workflow", or similar, take care of the setup loop instead of making the operator learn commands.
+
+1. Check whether the `anvics` command is available.
+2. If it is not available, look for this repository's CLI source and use the repo-local Cargo command prefix or install the CLI from source when the operator has asked for setup.
+3. Install or render repo-level agent instructions with `agent instructions --install` when appropriate and when doing so will not overwrite existing guidance.
+4. Initialize the target repo only when the operator has clearly chosen that repo or asks for a disposable trial.
+5. Create the base snapshot, prepare the workspace, and show the operator the packet/launch guidance.
+6. Keep the human-facing summary conceptual: active work, evidence, risk, recovery, review, publish/export. Do not dump every CLI command unless the operator asks.
+
+The intended onboarding is: the human installs or points you at this skill, then you drive the Anvics workflow and explain the decisions.
+
 ## Core Workflow
 
 1. Create or join a `thread` for the task.
