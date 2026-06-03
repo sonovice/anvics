@@ -6,19 +6,25 @@ Anvics gives agents isolated workspaces, durable snapshots, compact evidence, re
 
 ## The Short Version
 
-Use the Anvics skill and let your agent drive the workflow.
+Invoke the Anvics skill and let your agent drive the workflow.
 
-1. Give your agent this skill: [`skills/anvics-skill/SKILL.md`](skills/anvics-skill/SKILL.md).
-2. Ask it:
+In Codex-style skill syntax:
 
 ```text
-Read the Anvics skill and use Anvics as the source-control workflow.
-Set up or verify the Anvics CLI if needed.
-Prepare an isolated workspace for the task, preserve progress with checkpoints,
-show me the review/evidence/risk state, and only publish/export after I approve.
+$anvics
 ```
 
-That is the intended beta onboarding. The human should not have to memorize Anvics commands to start.
+In slash-command style agents:
+
+```text
+/anvics
+```
+
+Then say the task in normal language.
+
+If the agent cannot see named repo skills yet, point it at [`skills/anvics-skill/SKILL.md`](skills/anvics-skill/SKILL.md) once. This repository also provides a repo-local alias at [`.agents/skills/anvics/SKILL.md`](.agents/skills/anvics/SKILL.md) for agents that discover `.agents` skills.
+
+That is the intended beta onboarding. The human should not paste a long instruction block or memorize Anvics commands to start.
 
 ## What The Agent Should Do
 
